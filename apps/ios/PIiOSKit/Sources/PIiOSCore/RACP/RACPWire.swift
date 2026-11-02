@@ -145,7 +145,16 @@ public struct RACPErrorBody: Decodable, Equatable, Sendable {
     }
 
     /// 归一为契约 §7 的错误码；未列出的原样保留（不静默吞掉）。
-    public var normalizedCode: RACPErrorCode { RACPErrorCode(raw: code) }
+    ///
+    /// JSON-RPC 的 `code` 是数字（如 -32008），业务错误码放在 `data.code`
+    /// （如 "CURSOR_EXPIRED"）。必须优先取业务码，否则所有错误都会落到
+    /// `.unknown("-32008")`，重试/刷新语义全部失效。
+    public var normalizedCode: RACPErrorCode {
+        if let business = data?.value(at: ["code"])?.stringValue, !business.isEmpty {
+            return RACPErrorCode(raw: business)
+        }
+        return RACPErrorCode(raw: code)
+    }
 }
 
 /// 契约 §7 的错误码集合。

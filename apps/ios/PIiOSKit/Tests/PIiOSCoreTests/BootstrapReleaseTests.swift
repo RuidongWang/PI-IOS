@@ -48,14 +48,14 @@ final class BootstrapReleaseTests: XCTestCase {
     func testSelfHostedPatchedReleasePinsBothArchitectureChecksums() throws {
         XCTAssertEqual(
             PiHostRelease.defaultPatchedBaseURL,
-            "https://github.com/RuidongWang/PI-adaptor/releases/download/pi-adaptor-v2.0.1"
+            "https://github.com/RuidongWang/PI-adaptor/releases/download/\(PiHostRelease.patchedReleaseTag)"
         )
         let arm64 = try XCTUnwrap(PiHostRelease.patched(target: .linuxArm64))
         XCTAssertEqual(arm64.version, PiHostRelease.patchedReleaseVersion)
         XCTAssertEqual(arm64.pinnedChecksum, PiHostRelease.patchedChecksums[.linuxArm64])
         XCTAssertEqual(
             arm64.artifactURL,
-            "\(PiHostRelease.defaultPatchedBaseURL)/pi-adaptor-2.0.1-linux-arm64.tar.gz"
+            "\(PiHostRelease.defaultPatchedBaseURL)/pi-adaptor-\(PiHostRelease.patchedReleaseVersion)-linux-arm64.tar.gz"
         )
         XCTAssertEqual(
             arm64.checksumURL,

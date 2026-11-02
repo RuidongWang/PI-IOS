@@ -210,6 +210,7 @@ CHECKSUM_FILE="$WORK/$ARTIFACT_NAME.sha256"
 TRANSACTION_ACTIVE="$WORK/transaction.active"
 TRANSACTION_PREVIOUS="$WORK/transaction.previous"
 TRANSACTION_SERVICE="$WORK/transaction.service-active"
+TRANSACTION_ENABLED="$WORK/transaction.service-enabled"
 TRANSACTION_INSTALL_DIR="$WORK/transaction.install-dir"
 TRANSACTION_ROLLBACK_SCRIPT="$WORK/transaction.rollback-install.sh"
 TRANSACTION_RECEIPT_BACKUP="$WORK/transaction.receipt.previous"
@@ -227,6 +228,7 @@ STAGE=""
 INSTALL_DIR=""
 PREVIOUS_CURRENT_TARGET="none"
 PREVIOUS_SERVICE_ACTIVE=0
+PREVIOUS_SERVICE_ENABLED="disabled"
 CURRENT_SERVICE_STOPPED=0
 LEGACY_UNITS_STOPPED=""
 LEGACY_UNITS_JSON="[]"
@@ -350,6 +352,16 @@ record_transaction() {
   printf '%s\n' "$PREVIOUS_SERVICE_ACTIVE" >"$TRANSACTION_SERVICE"
   chmod 600 "$TRANSACTION_SERVICE"
 
+  # 安装流程会 `systemctl --user enable`，回滚时必须恢复原来的 enable 状态，
+  # 否则一次失败的安装会留下开机自启的 unit。
+  PREVIOUS_SERVICE_ENABLED=$(systemctl --user is-enabled "$UNIT_NAME" 2>/dev/null | sed -n '1p')
+  [ -n "$PREVIOUS_SERVICE_ENABLED" ] || PREVIOUS_SERVICE_ENABLED="disabled"
+  case "$PREVIOUS_SERVICE_ENABLED" in
+    *[!A-Za-z0-9-]*) PREVIOUS_SERVICE_ENABLED="unknown" ;;
+  esac
+  printf '%s\n' "$PREVIOUS_SERVICE_ENABLED" >"$TRANSACTION_ENABLED"
+  chmod 600 "$TRANSACTION_ENABLED"
+
   printf '%s\n' "$INSTALL_DIR" >"$TRANSACTION_INSTALL_DIR"
   chmod 600 "$TRANSACTION_INSTALL_DIR"
   cp "$ROLLBACK_SCRIPT" "$TRANSACTION_ROLLBACK_SCRIPT" 2>/dev/null || {
@@ -405,6 +417,32 @@ restore_legacy_units() {
   [ "$restore_ok" = 1 ]
 }
 
+restore_service_enablement() {
+  previous_enabled=$PREVIOUS_SERVICE_ENABLED
+  [ ! -f "$TRANSACTION_ENABLED" ] || previous_enabled=$(cat "$TRANSACTION_ENABLED" 2>/dev/null || printf 'disabled')
+  case "$previous_enabled" in
+    enabled|linked|linked-runtime|alias)
+      systemctl --user enable "$UNIT_NAME" >/dev/null 2>&1 || return 1
+      ;;
+    enabled-runtime)
+      systemctl --user disable "$UNIT_NAME" >/dev/null 2>&1 || return 1
+      systemctl --user enable --runtime "$UNIT_NAME" >/dev/null 2>&1 || return 1
+      ;;
+    disabled|masked|masked-runtime|not-found)
+      # 安装可能在 enable 之前就失败（例如解包/校验阶段），此时 unit 还没被
+      # 启用甚至还没写入；先确认当前确已启用再 disable，避免把一次本不需要
+      # 回滚的失败误报成 rollback-failed。
+      if systemctl --user is-enabled "$UNIT_NAME" >/dev/null 2>&1; then
+        systemctl --user disable "$UNIT_NAME" >/dev/null 2>&1 || return 1
+      fi
+      ;;
+    *)
+      # static/indirect/generated/transient 等状态没有可恢复的持久 enablement。
+      ;;
+  esac
+  return 0
+}
+
 rollback_transaction() {
   [ "$TRANSACTION_STARTED" = 1 ] || [ -f "$TRANSACTION_ACTIVE" ] || return 0
   ROLLBACK_RESULT="attempted"
@@ -441,6 +479,8 @@ rollback_transaction() {
     rm -f "$RECEIPT"
   fi
 
+  restore_service_enablement || rollback_ok=0
+
   if [ "$PREVIOUS_SERVICE_ACTIVE" = 1 ]; then
     if ! systemctl --user start "$UNIT_NAME" >/dev/null 2>&1 ||
        ! systemctl --user is-active --quiet "$UNIT_NAME" >/dev/null 2>&1; then
@@ -458,7 +498,7 @@ rollback_transaction() {
   if [ "$rollback_ok" = 1 ]; then
     ROLLBACK_RESULT="succeeded"
     rm -f "$TRANSACTION_ACTIVE" "$TRANSACTION_PREVIOUS" "$TRANSACTION_SERVICE" \
-      "$TRANSACTION_INSTALL_DIR" "$TRANSACTION_ROLLBACK_SCRIPT" \
+      "$TRANSACTION_ENABLED" "$TRANSACTION_INSTALL_DIR" "$TRANSACTION_ROLLBACK_SCRIPT" \
       "$TRANSACTION_RECEIPT_BACKUP" "$TRANSACTION_LEGACY"
     TRANSACTION_STARTED=0
     return 0
@@ -616,6 +656,7 @@ if [ -f "$TRANSACTION_ACTIVE" ]; then
   TRANSACTION_STARTED=1
   PREVIOUS_CURRENT_TARGET=$(cat "$TRANSACTION_PREVIOUS" 2>/dev/null || printf 'none')
   PREVIOUS_SERVICE_ACTIVE=$(cat "$TRANSACTION_SERVICE" 2>/dev/null || printf '0')
+  PREVIOUS_SERVICE_ENABLED=$(cat "$TRANSACTION_ENABLED" 2>/dev/null || printf 'disabled')
   INSTALL_DIR=$(cat "$TRANSACTION_INSTALL_DIR" 2>/dev/null || true)
   refresh_legacy_units_json
   if ! rollback_transaction; then
@@ -840,6 +881,8 @@ SERVICE_STATE="written"
 write_state "write-unit" running "" "written" || die "bootstrap-permissions"
 systemctl --user daemon-reload >/dev/null 2>&1 || die "unit-failed"
 loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || die "unit-failed"
+# 只 start 不 enable 的话，重启后服务不会自动拉起，设备会失联。
+systemctl --user enable "$UNIT_NAME" >/dev/null 2>&1 || die "unit-failed"
 
 progress "start-pair"
 systemctl --user stop "$UNIT_NAME" >/dev/null 2>&1 || true
@@ -1039,7 +1082,7 @@ write_state "done" ok "" "active" || die "receipt-failed"
 ROLLBACK_RESULT="not-needed"
 TRANSACTION_STARTED=0
 rm -f "$TRANSACTION_ACTIVE" "$TRANSACTION_PREVIOUS" "$TRANSACTION_SERVICE" \
-  "$TRANSACTION_INSTALL_DIR" "$TRANSACTION_ROLLBACK_SCRIPT" \
+  "$TRANSACTION_ENABLED" "$TRANSACTION_INSTALL_DIR" "$TRANSACTION_ROLLBACK_SCRIPT" \
   "$TRANSACTION_RECEIPT_BACKUP" "$TRANSACTION_LEGACY"
 """#
     }

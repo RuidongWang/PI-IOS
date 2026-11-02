@@ -834,9 +834,14 @@ struct ConversationScreen: View {
     }
 
     private func cachedApprovalSummary(_ approval: OfflineSessionApproval) -> String {
+        var lines: [String] = []
         if let tool = approval.payload.value(at: ["toolName"])?.stringValue {
-            return "工具：\(tool)"
+            lines.append("工具：\(tool)")
         }
+        if let preview = ApprovalInputPreview.text(from: approval.payload) {
+            lines.append(preview)
+        }
+        if !lines.isEmpty { return lines.joined(separator: "\n\n") }
         if let text = approval.payload.value(at: ["summary"])?.stringValue {
             return text
         }
@@ -934,7 +939,14 @@ struct ConversationScreen: View {
     }
 
     private func summary(of card: RACPApprovalRequest) -> String {
-        if let tool = card.toolName { return "工具：\(tool)" }
+        // 工具审批必须先让用户看到要执行的命令/参数，再决定是否放行；
+        // 只显示工具名会让审批门禁形同虚设。
+        var lines: [String] = []
+        if let tool = card.toolName { lines.append("工具：\(tool)") }
+        if let preview = ApprovalInputPreview.text(from: card.payload) {
+            lines.append(preview)
+        }
+        if !lines.isEmpty { return lines.joined(separator: "\n\n") }
         if let text = card.payload.value(at: ["summary"])?.stringValue { return text }
         if let text = card.payload.value(at: ["detail"])?.stringValue { return text }
         return "服务器没有给出可显示的摘要（id \(card.id)）"

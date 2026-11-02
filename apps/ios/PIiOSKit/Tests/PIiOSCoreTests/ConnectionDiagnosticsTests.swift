@@ -264,6 +264,39 @@ final class ConnectionDiagnosticsTests: XCTestCase {
         )
     }
 
+    func testNumericWireCodePrefersBusinessCodeFromData() throws {
+        func decode(_ json: String) throws -> RACPErrorBody {
+            try JSONDecoder().decode(RACPErrorBody.self, from: Data(json.utf8))
+        }
+
+        // Host 把业务码放在 data.code，JSON-RPC code 只是数字。
+        XCTAssertEqual(
+            try decode(#"{"code":-32008,"message":"x","data":{"code":"CURSOR_EXPIRED"}}"#).normalizedCode,
+            .cursorExpired
+        )
+        XCTAssertEqual(
+            try decode(#"{"code":-32001,"message":"x","data":{"code":"UNAUTHORIZED"}}"#).normalizedCode,
+            .unauthorized
+        )
+        XCTAssertEqual(
+            try decode(#"{"code":-32012,"message":"x","data":{"code":"APPROVAL_STALE"}}"#).normalizedCode,
+            .approvalStale
+        )
+        // data.code 缺失或不是字符串时退回数字码，仍保持 unknown，不做猜测。
+        XCTAssertEqual(
+            try decode(#"{"code":-32008,"message":"x"}"#).normalizedCode,
+            .unknown("-32008")
+        )
+        XCTAssertEqual(
+            try decode(#"{"code":-32008,"message":"x","data":{"code":123}}"#).normalizedCode,
+            .unknown("-32008")
+        )
+        XCTAssertEqual(
+            try decode(#"{"code":-32099,"message":"x","data":{"code":"FUTURE_SERVER_CODE"}}"#).normalizedCode,
+            .unknown("FUTURE_SERVER_CODE")
+        )
+    }
+
     func testAllConnectionCategoriesDiscardUntrustedReasonText() {
         let cases: [(String, String, ConnectionFailureKind)] = [
             ("DNS_FAILURE", "getaddrinfo failed", .dns),

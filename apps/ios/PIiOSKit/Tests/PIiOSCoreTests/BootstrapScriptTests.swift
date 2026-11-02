@@ -91,10 +91,28 @@ final class BootstrapScriptTests: XCTestCase {
         XCTAssertTrue(script.contains(#"unit_path="$unit_dir/$UNIT_NAME""#))
         XCTAssertTrue(script.contains(#"systemctl --user daemon-reload"#))
         XCTAssertTrue(script.contains(#"loginctl enable-linger"#))
+        XCTAssertTrue(script.contains(#"systemctl --user enable "$UNIT_NAME""#))
         XCTAssertTrue(script.contains(#"ExecStart="%s" "%s/current/dist/main.js""#))
         XCTAssertTrue(script.contains(#"systemctl --user start "$UNIT_NAME""#))
         XCTAssertTrue(script.contains(#"systemctl --user is-active --quiet "$UNIT_NAME""#))
         XCTAssertTrue(script.contains(#"\"reason\":\"$details_reason\""#))
+    }
+
+    func testEnablementIsRecordedAndRolledBack() throws {
+        let script = BootstrapScriptBuilder.build(try configuration())
+        let daemonReload = try XCTUnwrap(script.range(of: #"systemctl --user daemon-reload"#)?.lowerBound)
+        // 安装流程里的 enable 紧跟在“只 start 不 enable”注释之后；
+        // 前面回滚函数里也有同名命令，必须用注释锚定。
+        let installEnable = try XCTUnwrap(script.range(of: #"# 只 start 不 enable 的话"#)?.lowerBound)
+        let startUnit = try XCTUnwrap(script.range(of: #"progress "start-unit""#)?.lowerBound)
+        XCTAssertLessThan(daemonReload, installEnable)
+        XCTAssertLessThan(installEnable, startUnit)
+        XCTAssertTrue(script.contains(#"systemctl --user enable "$UNIT_NAME" >/dev/null 2>&1 || die "unit-failed""#))
+        // 安装前记录原 enable 状态，回滚时按原状态恢复。
+        XCTAssertTrue(script.contains(#"PREVIOUS_SERVICE_ENABLED=$(systemctl --user is-enabled "$UNIT_NAME""#))
+        XCTAssertTrue(script.contains(#"restore_service_enablement || rollback_ok=0"#))
+        XCTAssertTrue(script.contains(#"TRANSACTION_ENABLED="$WORK/transaction.service-enabled""#))
+        try assertShellParses(script)
     }
 
     func testArtifactResumeAndFailurePrecisionArePresent() throws {
