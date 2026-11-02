@@ -7,7 +7,6 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
     case dark
 
     static let storageKey = "pi.appearance"
-
     var id: String { rawValue }
 
     var title: String {
@@ -33,5 +32,26 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
         case .light: return .light
         case .dark: return .dark
         }
+    }
+}
+
+/// 外观偏好的单一事实源（DEF-R4-002）。
+///
+/// 之前浮层与根视图各持一份 `@AppStorage`：写入只保证落 `UserDefaults`，
+/// 另一份 storage 不一定在同一帧收到变更，于是出现「选中标记动了、界面没变」。
+/// 改为全局共享一个 store：选择即写 `mode`（同步持久化到原 storage key），
+/// 根视图 `preferredColorScheme` 立即随 `@Published` 更新。
+@MainActor
+final class AppearanceStore: ObservableObject {
+    @Published var mode: AppearanceMode {
+        didSet {
+            guard mode != oldValue else { return }
+            UserDefaults.standard.set(mode.rawValue, forKey: AppearanceMode.storageKey)
+        }
+    }
+
+    init(defaults: UserDefaults = .standard) {
+        let raw = defaults.string(forKey: AppearanceMode.storageKey)
+        self.mode = AppearanceMode(rawValue: raw ?? "") ?? .system
     }
 }

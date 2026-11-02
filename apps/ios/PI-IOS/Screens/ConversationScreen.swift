@@ -462,8 +462,12 @@ struct ConversationScreen: View {
                         }
                 }
             }
-            if !session.activeItems.isEmpty {
-                Text("正在生成 \(session.activeItems.count) 条内容…")
+            // DEF-R4-005：纯工具长任务（如 sleep）运行期间 activeItems 为空，
+            // 只按 activeItems 判断会缺「正在生成…」状态条；改与头部同一判据 isTurnRunning。
+            if session.isTurnRunning {
+                Text(session.activeItems.isEmpty
+                     ? "正在生成内容…"
+                     : "正在生成 \(session.activeItems.count) 条内容…")
                     .font(PIFont.caption)
                     .foregroundStyle(PIColor.text2)
                     .accessibilityIdentifier("conversation.streamingCount")
@@ -1054,7 +1058,7 @@ struct ConversationScreen: View {
         return VStack(alignment: .leading, spacing: PISpacing.s8) {
             composerConfigurationChips
             if case .queue = session.sendAdmission {
-                Text("当前 turn 仍在运行：发送会排成下一条指令（P0 不支持改写正在运行的 turn）")
+                Text("当前 turn 仍在运行：发送会排成下一条指令")
                     .font(PIFont.meta)
                     .foregroundStyle(PIColor.text2)
             }

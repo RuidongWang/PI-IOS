@@ -5,6 +5,7 @@ import PIiOSCore
 /// 根页切换只换根，不压栈；抽屉是浮层，关闭后回到原屏。
 struct AppRootView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var connection: ConnectionModel
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -19,6 +20,13 @@ struct AppRootView: View {
         }
         .animation(.easeOut(duration: 0.2), value: model.isSidebarOpen)
         .overlay(alignment: .top) { toastLayer }
+        // 指纹核对 / 指纹变化浮层放在根视图（DEF-R4-004）：它可能在任意页面由
+        // 后台重连触发，不能只在服务器页或安装页可见时才呈现。
+        .sheet(item: $connection.hostKeyPrompt) { prompt in
+            HostKeyConfirmSheet(prompt: prompt) { confirmation in
+                connection.respondHostKey(confirmation, operationID: prompt.operationID)
+            }
+        }
         .task(id: model.toast?.id) {
             guard model.toast != nil else { return }
             do {

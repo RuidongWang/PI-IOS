@@ -104,8 +104,12 @@ final class AppModel: ObservableObject {
         observeTunnelState()
         observeRemoteMetadata()
         if usesUITestFixture {
-            root = .conversation
-            isSidebarOpen = true
+            // 夹具默认从会话页开始，便于会话类用例直接进入内容；
+            // 空夹具（G-01）没有主机，仍按 LandingRule 落在设置页空态。
+            if !hosts.isEmpty {
+                root = .conversation
+                isSidebarOpen = true
+            }
             return
         }
         Task { [weak self] in

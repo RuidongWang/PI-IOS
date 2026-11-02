@@ -11,6 +11,12 @@ enum SettingsRoute: Hashable {
     case skills
 }
 
+/// 触发 systemd 状态刷新的组合键：host 或在线状态任一变化都要重查（DEF-R4-001）。
+private struct HostUnitRefreshTrigger: Equatable {
+    let hostID: UUID?
+    let isOnline: Bool
+}
+
 /// S-03 设置（根）。分组：服务器 / 模型 / 本机。
 ///
 /// 本增量可真实使用的部分：主机列表与增删改、外观、离线缓存上限、删除 host 的二次确认。
@@ -18,7 +24,7 @@ enum SettingsRoute: Hashable {
 struct SettingsScreen: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var connection: ConnectionModel
-    @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
+    @EnvironmentObject private var appearanceStore: AppearanceStore
 
     @State private var path: [SettingsRoute] = []
     @State private var showingAppearanceSheet = false
@@ -30,7 +36,7 @@ struct SettingsScreen: View {
     @State private var hostUnitRequestID: UUID?
 
     private var appearance: AppearanceMode {
-        AppearanceMode(rawValue: appearanceRaw) ?? .system
+        appearanceStore.mode
     }
 
     var body: some View {
@@ -69,6 +75,7 @@ struct SettingsScreen: View {
             }
             .sheet(isPresented: $showingAppearanceSheet) {
                 AppearanceSheet()
+                    .environmentObject(appearanceStore)
             }
             .sheet(isPresented: $showingCacheLimitSheet) {
                 CacheLimitSheet(current: model.offlineCacheLimit) { limit in
@@ -89,7 +96,11 @@ struct SettingsScreen: View {
             } message: {
                 Text("将清除本机保存的配对记录与设备凭证；服务器上的 PI-adaptor 安装、运行与会话不受影响。")
             }
-            .task(id: model.currentHost?.id) {
+            // DEF-R4-001：host 切换或隧道回到在线时都重查一次 systemd 状态，
+            // 避免停服→恢复后仍展示上一次缓存的 inactive。
+            .task(id: HostUnitRefreshTrigger(hostID: model.currentHost?.id, isOnline: connection.state.isOnline)) {
+                // systemd 查询走独立 SSH exec，离线时也能查（SET-05 要求离线可读）；
+                // 触发键仍含在线状态，保证离线→在线后自动重查（DEF-R4-001）。
                 await refreshHostUnitStatus()
             }
         }
@@ -299,7 +310,7 @@ struct SettingsScreen: View {
                         Text("Host 离线时的排查")
                             .font(PIFont.captionStrong)
                             .foregroundStyle(PIColor.text2)
-                        Text("在服务器上确认服务状态并重启：systemctl --user restart pi-adaptor.service。App 不会自动重启服务器上的进程。")
+                        Text("在服务器上重启：systemctl --user restart pi-adaptor.service")
                             .font(PIFont.caption)
                             .foregroundStyle(PIColor.text3)
                             .fixedSize(horizontal: false, vertical: true)
@@ -317,7 +328,7 @@ struct SettingsScreen: View {
     }
 
     private var tunnelFooter: String {
-        "隧道是 SSH `direct-tcpip` 到服务器 127.0.0.1:<PI-adaptor 端口>，在其上跑 RACP WebSocket。断开后会自动按 1s/2s/4s/8s 退避重连。"
+        "断开后按 1s/2s/4s/8s 自动重连。"
     }
 
     private func refreshHostUnitStatus() async {
@@ -367,7 +378,7 @@ struct SettingsScreen: View {
     private var modelsSection: some View {
         PIGroup(
             "模型",
-            footer: "模型清单保存在本机；API Key 在导入后只保存在服务器。"
+            footer: "模型清单保存在本机；API Key 只保存在服务器。"
         ) {
             PIListRow(
                 title: "模型服务",
@@ -395,7 +406,7 @@ struct SettingsScreen: View {
     }
 
     private var skillsSection: some View {
-        PIGroup("Skill", footer: "全局 Skill 保存在服务器；更新后新 turn 使用新版本。") {
+        PIGroup("Skill") {
             PIListRow(
                 title: "全局 Skill",
                 subtitle: connection.state.isOnline ? "安装、更新、删除服务器 Skill" : "连接 Host 后可管理",
@@ -409,7 +420,7 @@ struct SettingsScreen: View {
     // MARK: - 本机
 
     private var deviceSection: some View {
-        PIGroup("本机", footer: "外观偏好与缓存上限只存本机，不随服务器同步，也不依赖连接状态。") {
+        PIGroup("本机") {
             PIListRow(
                 title: "外观",
                 subtitle: appearance.title,
@@ -448,7 +459,7 @@ struct SettingsScreen: View {
             Text("不会收到后台推送")
                 .font(PIFont.captionStrong)
                 .foregroundStyle(PIColor.text2)
-            Text("产品未接入 APNs：需要自己打开 App 才会拉取服务器状态与新消息。")
+            Text("打开 App 时才会刷新服务器状态与新消息。")
                 .font(PIFont.caption)
                 .foregroundStyle(PIColor.text3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -463,7 +474,7 @@ struct SettingsScreen: View {
 
 private struct AppearanceSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
+    @EnvironmentObject private var appearanceStore: AppearanceStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: PISpacing.s16) {
@@ -480,10 +491,10 @@ private struct AppearanceSheet: View {
                     PIOptionRow(
                         title: mode.title,
                         subtitle: mode.detail,
-                        isSelected: appearanceRaw == mode.rawValue,
+                        isSelected: appearanceStore.mode == mode,
                         showsDivider: index < AppearanceMode.allCases.count - 1
                     ) {
-                        appearanceRaw = mode.rawValue
+                        appearanceStore.mode = mode
                     }
                 }
             }
@@ -495,6 +506,9 @@ private struct AppearanceSheet: View {
         .padding(.bottom, PIMetrics.safeBottom)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(PIColor.bg)
+        // 浮层自身也跟随选择切换（DEF-R4-002）：只靠根视图的 preferredColorScheme
+        // 在部分系统版本下不会立即传到已呈现的 sheet。
+        .preferredColorScheme(appearanceStore.mode.colorScheme)
         .presentationDetents([.height(430)])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(PIRadius.sheet)

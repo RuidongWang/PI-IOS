@@ -22,11 +22,15 @@ struct UITestFixture {
     var supportsFixtureInterrupt = false
     var hostUnitSnapshot: HostUnitSnapshot? = nil
     var connectionState: RACPTunnelState? = nil
+    /// 夹具没有真实 RACP 连接；SET-04 需要覆盖「服务器确认后取消配对」的 UI 路径，
+    /// 因此由夹具显式声明撤销会成功，而不是让 `revokeThisDevice` 因缺 client 报离线。
+    var supportsFixtureRevoke = false
 
     static var current: Self? {
 #if DEBUG
         switch ProcessInfo.processInfo.environment["PI_IOS_UI_FIXTURE_SCENARIO"] {
         case "offline-two-hosts": return offlineTwoHosts()
+        case "empty-state": return emptyState()
         case "offline-cache-205": return offlineCache205()
         case "online-two-sessions": return onlineTwoSessions()
         case "online-reading-two-sessions": return onlineReadingTwoSessions()
@@ -47,6 +51,11 @@ struct UITestFixture {
     }
 
 #if DEBUG
+    /// 真正的首次启动空态：不受模拟器上残留的 state-v1.json 影响（G-01）。
+    private static func emptyState() -> Self {
+        Self(state: PersistedState(), cache: OfflineSessionCacheSnapshot())
+    }
+
     private static func onlineReadingTwoSessions() -> Self {
         var fixture = onlineTwoSessions()
         for summary in fixture.catalog!.sessions {
@@ -570,7 +579,7 @@ struct UITestFixture {
             lastSessionByHost: [hostID.uuidString: "S1"],
             lastProjectByHost: [hostID.uuidString: projectID]
         )
-        return Self(
+        var fixture = Self(
             state: state, cache: OfflineSessionCacheSnapshot(),
             catalog: Catalog(
                 projects: projects, sessions: sessions,
@@ -581,6 +590,34 @@ struct UITestFixture {
                 )
             )
         )
+        fixture.supportsFixtureRevoke = true
+        for summary in sessions {
+            var snapshot = RACPSessionView.empty
+            snapshot.sessionId = summary.id
+            snapshot.summary = summary
+            snapshot.revision = 1
+            snapshot.replayComplete = true
+            snapshot.cursor = RACPCursor(epoch: "fixture-online-\(summary.id)", sequence: 1)
+            snapshot.items = [
+                RACPItem(id: "fixture-online-item-\(summary.id)", payload: .object([
+                    "id": .string("fixture-online-item-\(summary.id)"),
+                    "role": .string("assistant"),
+                    "text": .string("Fixture history for \(summary.id)"),
+                ])),
+            ]
+            if summary.id == "S2" {
+                snapshot.activeItems = [
+                    RACPItem(id: "fixture-online-running-s2", payload: .object([
+                        "id": .string("fixture-online-running-s2"),
+                        "role": .string("assistant"),
+                        "text": .string("S2 is running"),
+                    ])),
+                ]
+                snapshot.runningTurnId = "turn-s2"
+            }
+            fixture.sessionSnapshots[summary.id] = snapshot
+        }
+        return fixture
     }
 #endif
 

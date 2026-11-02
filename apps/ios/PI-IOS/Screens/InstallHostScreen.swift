@@ -63,11 +63,7 @@ struct InstallHostScreen: View {
         .piPageBackground()
         .piDetailNavBar("安装 PI-adaptor")
         .onAppear(perform: seedPort)
-        .sheet(item: $connection.hostKeyPrompt) { prompt in
-            HostKeyConfirmSheet(prompt: prompt) { confirmation in
-                connection.respondHostKey(confirmation, operationID: prompt.operationID)
-            }
-        }
+        // 指纹核对浮层统一由 AppRootView 呈现（DEF-R4-004）。
         .sheet(isPresented: $showingLog) {
             InstallHostLogSheet(coordinator: coordinator) {
                 await coordinator.loadLog(model: model, connection: connection, hostID: hostID)
@@ -149,7 +145,7 @@ struct InstallHostScreen: View {
                 Text("v\(receipt.version) · 端口 \(receipt.hostPort)")
                     .font(PIFont.listTitle)
                     .foregroundStyle(PIColor.text)
-                Text("完成于 \(receipt.completedAt.formatted(date: .abbreviated, time: .shortened))。再次安装时服务器会核对 PI-adaptor 的 install receipt、完整资产摘要和安装树。")
+                Text("完成于 \(receipt.completedAt.formatted(date: .abbreviated, time: .shortened))。再次安装会复用已有安装树，除非勾选强制重装。")
                     .font(PIFont.caption)
                     .foregroundStyle(PIColor.text3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -160,7 +156,7 @@ struct InstallHostScreen: View {
     private var configurationCard: some View {
         PIGroup(
             "安装参数",
-            footer: "端口是服务器 127.0.0.1 上的 PI-adaptor RACP 监听端口，不是 SSH 端口。安装成功后会自动写回本机服务器记录。"
+            footer: "端口是服务器 127.0.0.1 上的监听端口，不是 SSH 端口；安装成功后自动写回服务器记录。"
         ) {
             VStack(alignment: .leading, spacing: PISpacing.s12) {
                 PIFormField(
@@ -175,7 +171,7 @@ struct InstallHostScreen: View {
                         .focused($portFocused)
                         .accessibilityIdentifier("installHost.port")
                 }
-                Text("固定版本：PI-adaptor \(ConnectionModel.defaultHostInstallReleaseVersion) · 自动按 uname -m 选择 linux-x64 / linux-arm64")
+                Text("固定版本：PI-adaptor \(ConnectionModel.defaultHostInstallReleaseVersion) · 自动匹配 CPU 架构")
                     .font(PIFont.caption)
                     .foregroundStyle(PIColor.text3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -259,7 +255,7 @@ struct InstallHostScreen: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if coordinator.failureCode == .pairFailed {
-                    Text("安装器会在配对失败后恢复原 current 和服务状态；请重试以启动新的 PI-adaptor 配对进程。")
+                    Text("配对失败后服务器已恢复原状态；重试会重新启动配对。")
                         .font(PIFont.caption)
                         .foregroundStyle(PIColor.text2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -299,7 +295,7 @@ struct InstallHostScreen: View {
                     }
                     .accessibilityIdentifier("installHost.retrySudo")
                 }
-                Text("重试会生成新的 attemptId；服务器上的有效安装回执和已下载分片会继续复用。")
+                Text("重试会复用已下载的分片与有效安装回执。")
                     .font(PIFont.caption)
                     .foregroundStyle(PIColor.text3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -313,7 +309,7 @@ struct InstallHostScreen: View {
                 VStack(alignment: .leading, spacing: PISpacing.s4) {
                     Text("强制重装（忽略已装版本）")
                         .font(PIFont.captionStrong)
-                    Text("勾选后不会复用服务器上已有的安装树：重新下载并激活当前发布包。版本没变但发布字节变了时必须勾选。")
+                    Text("勾选后重新下载并激活当前发布包；版本没变但发布字节变了时必须勾选。")
                         .font(PIFont.metaSmall)
                         .foregroundStyle(PIColor.text3)
                         .fixedSize(horizontal: false, vertical: true)
@@ -408,7 +404,7 @@ struct InstallHostScreen: View {
             Text("安全边界")
                 .font(PIFont.captionStrong)
                 .foregroundStyle(PIColor.text2)
-            Text("配对令牌只从 0600 的远端文件读入内存，并立即从服务器删除；设备令牌只写本机 Keychain。API Key、设备令牌与配对令牌都不会进入安装日志或本机状态文件。")
+            Text("配对令牌只在内存中使用，随即从服务器删除；设备令牌只写入本机 Keychain。令牌与 API Key 都不会进入日志或状态文件。")
                 .font(PIFont.caption)
                 .foregroundStyle(PIColor.text3)
                 .fixedSize(horizontal: false, vertical: true)

@@ -87,6 +87,9 @@ struct HostKeyPrompt: Identifiable, Equatable {
 @MainActor
 final class ConnectionModel: ObservableObject {
     static let deviceRevokedMessage = "服务器已撤销该设备的访问权限"
+    /// 请求已发出但连接在回执前中断：服务器可能已经撤销，不能当成「未撤销」或「离线」。
+    static let deviceRevokeUnconfirmedMessage =
+        "撤销结果未确认：连接在服务器确认前中断，本机凭证尚未改动。请重新连接后确认设备状态，再决定是否重试。"
 
     nonisolated static let defaultHostInstallReleaseVersion = PiHostRelease.patchedReleaseVersion
     nonisolated static let defaultHostInstallReleaseBaseURL = PiHostRelease.defaultPatchedBaseURL
@@ -144,6 +147,7 @@ final class ConnectionModel: ObservableObject {
     private var fixtureHostUnitSnapshot: HostUnitSnapshot?
     private var fixtureCatalogs: [UUID: UITestFixture.Catalog] = [:]
     private var fixtureConnectionState: RACPTunnelState?
+    private var fixtureSupportsRevoke = false
 
     init(fixture: UITestFixture? = nil) {
         usesUITestFixture = fixture != nil
@@ -152,6 +156,7 @@ final class ConnectionModel: ObservableObject {
             fixtureHostUnitSnapshot = fixture.hostUnitSnapshot
             fixtureCatalogs = fixture.catalogs
             fixtureConnectionState = fixture.connectionState
+            fixtureSupportsRevoke = fixture.supportsFixtureRevoke
             cacheStore = SessionCacheStore(
                 offlineCacheLimit: PersistedState.defaultOfflineCacheLimit,
                 inMemory: fixture.cache
@@ -1516,6 +1521,21 @@ final class ConnectionModel: ObservableObject {
                 )
             )
         }
+        // DEF-R4-004：`.changed` 态 UI 不提供「信任」入口；即便收到 trust 也强制拒绝（AC-02.2），
+        // 并补记 mismatchRejected 审计事件（AC-02.3）。
+        if case .changed(let pinned) = prompt.status {
+            HostKeyAuditLog.append(
+                HostKeyAuditEvent(
+                    kind: .mismatchRejected,
+                    hostAddress: prompt.address,
+                    fingerprint: prompt.key.fingerprint,
+                    previousFingerprint: pinned.fingerprint
+                )
+            )
+            hostKeyPrompt = nil
+            broker.respond(.reject)
+            return
+        }
         hostKeyPrompt = nil
         broker.respond(confirmation)
     }
@@ -1642,27 +1662,86 @@ final class ConnectionModel: ObservableObject {
     ///
     /// 只有服务器确认 `revoked == true` 才算撤销成功；离线、缺设备 ID、服务器拒绝都要如实报告，
     /// 不能因为「本机已删掉凭证」就当成服务器侧已撤销。
+    ///
+    /// DEF-R4-003：撤销动作与隧道状态更新存在竞态——界面显示在线时，`state`/`client`
+    /// 可能正处于断开重建的中间快照。这里先等待一次稳定在线再重判，
+    /// 并把「正在重连的竞态」与「真离线」两种文案区分开。
     func revokeThisDevice(host: HostRecord) async -> String {
         guard cacheHostID == host.id else {
             return "目标服务器不是当前连接：未发送撤销请求"
         }
+        // 夹具没有真实 RACP client；SET-04 覆盖的是「服务器确认后清理本机配对」的 UI 路径，
+        // 由夹具显式声明撤销成功（真实路径仍要求服务器回执 revoked == true）。
+        if usesUITestFixture, fixtureSupportsRevoke {
+            return Self.deviceRevokedMessage
+        }
         guard let deviceId = KeychainStore.loadDeviceId(hostID: host.id) else {
             return "本机没有保存的 deviceId：无法向服务器撤销，只清除了本地凭证"
         }
-        guard let client, state.isOnline else {
-            return "隧道未连接：改动只在服务器确认后才生效，请先连接再撤销"
+        var activeClient = client
+        if activeClient == nil || !state.isOnline {
+            // 可能是断开重建的窗口期：给一次短暂等待，避免把竞态误报成离线。
+            _ = await waitUntilOnline(timeout: 3)
+            activeClient = client
+        }
+        guard let activeClient, state.isOnline else {
+            if isTransientDisconnect {
+                return "正在重新连接服务器：请稍后重试撤销，本机凭证尚未改动"
+            }
+            return "当前处于离线状态：恢复手机网络或 VPN 后再试。"
         }
         do {
             let revoked = if info?.serverName == "pi-host" {
-                try await client.revokeLegacyDevice(deviceId: deviceId)
+                try await activeClient.revokeLegacyDevice(deviceId: deviceId)
             } else {
-                try await client.revokeDevice(deviceId: deviceId)
+                try await activeClient.revokeDevice(deviceId: deviceId)
             }
             return revoked
                 ? Self.deviceRevokedMessage
                 : "服务器返回未撤销（设备可能早已被撤销）"
         } catch {
+            // 连接在响应到达前断开时，离线文案会误导用户：请求可能已经生效
+            // （host 撤销成功会主动关闭设备连接），此时再「恢复网络后重试」只会
+            // 得到 revoked=false。如实报告「未确认」，保留本机凭证。
+            if Self.isUnconfirmedRevokeError(error) {
+                return Self.deviceRevokeUnconfirmedMessage
+            }
             return "撤销失败：\(ConnectionErrorText.describe(error))"
+        }
+    }
+
+    /// 请求已发出、但连接在服务器回执前中断；这类失败无法从本机判断撤销结果。
+    private static func isUnconfirmedRevokeError(_ error: Error) -> Bool {
+        if let error = error as? RACPClientError {
+            switch error {
+            case .notConnected, .timedOut:
+                return true
+            case .protocolMismatch, .server, .malformedFrame:
+                return false
+            }
+        }
+        if let error = error as? RACPWebSocketError {
+            return error == .closed
+        }
+        if let error = error as? SSHTransportError {
+            switch error {
+            case .channelClosed, .closedByPeer:
+                return true
+            default:
+                return false
+            }
+        }
+        return false
+    }
+
+    /// 无本地原因的离线 = 链路抖动/重连窗口，而不是「未配对/缺凭证」这类稳定离线。
+    /// 连接中（connecting/authenticating/handshaking）同样属于链路侧状态。
+    private var isTransientDisconnect: Bool {
+        switch state {
+        case .offline(let reason):
+            return reason == nil
+        default:
+            return true
         }
     }
 
@@ -2053,10 +2132,10 @@ final class HostKeyPromptBroker: HostKeyConfirming, @unchecked Sendable {
         if status == .matches {
             return .trust
         }
-        if case .changed = status {
-            // AC-02.2：指纹变化一律拒绝，不提供「一键忽略」。
-            return .reject
-        }
+        // DEF-R4-004：`.changed` 也必须挂起并弹出「主机指纹已变化」浮层（AC-02.2），
+        // 此前直接拒绝导致 UI 只能看到握手失败被归类为超时。
+        // UI 在 `.changed` 态只提供「取消（不建立连接）」，因此这条路径的结果
+        // 仍是拒绝——但通过用户显式确认，且错误分类保留为指纹不一致。
         return await withCheckedContinuation { continuation in
             lock.lock()
             if cancelled {

@@ -78,14 +78,14 @@ struct ServersScreen: View {
             .padding(.top, PISpacing.s16)
             .padding(.bottom, PISpacing.s32)
         }
+        // 键盘弹出时会挡住「保存并测试连接」：滚动即收起键盘，
+        // 避免点了保存却没触发校验。
+        .scrollDismissesKeyboard(.immediately)
         .piPageBackground()
         .piDetailNavBar("服务器")
         .onAppear(perform: loadHostIfNeeded)
-        .sheet(item: $connection.hostKeyPrompt) { prompt in
-            HostKeyConfirmSheet(prompt: prompt) { confirmation in
-                connection.respondHostKey(confirmation, operationID: prompt.operationID)
-            }
-        }
+        // 指纹核对浮层统一由 AppRootView 呈现（DEF-R4-004）：指纹变化可能在后台重连时
+        // 触发，不能只在服务器页可见时才有入口。
         // 用就地打开的选择器而不是 `.fileImporter`：复制型选择器会把系统判定为 package 的
         // `.key`（Keynote 类型）置灰，导致私钥文件选不中；选择器本身由透明宿主控制器模态
         // 弹出（把它内嵌成 sheet 内容时，真机上会「看得见但选不中」）。
@@ -150,7 +150,7 @@ struct ServersScreen: View {
             PIStatusBanner(
                 kind: .info,
                 text: "保存并测试连接",
-                detail: "凭证写入 Keychain（仅本机、不参与 iCloud 同步），本机记录写 state-v1.json；测试会真实连接一次服务器。"
+                detail: "测试会真实连接一次服务器；凭证只保存在本机。"
             )
         }
     }
@@ -335,7 +335,7 @@ struct ServersScreen: View {
             ) {
                 saveAndTest()
             }
-            Text("测试连接会真实登录一次服务器；失败原因会原样显示，不做「看起来成功」。")
+            Text("测试会真实登录一次服务器。")
                 .font(PIFont.caption)
                 .foregroundStyle(PIColor.text3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -516,7 +516,7 @@ struct ServersScreen: View {
             Text("本机写了什么")
                 .font(PIFont.captionStrong)
                 .foregroundStyle(PIColor.text2)
-            Text("state-v1.json：地址、端口、用户名、认证方式、名称与 PI-adaptor 端口。Keychain（仅本机）：密码或私钥、设备令牌、已固定的主机指纹。API Key 与令牌都不会出现在本机文件、日志或剪贴板里。")
+            Text("地址、端口与名称保存在本机；密码/私钥、设备令牌与主机指纹只进 Keychain。")
                 .font(PIFont.caption)
                 .foregroundStyle(PIColor.text3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -788,7 +788,7 @@ struct HostKeyConfirmSheet: View {
                         .foregroundStyle(PIColor.text)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("算法：\(prompt.key.algorithm)　与服务器上 `ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub` 的输出逐字比对。")
+                    Text("算法：\(prompt.key.algorithm)　请与服务器 `ssh-keygen -lf` 的输出逐字比对。")
                         .font(PIFont.caption)
                         .foregroundStyle(PIColor.text3)
                         .fixedSize(horizontal: false, vertical: true)
@@ -799,13 +799,21 @@ struct HostKeyConfirmSheet: View {
 
             Spacer(minLength: 0)
 
-            PIPrimaryButton(title: "指纹一致，信任这台服务器") {
-                onConfirm(.trust)
-                dismiss()
-            }
-            PISecondaryButton(title: "取消（不建立连接）") {
-                onConfirm(.reject)
-                dismiss()
+            if case .changed = prompt.status {
+                // DEF-R4-004 / AC-02.2：指纹变化不提供「信任」入口，只能取消连接。
+                PIPrimaryButton(title: "取消（不建立连接）") {
+                    onConfirm(.reject)
+                    dismiss()
+                }
+            } else {
+                PIPrimaryButton(title: "指纹一致，信任这台服务器") {
+                    onConfirm(.trust)
+                    dismiss()
+                }
+                PISecondaryButton(title: "取消（不建立连接）") {
+                    onConfirm(.reject)
+                    dismiss()
+                }
             }
         }
         .padding(.horizontal, PIMetrics.pageMargin)

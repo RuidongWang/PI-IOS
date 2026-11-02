@@ -211,7 +211,10 @@ public final class SSHTransport {
             )
             // 握手 + 认证完成的判据：能力激活后才可能开出第一个子通道。这里开一个空 session
             // 通道再立刻关闭，作为「已可认证并可用」的探针；随后 createChannel 都不会再等握手。
-            try await transport.probeActivation(timeout: remainingBudget())
+            try await transport.probeActivation(
+                timeout: remainingBudget(),
+                awaitingUserConfirmation: { verifier.isAwaitingUserConfirmation }
+            )
             transport.presentedHostKey = presentedBox.value
             return transport
         } catch {
@@ -359,17 +362,79 @@ public final class SSHTransport {
         return try await promise.futureResult.get()
     }
 
-    private func probeActivation(timeout: TimeInterval) async throws {
-        let probe = try await withTimeout(seconds: timeout, phase: "SSH 握手与认证") {
-            try await self.createChannel(channelType: .session) { channel in
-                channel.eventLoop.makeSucceededVoidFuture()
+    /// 确认「握手 + 认证」已完成（开一个空 session 通道再关掉）。
+    ///
+    /// DEF-R4-004：首次核对指纹或指纹变化时，握手会停在这里等用户回答，
+    /// 用户读指纹的时间可能超过网络预算。此时若直接按 `timeout` 报超时，
+    /// 就会出现「还在看指纹浮层、界面已提示连接超时」，指纹变化的分类也丢失。
+    /// 因此只有在**确实在等用户确认**时才把窗口延长到 `confirmationCeiling`；
+    /// 纯网络问题仍按原 `timeout` 报超时。
+    private func probeActivation(
+        timeout: TimeInterval,
+        awaitingUserConfirmation: @escaping @Sendable () -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let confirmationCeiling = clock.now + .seconds(180)
+        var budget = max(0.1, timeout)
+        var attempts = 0
+        while true {
+            attempts += 1
+            do {
+                let probe = try await withTimeout(seconds: budget, phase: "SSH 握手与认证") {
+                    try await self.createChannel(channelType: .session) { channel in
+                        channel.eventLoop.makeSucceededVoidFuture()
+                    }
+                }
+                try? await probe.close().get()
+                return
+            } catch let transportError as SSHTransportError {
+                guard case .timedOut = transportError else {
+                    // 已确定的失败（hostKeyRejected / authenticationFailed 等）直接抛出，
+                    // 不重试，也不改写分类。
+                    throw transportError
+                }
+                let remaining = confirmationCeiling - clock.now
+                guard awaitingUserConfirmation(),
+                      remaining > Duration.zero,
+                      attempts < 2
+                else { throw transportError }
+                // 正在等用户核对指纹：用剩余的确认窗口再等一次。
+                budget = max(0.1, Self.seconds(from: remaining))
+                continue
+            } catch is CancellationError {
+                throw SSHTransportError.timedOut("SSH 握手与认证")
+            } catch {
+                throw SSHTransportError.timedOut("SSH 握手与认证")
             }
         }
-        try? await probe.close().get()
+    }
+
+    private static func seconds(from duration: Duration) -> TimeInterval {
+        let components = duration.components
+        return Double(components.seconds)
+            + Double(components.attoseconds) / 1_000_000_000_000_000_000
     }
 }
 
 // MARK: - 握手期的主机指纹判定
+
+/// 线程安全的一次性布尔标记（握手回调用）。
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+
+    func set(_ value: Bool) {
+        lock.lock()
+        stored = value
+        lock.unlock()
+    }
+
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
 
 private final class PresentedKeyBox: @unchecked Sendable {
     private let lock = NSLock()
@@ -392,6 +457,7 @@ private final class HostKeyVerifier: NIOSSHClientServerAuthenticationDelegate, @
     private let pinned: SSHHostKey?
     private let confirmer: any HostKeyConfirming
     private let onPresented: @Sendable (SSHHostKey) -> Void
+    private let awaitingConfirmation = LockedFlag()
 
     init(
         pinned: SSHHostKey?,
@@ -402,6 +468,9 @@ private final class HostKeyVerifier: NIOSSHClientServerAuthenticationDelegate, @
         self.confirmer = confirmer
         self.onPresented = onPresented
     }
+
+    /// 是否正在等用户核对指纹（DEF-R4-004：据此把等待与网络超时区分开）。
+    var isAwaitingUserConfirmation: Bool { awaitingConfirmation.value }
 
     func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
         let presented: SSHHostKey
@@ -414,8 +483,12 @@ private final class HostKeyVerifier: NIOSSHClientServerAuthenticationDelegate, @
         onPresented(presented)
         let status = HostKeyTrust.evaluate(presented: presented, pinned: pinned)
         let confirmer = self.confirmer
+        let awaiting = awaitingConfirmation
         Task {
+            let needsUser = status != .matches
+            if needsUser { awaiting.set(true) }
             let confirmation = await confirmer.confirmHostKey(presented, status: status)
+            awaiting.set(false)
             switch confirmation {
             case .trust:
                 validationCompletePromise.succeed(())

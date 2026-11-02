@@ -3,15 +3,16 @@ import SwiftUI
 @main
 struct PIIOSApp: App {
     @StateObject private var model = AppModel()
-    @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
+    @StateObject private var appearanceStore = AppearanceStore()
 
     var body: some Scene {
         WindowGroup {
             AppRootView()
                 .environmentObject(model)
                 .environmentObject(model.connection)
+                .environmentObject(appearanceStore)
                 .tint(PIColor.accent)
-                .preferredColorScheme((AppearanceMode(rawValue: appearanceRaw) ?? .system).colorScheme)
+                .preferredColorScheme(appearanceStore.mode.colorScheme)
         }
     }
 }
