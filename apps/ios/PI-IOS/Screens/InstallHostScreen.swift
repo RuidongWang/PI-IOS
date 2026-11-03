@@ -567,7 +567,7 @@ private final class InstallHostCoordinator: ObservableObject {
                     await self.receive(event)
                 }
                 guard self.runID == generation else { return }
-                self.finish(outcome: outcome, host: host, model: model)
+                self.finish(outcome: outcome, host: host, model: model, connection: connection)
             } catch is CancellationError {
                 guard self.runID == generation else { return }
                 self.phase = .failed
@@ -617,7 +617,8 @@ private final class InstallHostCoordinator: ObservableObject {
     private func finish(
         outcome: HostInstallRunOutcome,
         host: HostRecord,
-        model: AppModel
+        model: AppModel,
+        connection: ConnectionModel
     ) {
         switch outcome.result {
         case .succeeded(let success):
@@ -643,6 +644,7 @@ private final class InstallHostCoordinator: ObservableObject {
                 failureCode = nil
                 failureDetail = nil
                 failureCount = 0
+                connectAfterInstall(host: host, model: model, connection: connection)
             case .failed(let reason):
                 phase = .failed
                 failureCode = .receiptFailed
@@ -662,6 +664,22 @@ private final class InstallHostCoordinator: ObservableObject {
             failureDetail = reason.message
             failureCount += 1
         }
+    }
+
+    /// 安装流程的收尾验证用的是临时连接，验证通过后会关掉；不在这里补一次
+    /// 连接，App 会停在「已配对 · 未连接」，用户还得手动去设置页点「连接」。
+    ///
+    /// 只对「本来就是当前服务器」或「还没有当前服务器」的情况自动连：给另一台
+    /// 服务器装 PI-adaptor 时不能悄悄切走用户正在用的连接。
+    private func connectAfterInstall(
+        host: HostRecord,
+        model: AppModel,
+        connection: ConnectionModel
+    ) {
+        let isCurrent = model.currentHost?.id == host.id
+        guard isCurrent || model.currentHost == nil else { return }
+        guard !(isCurrent && connection.state.isOnline) else { return }
+        Task { await model.setCurrentHost(id: host.id) }
     }
 
     private func failureMeta(_ failure: BootstrapRunFailure) -> String? {
