@@ -234,7 +234,11 @@ LEGACY_UNITS_STOPPED=""
 LEGACY_UNITS_JSON="[]"
 FAILURE_REASON=""
 ROLLBACK_RESULT="not-needed"
+ROLLBACK_STEP=""
+ROLLBACK_REASON=""
 TRANSACTION_STARTED=0
+SERVER_ARCH="unknown"
+NODE_VERSION="unknown"
 
 step() {
   printf '%s\n' "PI_HOST_BOOTSTRAP $1"
@@ -252,7 +256,7 @@ write_state() {
   error_json='null'
   if [ -n "$error_code" ]; then
     details_reason=${FAILURE_REASON:-$error_code}
-    error_json="{\"code\":\"$error_code\",\"details\":{\"reason\":\"$details_reason\",\"phase\":\"$next_step\",\"expectedName\":\"$SERVER_NAME\",\"expectedVersion\":\"$VERSION\",\"installDirectory\":\"$INSTALL_DIR\",\"unitName\":\"$UNIT_NAME\",\"port\":$PORT,\"legacyUnits\":$LEGACY_UNITS_JSON,\"rollback\":\"$ROLLBACK_RESULT\"}}"
+    error_json="{\"code\":\"$error_code\",\"details\":{\"reason\":\"$details_reason\",\"phase\":\"$next_step\",\"expectedName\":\"$SERVER_NAME\",\"expectedVersion\":\"$VERSION\",\"installDirectory\":\"$INSTALL_DIR\",\"unitName\":\"$UNIT_NAME\",\"port\":$PORT,\"legacyUnits\":$LEGACY_UNITS_JSON,\"rollback\":\"$ROLLBACK_RESULT\",\"rollbackStep\":\"$ROLLBACK_STEP\",\"serverArch\":\"$SERVER_ARCH\",\"nodeVersion\":\"$NODE_VERSION\"}}"
   fi
   tmp="$STATE.tmp.$$"
   {
@@ -332,8 +336,24 @@ record_transaction() {
   current_link="$BASE/current"
   if [ -L "$current_link" ]; then
     previous=$(readlink "$current_link" 2>/dev/null || true)
+    # install.sh 也接受指向 $BASE/releases 的绝对路径；统一成相对形式，
+    # 否则会被误判成 invalid。
     case "$previous" in
-      releases/*) PREVIOUS_CURRENT_TARGET=$previous ;;
+      "$BASE"/releases/*) previous=${previous#"$BASE"/} ;;
+    esac
+    case "$previous" in
+      releases/*)
+        # 悬空的 current（上一次失败或旧目录被删）不能原样留着：
+        # install.sh 的 resolve_previous_current 要求 previous 目录真实存在，
+        # 否则每次重装都在 activate 阶段报 state-mismatch；回滚脚本同样会
+        # 失败，把真正的失败原因盖成 rollback-failed。先清掉坏链接再装。
+        if [ -d "$BASE/$previous" ] && [ ! -L "$BASE/$previous" ]; then
+          PREVIOUS_CURRENT_TARGET=$previous
+        else
+          rm -f "$current_link"
+          PREVIOUS_CURRENT_TARGET="none"
+        fi
+        ;;
       *) PREVIOUS_CURRENT_TARGET="invalid" ;;
     esac
   elif [ -e "$current_link" ]; then
@@ -446,12 +466,16 @@ restore_service_enablement() {
 rollback_transaction() {
   [ "$TRANSACTION_STARTED" = 1 ] || [ -f "$TRANSACTION_ACTIVE" ] || return 0
   ROLLBACK_RESULT="attempted"
+  ROLLBACK_STEP=""
+  ROLLBACK_REASON=""
   rollback_ok=1
   if systemctl --user is-active --quiet "$UNIT_NAME" >/dev/null 2>&1; then
     if ! systemctl --user stop "$UNIT_NAME" >/dev/null 2>&1; then
+      ROLLBACK_STEP="stop-unit"
       rollback_ok=0
     fi
     if systemctl --user is-active --quiet "$UNIT_NAME" >/dev/null 2>&1; then
+      ROLLBACK_STEP="stop-unit"
       rollback_ok=0
     fi
   fi
@@ -462,13 +486,42 @@ rollback_transaction() {
   [ ! -f "$TRANSACTION_INSTALL_DIR" ] || failed_install=$(cat "$TRANSACTION_INSTALL_DIR" 2>/dev/null || true)
   [ -n "$failed_install" ] || failed_install="none"
 
+  # 事务里记录的 previous 可能已经被删掉（上次回滚没做完，或用户清理了
+  # releases），也可能本身就是无效值（current 不是软链）。回滚脚本要求
+  # previous 是真实存在的 release 目录，照原样传过去只会让恢复也失败；
+  # 这些情况一律按 none 处理，由脚本清掉坏的 current。
+  case "$previous" in
+    releases/*) previous_path="$BASE/$previous" ;;
+    "$BASE"/releases/*) previous_path=$previous ;;
+    none) previous_path="" ;;
+    *) previous_path="invalid" ;;
+  esac
+  if [ "$previous_path" = "invalid" ] ||
+     { [ -n "$previous_path" ] && { [ ! -d "$previous_path" ] || [ -L "$previous_path" ]; }; }; then
+    previous="none"
+  fi
+
+  # current 只应该是软链。早期异常留下的同名目录会让回滚脚本的 rm 失败，
+  # 先移到同目录的隐藏名字里保留数据，再让脚本按 none 清理。
+  if [ "$previous" = "none" ]; then
+    for name in current current.next; do
+      link="$BASE/$name"
+      if [ -e "$link" ] && [ ! -L "$link" ]; then
+        mv "$link" "$BASE/.$name.invalid.$$" 2>/dev/null || true
+      fi
+    done
+  fi
+
+  rm -f "$WORK/rollback.error"
   if [ -x "$TRANSACTION_ROLLBACK_SCRIPT" ] &&
      "$TRANSACTION_ROLLBACK_SCRIPT" --rollback \
        --home "$BASE" \
        --previous-current-target "$previous" \
-       --failed-install-dir "$failed_install" >/dev/null 2>&1; then
+       --failed-install-dir "$failed_install" >/dev/null 2>"$WORK/rollback.error"; then
     :
   else
+    ROLLBACK_STEP="restore-install"
+    ROLLBACK_REASON=$(script_failure_reason "$WORK/rollback.error")
     rollback_ok=0
   fi
 
@@ -479,11 +532,12 @@ rollback_transaction() {
     rm -f "$RECEIPT"
   fi
 
-  restore_service_enablement || rollback_ok=0
+  restore_service_enablement || { ROLLBACK_STEP="restore-enablement"; rollback_ok=0; }
 
   if [ "$PREVIOUS_SERVICE_ACTIVE" = 1 ]; then
     if ! systemctl --user start "$UNIT_NAME" >/dev/null 2>&1 ||
        ! systemctl --user is-active --quiet "$UNIT_NAME" >/dev/null 2>&1; then
+      ROLLBACK_STEP="restart-previous"
       rollback_ok=0
     fi
   fi
@@ -492,11 +546,13 @@ rollback_transaction() {
   # of PI-adaptor success. Restore them only when there was no previous
   # PI-adaptor target or the PI-adaptor rollback itself failed.
   if [ "$previous" = "none" ] || [ "$rollback_ok" = 0 ]; then
-    restore_legacy_units || rollback_ok=0
+    restore_legacy_units || { ROLLBACK_STEP="restore-legacy"; rollback_ok=0; }
   fi
 
   if [ "$rollback_ok" = 1 ]; then
     ROLLBACK_RESULT="succeeded"
+    ROLLBACK_STEP=""
+    ROLLBACK_REASON=""
     rm -f "$TRANSACTION_ACTIVE" "$TRANSACTION_PREVIOUS" "$TRANSACTION_SERVICE" \
       "$TRANSACTION_ENABLED" "$TRANSACTION_INSTALL_DIR" "$TRANSACTION_ROLLBACK_SCRIPT" \
       "$TRANSACTION_RECEIPT_BACKUP" "$TRANSACTION_LEGACY"
@@ -526,10 +582,12 @@ die() {
   refresh_legacy_units_json
   rollback_transaction || ROLLBACK_RESULT="failed"
   if [ "$ROLLBACK_RESULT" = "failed" ]; then
-    FAILURE_REASON="rollback-failed"
+    # 回滚失败不能盖掉真正的失败原因：把原始失败码和回滚卡住的位置一起
+    # 汇报，否则用户只能看到无信息量的 rollback-failed。
+    FAILURE_REASON="${failure_code}（回滚失败${ROLLBACK_STEP:+：$ROLLBACK_STEP}${ROLLBACK_REASON:+，$ROLLBACK_REASON}）"
     write_state "$CURRENT_STEP" failed "rollback-failed" || true
     printf '%s\n' "PI_HOST_BOOTSTRAP_FAILED rollback-failed" >&2
-    printf '%s\n' "PI_HOST_FAILED {\"code\":\"HOST_BOOTSTRAP_FAILED\",\"step\":\"rollback-failed\"}"
+    printf '%s\n' "PI_HOST_FAILED {\"code\":\"HOST_BOOTSTRAP_FAILED\",\"step\":\"rollback-failed\",\"originalStep\":\"$failure_code\"}"
     exit 1
   fi
   write_state "$CURRENT_STEP" failed "$failure_code" || true
@@ -540,6 +598,14 @@ die() {
 
 need() {
   command -v "$1" >/dev/null 2>&1 || return 1
+}
+
+# install.sh 把真实原因写进 stderr 的 JSON；提取出来作为失败原因，
+# 否则界面只能看到笼统的 install-failed。只接受安全字符。
+script_failure_reason() {
+  reason=$(sed -n 's/.*"reason":"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | sed -n '1p')
+  printf '%s' "$reason" | LC_ALL=C grep -Eq '^[A-Za-z0-9._[:space:]-]{1,120}$' || reason=""
+  printf '%s' "$reason"
 }
 
 sha256_of() {
@@ -652,6 +718,14 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 rm -f "$PAIR_REJECT"
 
+# 诊断信息要在此之前采好，否则恢复事务失败时 state.json 里只有 unknown。
+SERVER_ARCH=$(uname -m 2>/dev/null | sed -n '1p' || true)
+[ -n "$SERVER_ARCH" ] || SERVER_ARCH="unknown"
+case "$SERVER_ARCH" in *[!A-Za-z0-9._+-]*) SERVER_ARCH="unknown" ;; esac
+NODE_VERSION=$(node -v 2>/dev/null | sed -n '1p' || true)
+[ -n "$NODE_VERSION" ] || NODE_VERSION="unknown"
+case "$NODE_VERSION" in *[!A-Za-z0-9._+-]*) NODE_VERSION="unknown" ;; esac
+
 if [ -f "$TRANSACTION_ACTIVE" ]; then
   TRANSACTION_STARTED=1
   PREVIOUS_CURRENT_TARGET=$(cat "$TRANSACTION_PREVIOUS" 2>/dev/null || printf 'none')
@@ -660,10 +734,10 @@ if [ -f "$TRANSACTION_ACTIVE" ]; then
   INSTALL_DIR=$(cat "$TRANSACTION_INSTALL_DIR" 2>/dev/null || true)
   refresh_legacy_units_json
   if ! rollback_transaction; then
-    FAILURE_REASON="rollback-failed"
+    FAILURE_REASON="recovery（回滚失败${ROLLBACK_STEP:+：$ROLLBACK_STEP}${ROLLBACK_REASON:+，$ROLLBACK_REASON}）"
     write_state probe failed "rollback-failed" || true
     printf '%s\n' "PI_HOST_BOOTSTRAP_FAILED rollback-failed" >&2
-    printf '%s\n' "PI_HOST_FAILED {\"code\":\"HOST_BOOTSTRAP_FAILED\",\"step\":\"rollback-failed\"}"
+    printf '%s\n' "PI_HOST_FAILED {\"code\":\"HOST_BOOTSTRAP_FAILED\",\"step\":\"rollback-failed\",\"originalStep\":\"recovery\"}"
     exit 1
   fi
 fi
@@ -675,9 +749,25 @@ write_state probe running || die "bootstrap-permissions"
 
 need tar || die "missing-tar"
 need mkfifo || die "missing-tar"
-need node || die "missing-node"
 need bash || die "missing-bash"
 sha256_of /dev/null >/dev/null 2>&1 || die "missing-sha256-tool"
+
+# 失败诊断：Node 太旧只会在 install.sh 内部报 install-failed，这里前置
+# 判定，并保证 state.json 里已有服务器架构与 Node 版本。
+if ! need node; then
+  NODE_VERSION="missing"
+  die "missing-node"
+fi
+node_path=$(command -v node)
+"$node_path" -e '
+  const parse = (value) => value.split(".").map((part) => Number(part));
+  const current = parse(process.versions.node);
+  const minimum = parse(process.argv[1]);
+  for (let i = 0; i < 3; i += 1) {
+    if (current[i] > minimum[i]) process.exit(0);
+    if (current[i] < minimum[i]) process.exit(1);
+  }
+' "$MIN_NODE_VERSION" 2>/dev/null || die "node-too-old"
 
 progress "resolve"
 rm -f "$CHECKSUM_FILE"
@@ -803,13 +893,16 @@ if [ "$reuse" = 0 ]; then
   INSTALL_DIR="$RELEASES/$VERSION-$EXPECTED_SHA256"
   record_transaction
   progress "activate"
-  "$unpack/$BUNDLE_DIR/scripts/install.sh" --install \
+  if ! "$unpack/$BUNDLE_DIR/scripts/install.sh" --install \
     --bundle "$unpack/$BUNDLE_DIR" \
     --home "$BASE" \
     --version "$VERSION" \
     --target "$TARGET" \
     --asset-sha256 "$EXPECTED_SHA256" \
-    --manifest-sha256 "$manifest_sha256" >/dev/null || die "install-failed"
+    --manifest-sha256 "$manifest_sha256" >/dev/null 2>"$WORK/install.error"; then
+    die "install-failed" "$(script_failure_reason "$WORK/install.error")"
+  fi
+  rm -f "$WORK/install.error"
   rm -f "$PART"
 else
   cp "$BASE/current/scripts/install.sh" "$ROLLBACK_SCRIPT" || die "install-failed"
@@ -817,38 +910,35 @@ else
   INSTALL_DIR="$RELEASES/$VERSION-$EXPECTED_SHA256"
   record_transaction
   progress "activate"
-  "$ROLLBACK_SCRIPT" --install \
+  if ! "$ROLLBACK_SCRIPT" --install \
     --bundle "$BASE/current" \
     --home "$BASE" \
     --version "$VERSION" \
     --target "$TARGET" \
     --asset-sha256 "$EXPECTED_SHA256" \
-    --manifest-sha256 "$manifest_sha256" >/dev/null || die "install-failed"
+    --manifest-sha256 "$manifest_sha256" >/dev/null 2>"$WORK/install.error"; then
+    die "install-failed" "$(script_failure_reason "$WORK/install.error")"
+  fi
+  rm -f "$WORK/install.error"
 fi
 
-"$ROLLBACK_SCRIPT" --verify \
+if ! "$ROLLBACK_SCRIPT" --verify \
   --install-dir "$BASE/current" \
   --version "$VERSION" \
   --target "$TARGET" \
   --asset-sha256 "$EXPECTED_SHA256" \
-  --manifest-sha256 "$manifest_sha256" >/dev/null || die "installed-verification-failed"
+  --manifest-sha256 "$manifest_sha256" >/dev/null 2>"$WORK/verify.error"; then
+  die "installed-verification-failed" "$(script_failure_reason "$WORK/verify.error")"
+fi
+rm -f "$WORK/verify.error"
 installed_version=$(node -e '
   const fs = require("fs");
   process.stdout.write(String(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).version || ""));
 ' "$BASE/current/package.json" 2>/dev/null || true)
 [ "$installed_version" = "$VERSION" ] || die "installed-verification-failed"
 
-need node || die "missing-node"
-node=$(command -v node)
-"$node" -e '
-  const parse = (value) => value.split(".").map((part) => Number(part));
-  const current = parse(process.versions.node);
-  const minimum = parse(process.argv[1]);
-  for (let i = 0; i < 3; i += 1) {
-    if (current[i] > minimum[i]) process.exit(0);
-    if (current[i] < minimum[i]) process.exit(1);
-  }
-' "$MIN_NODE_VERSION" 2>/dev/null || die "node-too-old"
+# Node 版本已在 probe 阶段前置检查；这里只需要可执行路径写进 unit。
+node=$(command -v node) || die "missing-node"
 
 progress "write-unit"
 unit_dir="$HOME/.config/systemd/user"

@@ -140,6 +140,33 @@ final class BootstrapTests: XCTestCase {
         XCTAssertTrue(details.displayText?.contains("原 active=true") ?? false)
     }
 
+    func testFailureDetailsExposeRollbackStepAndServerDiagnostics() throws {
+        let error = #"""
+        {
+          "code":"rollback-failed",
+          "details":{
+            "reason":"install-failed（回滚失败：restore-install）",
+            "phase":"activate",
+            "installDirectory":"/home/ubuntu/.pi-adaptor/releases/2.0.2-5ca90a4",
+            "rollback":"failed",
+            "rollbackStep":"restore-install",
+            "serverArch":"aarch64",
+            "nodeVersion":"v20.11.1"
+          }
+        }
+        """#
+        let file = try decode(step: "activate", status: "failed", error: error)
+        let details = try XCTUnwrap(file.failureDetails)
+        XCTAssertEqual(details.rollbackStep, "restore-install")
+        XCTAssertEqual(details.serverArch, "aarch64")
+        XCTAssertEqual(details.nodeVersion, "v20.11.1")
+        let text = try XCTUnwrap(details.displayText)
+        XCTAssertTrue(text.contains("原因：install-failed"))
+        XCTAssertTrue(text.contains("回滚失败于：restore-install"))
+        XCTAssertTrue(text.contains("服务器架构：aarch64"))
+        XCTAssertTrue(text.contains("服务器 Node：v20.11.1"))
+    }
+
     func testAC01_9_clientSideFailureCodesAreDistinctFromUpstream() {
         XCTAssertEqual(BootstrapFailureCode.upstreamCodes.count, 19, "上游 19 个真实 die 码")
         XCTAssertEqual(BootstrapFailureCode.clientSideCodes.count, 4)

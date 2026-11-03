@@ -241,6 +241,12 @@ public struct BootstrapFailureDetails: Equatable, Sendable {
     public var unitName: String?
     public var port: Int?
     public var legacyUnits: [LegacyUnit]
+    /// 回滚失败时卡住的子步骤（stop-unit / restore-install / …）。
+    public var rollbackStep: String?
+    /// 服务器侧诊断：`uname -m` 与 `node -v`。用于区分架构选错、Node 过旧
+    /// 这类在 install.sh 内部才会暴露的原因。
+    public var serverArch: String?
+    public var nodeVersion: String?
 
     public init(error: JSONValue) {
         let details = error.value(at: ["details"])
@@ -253,6 +259,9 @@ public struct BootstrapFailureDetails: Equatable, Sendable {
         installDirectory = details?.value(at: ["installDirectory"])?.stringValue
         unitName = details?.value(at: ["unitName"])?.stringValue
         port = details?.value(at: ["port"])?.intValue
+        rollbackStep = details?.value(at: ["rollbackStep"])?.stringValue
+        serverArch = details?.value(at: ["serverArch"])?.stringValue
+        nodeVersion = details?.value(at: ["nodeVersion"])?.stringValue
         legacyUnits = details?.value(at: ["legacyUnits"])?.arrayValue?.compactMap { value in
             guard let unit = value.value(at: ["unit"])?.stringValue,
                   !unit.isEmpty
@@ -279,6 +288,9 @@ public struct BootstrapFailureDetails: Equatable, Sendable {
         if let installDirectory { lines.append("激活目录：\(installDirectory)") }
         if let unitName { lines.append("服务：\(unitName)") }
         if let port { lines.append("端口：\(port)") }
+        if let rollbackStep { lines.append("回滚失败于：\(rollbackStep)") }
+        if let serverArch { lines.append("服务器架构：\(serverArch)") }
+        if let nodeVersion { lines.append("服务器 Node：\(nodeVersion)") }
         for legacy in legacyUnits {
             var state: [String] = []
             if let originalActive = legacy.originalActive {

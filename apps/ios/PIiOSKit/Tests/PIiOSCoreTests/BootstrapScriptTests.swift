@@ -110,8 +110,56 @@ final class BootstrapScriptTests: XCTestCase {
         XCTAssertTrue(script.contains(#"systemctl --user enable "$UNIT_NAME" >/dev/null 2>&1 || die "unit-failed""#))
         // 安装前记录原 enable 状态，回滚时按原状态恢复。
         XCTAssertTrue(script.contains(#"PREVIOUS_SERVICE_ENABLED=$(systemctl --user is-enabled "$UNIT_NAME""#))
-        XCTAssertTrue(script.contains(#"restore_service_enablement || rollback_ok=0"#))
+        XCTAssertTrue(script.contains(#"restore_service_enablement || { ROLLBACK_STEP="restore-enablement"; rollback_ok=0; }"#))
         XCTAssertTrue(script.contains(#"TRANSACTION_ENABLED="$WORK/transaction.service-enabled""#))
+        try assertShellParses(script)
+    }
+
+    func testFailuresSurfaceServerDiagnosticsAndNeverMaskOriginalCode() throws {
+        let script = BootstrapScriptBuilder.build(try configuration())
+
+        // Node 与架构诊断必须在下载之前完成，否则 Node 太旧只会在
+        // install.sh 内部报 install-failed。
+        let archProbe = try XCTUnwrap(script.range(of: #"SERVER_ARCH=$(uname -m"#)?.lowerBound)
+        let nodeProbe = try XCTUnwrap(script.range(of: #""$node_path" -e"#)?.lowerBound)
+        let resolve = try XCTUnwrap(script.range(of: #"progress "resolve""#)?.lowerBound)
+        XCTAssertLessThan(archProbe, resolve)
+        XCTAssertLessThan(nodeProbe, resolve)
+        // 恢复上次未完成的事务时也要带上诊断。
+        let recovery = try XCTUnwrap(script.range(of: #"if [ -f "$TRANSACTION_ACTIVE" ]"#)?.lowerBound)
+        XCTAssertLessThan(archProbe, recovery)
+        // 事务里记录的 previous 已被删除或本身无效时按 none 回滚。
+        XCTAssertTrue(script.contains(#"previous="none""#))
+        XCTAssertTrue(script.contains(#"previous_path="invalid""#))
+        // current 若是同名目录，先移到隐藏名字再让回滚脚本清理。
+        XCTAssertTrue(script.contains(#"mv "$link" "$BASE/.$name.invalid.$$""#))
+        // 绝对路径的 current 目标统一成 releases/... 再判断。
+        XCTAssertTrue(script.contains(#"previous=${previous#"$BASE"/}"#))
+        XCTAssertTrue(script.contains(#"die "missing-node""#))
+        XCTAssertTrue(script.contains(#"die "node-too-old""#))
+
+        XCTAssertTrue(script.contains(#"\"rollbackStep\":\"$ROLLBACK_STEP\""#))
+        XCTAssertTrue(script.contains(#"\"serverArch\":\"$SERVER_ARCH\""#))
+        XCTAssertTrue(script.contains(#"\"nodeVersion\":\"$NODE_VERSION\""#))
+
+        // 悬空的 current 指向已删除的版本目录时按 none 回滚，避免回滚脚本
+        // 因为“previous 不存在”而失败。
+        XCTAssertTrue(script.contains(#"PREVIOUS_CURRENT_TARGET="none""#))
+        XCTAssertTrue(script.contains(#"if [ -d "$BASE/$previous" ] && [ ! -L "$BASE/$previous" ]"#))
+        XCTAssertTrue(script.contains(#"rm -f "$current_link""#))
+
+        // install.sh 的 stderr JSON 里带着真实原因，必须提取出来而不是丢掉。
+        XCTAssertTrue(script.contains(#"2>"$WORK/install.error""#))
+        XCTAssertTrue(script.contains(#"script_failure_reason "$WORK/install.error""#))
+        XCTAssertTrue(script.contains(#"2>"$WORK/verify.error""#))
+        XCTAssertTrue(script.contains(#"2>"$WORK/rollback.error""#))
+
+        // 回滚失败只作为附加信息，原始失败码必须保留。
+        XCTAssertTrue(script.contains(#"FAILURE_REASON="${failure_code}（回滚失败${ROLLBACK_STEP:+：$ROLLBACK_STEP}${ROLLBACK_REASON:+，$ROLLBACK_REASON}）""#))
+        XCTAssertTrue(script.contains(#"ROLLBACK_REASON=$(script_failure_reason "$WORK/rollback.error")"#))
+        XCTAssertTrue(script.contains(#"\"originalStep\":\"$failure_code\""#))
+        XCTAssertTrue(script.contains(#"restore_service_enablement || { ROLLBACK_STEP="restore-enablement"; rollback_ok=0; }"#))
+
         try assertShellParses(script)
     }
 
