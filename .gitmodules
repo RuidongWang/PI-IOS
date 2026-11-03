@@ -1,0 +1,3 @@
+[submodule "apps/pi-adaptor"]
+	path = apps/pi-adaptor
+	url = https://github.com/RuidongWang/PI-adaptor.git

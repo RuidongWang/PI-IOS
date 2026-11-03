@@ -4,9 +4,9 @@ set -euo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd -P)
 
-# 版本与上游 pin 一律来自仓库根的 host-release.json（唯一权威源）。
+# 版本与上游 pin 一律来自 apps/pi-adaptor/host-release.json（PI-adaptor 仓库的权威源）。
 # 不在这里写死版本号：写死就会出现「App 期望新版本、脚本仍产出旧包」这类漂移。
-RELEASE_MANIFEST="$REPO_ROOT/host-release.json"
+RELEASE_MANIFEST="$REPO_ROOT/apps/pi-adaptor/host-release.json"
 [ -f "$RELEASE_MANIFEST" ] || { echo "missing $RELEASE_MANIFEST" >&2; exit 1; }
 manifest_field() {
   python3 -c 'import json,sys

@@ -96,9 +96,24 @@ PI-adaptor 负责会话与轮次调度、审批门禁、工具执行、provider 
 | 路径 | 内容 |
 |---|---|
 | `apps/ios/` | SwiftUI 客户端 `PI-IOS` 与 `PIiOSKit` SPM 包（领域层 `PIiOSCore`、传输层 `PIiOSNet`） |
-| `apps/host/` | **PI-adaptor**：Node 22 + TypeScript Host |
-| `server/` | 模型服务删除的服务端增量：上游补丁与双架构打包脚本 |
-| `host-release.json` | Host 发布坐标（版本、tag、各平台摘要） |
+| `apps/pi-adaptor/` | **PI-adaptor**（git submodule）：Node 22 + TypeScript Host，独立仓库 [RuidongWang/PI-adaptor](https://github.com/RuidongWang/PI-adaptor) |
+| `apps/pi-adaptor/host-release.json` | Host 发布坐标（版本、tag、各平台摘要），随 submodule commit 固定 |
+| `server/` | 遗留 pi-host 打包脚本（存档，不参与 PI-adaptor 发布） |
+
+**PI-adaptor 子模块**
+
+```sh
+# 首次克隆
+git clone --recurse-submodules https://github.com/RuidongWang/PI-IOS.git
+# 已有克隆或拉到新的 submodule 指针后
+git submodule update --init --recursive
+```
+
+PI-IOS 只依赖 PI-adaptor 的两处契约：RACP v2 协议（`apps/pi-adaptor/docs/api/pi-adaptor.md`）
+和发布包布局（`apps/pi-adaptor/host-release.json` + `scripts/install.sh`）。子模块固定的 commit
+同时决定 Host 版本与 App 的 `PiHostRelease` 常量；升级 Host 时先在 PI-adaptor 仓库发版，
+再更新本仓库的子模块指针。CI 与发布门禁（`scripts/check-host-release-consistency.py`）
+要求子模块已初始化。
 
 ## 快速开始
 
@@ -113,7 +128,8 @@ open apps/ios/PI-IOS.xcodeproj
 **本地起一个 PI-adaptor**
 
 ```sh
-cd apps/host
+git submodule update --init apps/pi-adaptor
+cd apps/pi-adaptor
 pnpm install --ignore-scripts
 pnpm start -- --pair        # 打印一次性配对令牌
 ```

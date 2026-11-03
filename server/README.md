@@ -12,9 +12,12 @@
 | `dist/` | 两个最终 tarball、`.sha256`、构建 manifest 与架构/QEMU 验证记录 |
 
 唯一依据：`docs/api/ios-client-provider-remove-draft.md`（FROZEN 2026-11-03）。基础契约 `docs/api/ios-client.md`、`docs/specs/**` 均未改动（`docs/` 下没有任何文件被修改）。
-## 版本坐标的唯一权威源：`host-release.json`
+## 版本坐标的唯一权威源：`apps/pi-adaptor/host-release.json`
 
-版本号、发布标签、上游 pin 与各目标摘要都只在仓库根的 [`host-release.json`](../host-release.json) 里定义一次：
+> 本目录是 v0.21.0 `pi-host` 的存档交付，不参与 PI-adaptor 2.x 发布。PI-adaptor 已抽离为
+> 独立仓库并以 submodule 引入，发布坐标随 submodule 固定。
+
+版本号、发布标签、上游 pin 与各目标摘要都只在 [`apps/pi-adaptor/host-release.json`](../apps/pi-adaptor/host-release.json) 里定义一次：
 
 - iOS 侧 `PiHostRelease`（`patchedReleaseVersion` / `patchedRepository` / `patchedChecksums`）必须与它一致——
   `HostReleaseManifestTests` 在漂移时直接失败；下载地址由「仓库 + `v<version>`」派生，不再手写标签。

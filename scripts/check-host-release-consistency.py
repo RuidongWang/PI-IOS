@@ -21,16 +21,16 @@ import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MANIFEST_PATH = os.path.join(ROOT, "host-release.json")
-PACKAGE_PATH = os.path.join(ROOT, "apps/host/package.json")
+MANIFEST_PATH = os.path.join(ROOT, "apps/pi-adaptor/host-release.json")
+PACKAGE_PATH = os.path.join(ROOT, "apps/pi-adaptor/package.json")
 SWIFT_PATH = os.path.join(
     ROOT,
     "apps/ios/PIiOSKit/Sources/PIiOSCore/Bootstrap/BootstrapRelease.swift",
 )
-BUILD_SCRIPT_PATH = os.path.join(ROOT, "apps/host/scripts/build-release.sh")
-INSTALL_SCRIPT_PATH = os.path.join(ROOT, "apps/host/scripts/install.sh")
-SERVICE_PATH = os.path.join(ROOT, "apps/host/deploy/pi-adaptor.service")
-DIST = os.path.join(ROOT, "apps/host/release")
+BUILD_SCRIPT_PATH = os.path.join(ROOT, "apps/pi-adaptor/scripts/build-release.sh")
+INSTALL_SCRIPT_PATH = os.path.join(ROOT, "apps/pi-adaptor/scripts/install.sh")
+SERVICE_PATH = os.path.join(ROOT, "apps/pi-adaptor/deploy/pi-adaptor.service")
+DIST = os.path.join(ROOT, "apps/pi-adaptor/release")
 
 problems: list[str] = []
 
@@ -337,9 +337,9 @@ def main(argv: list[str] | None = None) -> int:
     artifacts = manifest.get("artifacts") or {}
 
     if version != package.get("version"):
-        fail(f"manifest version({version}) != apps/host/package.json({package.get('version')})")
+        fail(f"manifest version({version}) != apps/pi-adaptor/package.json({package.get('version')})")
     if package.get("name") != "@pi-ios/pi-adaptor":
-        fail(f"apps/host/package.json name({package.get('name')}) != @pi-ios/pi-adaptor")
+        fail(f"apps/pi-adaptor/package.json name({package.get('name')}) != @pi-ios/pi-adaptor")
     if tag != f"pi-adaptor-v{version}":
         fail(f"releaseTag({tag}) != pi-adaptor-v<version>")
     if repository != "RuidongWang/PI-adaptor":

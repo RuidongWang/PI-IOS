@@ -5,7 +5,7 @@ import XCTest
 @testable import PIiOSCore
 
 /// Runs the generated POSIX script against isolated fake curl/systemd. The
-/// installed package uses the production installer from apps/host/scripts.
+/// installed package uses the production installer from apps/pi-adaptor/scripts.
 final class BootstrapScriptIntegrationTests: XCTestCase {
     private let pairingToken = "ppt2." + "integration-token"
 
@@ -422,7 +422,7 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
             .appendingPathComponent("source", isDirectory: true)
             .appendingPathComponent(environment.release.bundleDirectoryName, isDirectory: true)
         let manifestDigest = sha256(try Data(contentsOf: bundle.appendingPathComponent("SHA256SUMS")))
-        let installer = repositoryRoot().appendingPathComponent("apps/host/scripts/install.sh")
+        let installer = repositoryRoot().appendingPathComponent("apps/pi-adaptor/scripts/install.sh")
 
         let install = try runProcess(
             "/bin/bash",
@@ -516,7 +516,7 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
             .write(to: dist.appendingPathComponent("main.js"))
         try Data().write(to: modules.appendingPathComponent(".keep"))
         try FileManager.default.copyItem(
-            at: repositoryRoot().appendingPathComponent("apps/host/scripts/install.sh"),
+            at: repositoryRoot().appendingPathComponent("apps/pi-adaptor/scripts/install.sh"),
             to: scripts.appendingPathComponent("install.sh")
         )
         try FileManager.default.setAttributes(

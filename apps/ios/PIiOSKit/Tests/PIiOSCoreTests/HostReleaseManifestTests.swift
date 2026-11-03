@@ -11,7 +11,7 @@ final class HostReleaseManifestTests: XCTestCase {
     private static func manifest() throws -> [String: Any] {
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { url.deleteLastPathComponent() }
-        url.appendPathComponent("host-release.json")
+        url.appendPathComponent("apps/pi-adaptor/host-release.json")
         let data = try Data(contentsOf: url)
         let object = try JSONSerialization.jsonObject(with: data)
         return try XCTUnwrap(object as? [String: Any], "host-release.json 顶层必须是对象")
@@ -73,7 +73,7 @@ final class HostReleaseManifestTests: XCTestCase {
 
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { url.deleteLastPathComponent() }
-        url.appendPathComponent("apps/host/package.json")
+        url.appendPathComponent("apps/pi-adaptor/package.json")
         let package = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
         )
