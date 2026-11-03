@@ -33,7 +33,7 @@ public struct BootstrapInstallPairingAdapter: BootstrapPairingCallback {
     private let persist: Persist
 
     public init(
-        clientVersion: String = "0.1.0",
+        clientVersion: String = "0.0.1",
         exchange: Exchange? = nil,
         persist: Persist? = nil
     ) {
@@ -86,7 +86,7 @@ public struct BootstrapInstallVerificationAdapter: BootstrapDeviceVerificationCa
     private let sleep: @Sendable (TimeInterval) async throws -> Void
 
     public init(
-        clientVersion: String = "0.1.0",
+        clientVersion: String = "0.0.1",
         retryTimeout: TimeInterval = 30,
         retryInterval: TimeInterval = 0.5,
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = {

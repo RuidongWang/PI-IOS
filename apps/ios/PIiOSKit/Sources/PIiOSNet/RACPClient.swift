@@ -314,7 +314,7 @@ public struct RACPConfiguration: Sendable {
         ssh: SSHConnectionRequest,
         hostPort: Int,
         deviceToken: String?,
-        clientVersion: String = "0.1.0"
+        clientVersion: String = "0.0.1"
     ) {
         self.ssh = ssh
         self.hostPort = hostPort
@@ -648,7 +648,7 @@ public actor RACPClient {
         using transport: SSHTransport,
         hostPort: Int,
         pairingToken: String,
-        clientVersion: String = "0.1.0",
+        clientVersion: String = "0.0.1",
         deviceLabel: String? = nil
     ) async throws -> RACPPairResult {
         guard (1...65_535).contains(hostPort),
@@ -670,7 +670,7 @@ public actor RACPClient {
         using transport: SSHTransport,
         hostPort: Int,
         deviceToken: String,
-        clientVersion: String = "0.1.0"
+        clientVersion: String = "0.0.1"
     ) async throws -> RACPServerInfo {
         guard (1...65_535).contains(hostPort),
               !deviceToken.isEmpty,
