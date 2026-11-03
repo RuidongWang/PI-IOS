@@ -116,8 +116,10 @@ public struct RACPItem: Equatable, Sendable {
             ?? payload.value(at: ["status"])?.stringValue
     }
     /// 是否属于工具卡片条目（`tool.started` 之后的帧不再携带 `toolName`）。
+    /// `itemType` 可能写成 `tool` / `tool_call` / `toolResult`，统一按包含判断。
     public var isToolItem: Bool {
-        itemType == "tool" || toolName != nil || role == "tool" || role == "toolResult"
+        if let type = itemType?.lowercased(), type.contains("tool") { return true }
+        return toolName != nil || role == "tool" || role == "toolResult"
     }
     /// 就地更新同一条 `item.id` 时的字段保留规则。
     ///

@@ -36,6 +36,7 @@ struct UITestFixture {
         case "online-reading-two-sessions": return onlineReadingTwoSessions()
         case "online-large-tool-result": return onlineLargeToolResult()
         case "online-tool-result-body": return onlineToolResultBody()
+        case "online-tool-batch": return onlineToolBatch()
         case "online-markdown-message": return onlineMarkdownMessage()
         case "online-long-history-pending-approval": return onlineLongHistoryPendingApproval()
         case "online-project-lifecycle": return onlineProjectLifecycle()
@@ -190,6 +191,40 @@ struct UITestFixture {
                 ])
             ])),
         ]
+        fixture.sessionSnapshots[summary.id] = snapshot
+        return fixture
+    }
+
+    /// 批量工具调用 + 最终回复：连续 6 次 bash 调用应汇总成一条默认折叠的分组，
+    /// 最终回复保持原样展示。用于验证折叠数量、展开/收起与分组摘要。
+    private static func onlineToolBatch() -> Self {
+        var fixture = onlineTwoSessions()
+        let summary = fixture.catalog!.sessions.first(where: { $0.id == "S1" })!
+        var snapshot = RACPSessionView.empty
+        snapshot.sessionId = summary.id
+        snapshot.summary = summary
+        snapshot.revision = 1
+        snapshot.replayComplete = true
+        snapshot.cursor = RACPCursor(epoch: "fixture-tool-batch", sequence: 6)
+        var items: [RACPItem] = (1...6).map { index in
+            let id = "batch_tool_\(index)"
+            return RACPItem(id: id, payload: .object([
+                "id": .string(id),
+                "itemType": .string("tool"),
+                "kind": .string("tool"),
+                "role": .string("tool"),
+                "toolName": .string("bash"),
+                "status": .string("completed"),
+                "turnId": .string("turn_batch"),
+                "text": .string("batch-output-\(index)"),
+            ]))
+        }
+        items.append(RACPItem(id: "batch_final", payload: .object([
+            "id": .string("batch_final"),
+            "role": .string("assistant"),
+            "text": .string("以下是 CPU 分析："),
+        ])))
+        snapshot.items = items
         fixture.sessionSnapshots[summary.id] = snapshot
         return fixture
     }

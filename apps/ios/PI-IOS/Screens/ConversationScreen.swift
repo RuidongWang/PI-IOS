@@ -134,8 +134,9 @@ struct ConversationScreen: View {
                             lastMeasuredTopItemID = visibleItemID
 
                             if isRestoringReadingPosition {
+                                let rows = threadRows
                                 guard let target = readingRestoreTargetItemID,
-                                      let frame = frames[target],
+                                      let frame = frames[ToolCallGroupingPolicy.anchorItemID(for: target, in: rows)],
                                       abs(frame.minY) <= 2
                                 else { return }
                                 readingRestoreTargetItemID = nil
@@ -148,7 +149,8 @@ struct ConversationScreen: View {
                             }
 
                             if let lastItemID = session.view.items.last?.id {
-                                let lastFrame = frames[lastItemID]
+                                let lastAnchor = ToolCallGroupingPolicy.anchorItemID(for: lastItemID, in: threadRows)
+                                let lastFrame = frames[lastAnchor]
                                 let near = lastFrame.map {
                                     $0.maxY > 0 && $0.minY <= viewportBottom + 96
                                 } ?? false
@@ -433,32 +435,38 @@ struct ConversationScreen: View {
                     showsDivider: false
                 )
             } else {
-                ForEach(session.view.items, id: \.id) { item in
-                    itemRow(item)
-                        .id(scrollID(for: item.id))
-                        .background {
-                            ReadingRestoreAnchor(
-                                itemID: item.id,
-                                targetID: readingRestoreTargetItemID,
-                                requestID: readingRestoreRequestID,
-                                onUserInteraction: {
-                                    guard isRestoringReadingPosition else { return }
-                                    readingRestoreTargetItemID = nil
-                                    isRestoringReadingPosition = false
-                                    hasNewBelow = newMessagesDuringRestore
-                                }
-                            )
-                        }
-                        .background {
-                            GeometryReader { frame in
-                                Color.clear.preference(
-                                    key: ConversationItemFrameKey.self,
-                                    value: [
-                                        item.id: frame.frame(in: .named("conversation-scroll"))
-                                    ]
+                let rows = threadRows
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                        conversationRowView(row)
+                            .padding(.top, rowSpacing(at: index, rows: rows))
+                            .id(scrollID(for: row.anchorItemID))
+                            .background {
+                                ReadingRestoreAnchor(
+                                    itemID: row.anchorItemID,
+                                    targetID: readingRestoreTargetItemID.map {
+                                        ToolCallGroupingPolicy.anchorItemID(for: $0, in: rows)
+                                    },
+                                    requestID: readingRestoreRequestID,
+                                    onUserInteraction: {
+                                        guard isRestoringReadingPosition else { return }
+                                        readingRestoreTargetItemID = nil
+                                        isRestoringReadingPosition = false
+                                        hasNewBelow = newMessagesDuringRestore
+                                    }
                                 )
                             }
-                        }
+                            .background {
+                                GeometryReader { frame in
+                                    Color.clear.preference(
+                                        key: ConversationItemFrameKey.self,
+                                        value: [
+                                            row.anchorItemID: frame.frame(in: .named("conversation-scroll"))
+                                        ]
+                                    )
+                                }
+                            }
+                    }
                 }
             }
             // DEF-R4-005：纯工具长任务（如 sleep）运行期间 activeItems 为空，
@@ -474,9 +482,34 @@ struct ConversationScreen: View {
         }
     }
 
+    /// 线程行：连续工具调用按策略合并为可折叠分组，其余条目保持原样。
+    private var threadRows: [ConversationRow] {
+        ToolCallGroupingPolicy.rows(for: session.view.items)
+    }
+
+    /// 工具类行之间更紧凑；工具行与正文之间留出正常段落间距。
+    private func rowSpacing(at index: Int, rows: [ConversationRow]) -> CGFloat {
+        guard index > 0 else { return 0 }
+        let previous = rows[index - 1]
+        let current = rows[index]
+        if previous.isToolLike, current.isToolLike { return PISpacing.s8 }
+        if previous.isToolLike || current.isToolLike { return PISpacing.s12 }
+        return PISpacing.s16
+    }
+
+    @ViewBuilder
+    private func conversationRowView(_ row: ConversationRow) -> some View {
+        switch row {
+        case let .item(item):
+            itemRow(item)
+        case let .toolGroup(group):
+            ToolRunCard(group: group)
+        }
+    }
+
     @ViewBuilder
     private func itemRow(_ item: RACPItem) -> some View {
-        if item.toolName != nil || item.role == "tool" || item.kind?.lowercased().contains("tool") == true {
+        if item.isToolItem {
             ToolItemCard(item: item)
         } else if item.role == "user" {
             // 用户消息：右侧淡蓝气泡、无角色标签（design-system.md §7 / spec AC-1）。
@@ -1444,7 +1477,15 @@ private struct ConversationItemFrameKey: PreferenceKey {
 }
 
 private struct ToolItemCard: View {
+    enum Style {
+        /// 线程里单独出现的一条工具调用。
+        case standalone
+        /// 分组展开后的子条目：底色更浅、层级更紧凑。
+        case nested
+    }
+
     let item: RACPItem
+    var style: Style = .standalone
     private let presentation: ToolResultPresentation
     @State private var expanded = false
     @State private var renderStartedAt: TimeInterval?
@@ -1452,8 +1493,13 @@ private struct ToolItemCard: View {
     @State private var firstFrameMilliseconds: Double?
     private let measuresRender: Bool
 
-    init(item: RACPItem) {
+    /// 超过这个体积才把正文放进定高滚动区，短结果仍然随卡片自然增高。
+    private static let inlineBodyByteLimit = 1_200
+    private static let maxBodyHeight: CGFloat = 280
+
+    init(item: RACPItem, style: Style = .standalone) {
         self.item = item
+        self.style = style
         presentation = ToolResultPresentation(text: item.text ?? "")
 #if DEBUG
         measuresRender = ProcessInfo.processInfo.environment["PI_IOS_MEASURE_TOOL_RENDER"] == "1"
@@ -1463,27 +1509,36 @@ private struct ToolItemCard: View {
     }
 
     var body: some View {
-        PICard {
-            DisclosureGroup(isExpanded: expansionBinding) {
+        VStack(alignment: .leading, spacing: 0) {
+            ToolRowHeader(
+                icon: ToolVisuals.icon(for: item.status),
+                iconTint: ToolVisuals.iconTint(for: item.status),
+                title: item.toolName.map { "工具 · \($0)" } ?? "工具调用",
+                statusText: ToolStatusPresentation.label(for: item.status),
+                statusTint: ToolVisuals.statusTint(for: item.status),
+                summary: collapsedSummary,
+                isExpanded: expanded
+            )
+            .contentShape(Rectangle())
+            .onTapGesture { toggleExpansion() }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("toolCard.\(item.id).toggle")
+            .accessibilityValue(renderMeasurementValue)
+            .accessibilityAddTraits(.isButton)
+
+            if expanded {
                 VStack(alignment: .leading, spacing: PISpacing.s8) {
                     if let text = item.text, !text.isEmpty {
-                        Text(presentation.preview)
-                            .font(PIFont.caption)
-                            .foregroundStyle(PIColor.text)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityIdentifier("toolCard.\(item.id).preview")
-                            .onAppear { finishRenderMeasurement() }
-                            .background {
-#if DEBUG
-                                if measuresRender, let renderStartedAt {
-                                    ToolFirstFrameProbe(startedAt: renderStartedAt) { milliseconds in
-                                        guard firstFrameMilliseconds == nil else { return }
-                                        firstFrameMilliseconds = milliseconds
-                                    }
-                                }
-#endif
+                        if presentation.preview.utf8.count > Self.inlineBodyByteLimit {
+                            ScrollView(.vertical) {
+                                resultText
                             }
+                            .frame(height: Self.maxBodyHeight)
+                            .scrollIndicators(.visible)
+                            .clipShape(RoundedRectangle(cornerRadius: PISpacing.s8, style: .continuous))
+                        } else {
+                            resultText
+                        }
                         if let notice = presentation.truncationNotice {
                             Text(notice)
                                 .font(PIFont.meta)
@@ -1496,44 +1551,78 @@ private struct ToolItemCard: View {
                             .foregroundStyle(PIColor.text3)
                     }
                 }
-                .padding(.top, PISpacing.s8)
-            } label: {
-                HStack(spacing: PISpacing.s8) {
-                    Image(systemName: "wrench.and.screwdriver")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(PIColor.text2)
-                    VStack(alignment: .leading, spacing: PISpacing.s4) {
-                        Text(item.toolName.map { "工具 · \($0)" } ?? "工具调用")
-                            .font(PIFont.captionStrong)
-                            .foregroundStyle(PIColor.text)
-                        if let status = item.status {
-                            Text(status)
-                                .font(PIFont.metaSmall)
-                                .foregroundStyle(PIColor.text3)
-                        }
-                    }
-                    Spacer()
-                }
+                .padding(.top, PISpacing.s4)
+                .padding(.bottom, PISpacing.s8)
+                .transition(.opacity)
             }
-            .tint(PIColor.text2)
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("toolCard.\(item.id).toggle")
-        .accessibilityValue(renderMeasurementValue)
+        .padding(.horizontal, PISpacing.s12)
+        .background(cardBackground)
+        .overlay(cardBorder)
+        .animation(.easeInOut(duration: 0.22), value: expanded)
     }
 
-    private var expansionBinding: Binding<Bool> {
-        Binding(
-            get: { expanded },
-            set: { next in
-                if next, !expanded {
-                    renderStartedAt = CACurrentMediaTime()
-                    renderMilliseconds = nil
-                    firstFrameMilliseconds = nil
+    private var resultText: some View {
+        Text(presentation.preview)
+            .font(PIFont.caption)
+            .foregroundStyle(PIColor.text)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("toolCard.\(item.id).preview")
+            .onAppear { finishRenderMeasurement() }
+            .background {
+#if DEBUG
+                if measuresRender, let renderStartedAt {
+                    ToolFirstFrameProbe(startedAt: renderStartedAt) { milliseconds in
+                        guard firstFrameMilliseconds == nil else { return }
+                        firstFrameMilliseconds = milliseconds
+                    }
                 }
-                expanded = next
+#endif
             }
-        )
+    }
+
+    /// 折叠态一行摘要：有正文取正文首行，没正文时只在结束时说明「无输出」，
+    /// 运行中的状态已经由标题旁的状态文案表达，不再重复。
+    private var collapsedSummary: String? {
+        if let summary = presentation.summary() { return summary }
+        if ToolStatusPresentation.isRunning(item.status) { return nil }
+        return "无输出"
+    }
+
+    @ViewBuilder
+    private var cardBackground: some View {
+        switch style {
+        case .standalone:
+            RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                .fill(PIColor.surface)
+        case .nested:
+            RoundedRectangle(cornerRadius: PISpacing.s8, style: .continuous)
+                .fill(PIColor.surface2)
+        }
+    }
+
+    @ViewBuilder
+    private var cardBorder: some View {
+        switch style {
+        case .standalone:
+            RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
+        case .nested:
+            EmptyView()
+        }
+    }
+
+    private func toggleExpansion() {
+        if !expanded {
+            renderStartedAt = CACurrentMediaTime()
+            renderMilliseconds = nil
+            firstFrameMilliseconds = nil
+        }
+        withAnimation(.easeInOut(duration: 0.22)) {
+            expanded.toggle()
+        }
     }
 
     private func finishRenderMeasurement() {
@@ -1556,12 +1645,134 @@ private struct ToolItemCard: View {
     /// 运行中的工具只是还没有正文。把「还没输出」说成「服务器没有返回工具输出正文」
     /// 会让用户以为工具已经结束、结果丢了。
     private var emptyBodyNotice: String {
-        switch item.status?.lowercased() {
-        case nil, "streaming", "running", "pending", "in_progress":
+        if item.status == nil || ToolStatusPresentation.isRunning(item.status) {
             return "工具执行中…"
-        default:
-            return "服务器没有返回工具输出正文。"
         }
+        return "服务器没有返回工具输出正文。"
+    }
+}
+
+/// 批量工具调用分组：默认折叠成一行「N 次工具调用 + 工具名汇总 + 状态」，
+/// 展开后逐条显示紧凑的工具行；每条仍可再展开查看完整结果。
+private struct ToolRunCard: View {
+    let group: ToolCallGroup
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ToolRowHeader(
+                icon: "wrench.and.screwdriver",
+                iconTint: group.hasFailure ? PIColor.danger : PIColor.text2,
+                title: group.title,
+                statusText: group.statusSummary,
+                statusTint: group.hasFailure
+                    ? PIColor.danger
+                    : (group.isRunning ? PIColor.accent : PIColor.success),
+                summary: group.toolSummary,
+                isExpanded: expanded
+            )
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    expanded.toggle()
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("toolGroup.\(group.items.first?.id ?? group.id).toggle")
+            .accessibilityValue(expanded ? "expanded" : "collapsed")
+            .accessibilityAddTraits(.isButton)
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(group.items, id: \.id) { item in
+                        ToolItemCard(item: item, style: .nested)
+                    }
+                }
+                .padding(.top, PISpacing.s4)
+                .padding(.bottom, PISpacing.s8)
+                .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, PISpacing.s12)
+        .background(
+            RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                .fill(PIColor.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
+        )
+        .animation(.easeInOut(duration: 0.22), value: expanded)
+    }
+}
+
+/// 工具行标题：工具名/数量、状态、结果摘要各占清晰层级，整体保持两行以内的紧凑高度。
+private struct ToolRowHeader: View {
+    let icon: String
+    let iconTint: Color
+    let title: String
+    let statusText: String?
+    let statusTint: Color
+    let summary: String?
+    let isExpanded: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(iconTint)
+                .frame(width: 16)
+            Text(title)
+                .font(PIFont.captionStrong)
+                .foregroundStyle(PIColor.text)
+                .lineLimit(1)
+                .layoutPriority(2)
+            if let statusText, !statusText.isEmpty {
+                Text(statusText)
+                    .font(PIFont.metaSmall)
+                    .foregroundStyle(statusTint)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+            }
+            if let summary, !summary.isEmpty {
+                Text(summary)
+                    .font(PIFont.metaSmall)
+                    .foregroundStyle(PIColor.text3)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Spacer(minLength: 0)
+            }
+            Image(systemName: "chevron.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(PIColor.text3)
+                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                .accessibilityHidden(true)
+        }
+        .frame(minHeight: PIMetrics.minHitTarget)
+    }
+}
+
+private enum ToolVisuals {
+    static func icon(for status: String?) -> String {
+        if ToolStatusPresentation.isFailure(status) { return "exclamationmark.triangle" }
+        if ToolStatusPresentation.isRunning(status) { return "clock" }
+        if ToolStatusPresentation.isCancelled(status) { return "xmark.circle" }
+        return "wrench.and.screwdriver"
+    }
+
+    static func iconTint(for status: String?) -> Color {
+        if ToolStatusPresentation.isFailure(status) { return PIColor.danger }
+        if ToolStatusPresentation.isRunning(status) { return PIColor.accent }
+        return PIColor.text2
+    }
+
+    static func statusTint(for status: String?) -> Color {
+        if ToolStatusPresentation.isFailure(status) { return PIColor.danger }
+        if ToolStatusPresentation.isRunning(status) { return PIColor.accent }
+        if ToolStatusPresentation.isCompleted(status) { return PIColor.success }
+        return PIColor.text3
     }
 }
 

@@ -32,6 +32,32 @@ final class ToolResultPresentationTests: XCTestCase {
         XCTAssertNil(presentation.truncationNotice)
     }
 
+    func testSummaryUsesFirstMeaningfulLine() {
+        let presentation = ToolResultPresentation(text: "\n\n```bash\n$ ls -la\n```\nfirst real line\nsecond line")
+
+        XCTAssertEqual(presentation.summary(), "$ ls -la")
+        XCTAssertEqual(presentation.summary(maxCharacters: 3), "$ l…")
+    }
+
+    func testSummarySkipsBlankLinesBeforeShortFirstLine() {
+        let presentation = ToolResultPresentation(text: "\n  \n  hello world  \nsecond")
+
+        XCTAssertEqual(presentation.summary(), "hello world")
+    }
+
+    func testSummaryIsNilForEmptyResult() {
+        XCTAssertNil(ToolResultPresentation(text: "").summary())
+        XCTAssertNil(ToolResultPresentation(text: "   \n\n").summary())
+        XCTAssertNil(ToolResultPresentation(text: "ok").summary(maxCharacters: 0))
+    }
+
+    func testSummaryTruncatesLongSingleLine() {
+        let presentation = ToolResultPresentation(text: String(repeating: "a", count: 200))
+
+        let summary = presentation.summary(maxCharacters: 20)
+        XCTAssertEqual(summary, String(repeating: "a", count: 20) + "…")
+    }
+
     func testFourMiBPreparationStaysUnderTwoHundredMilliseconds() {
         let text = String(repeating: "0123456789abcdef", count: 256 * 1024)
         let clock = ContinuousClock()
