@@ -181,7 +181,7 @@ struct ProjectDetailSheet: View {
                         PIStatusBanner(
                             kind: .info,
                             text: "正在读取项目与会话",
-                            detail: "统计和会话列表会在服务器返回完整目录后更新。"
+                            detail: "目录返回后自动更新。"
                         )
                     } else if let catalogError = connection.catalogError {
                         PIStatusBanner(
@@ -195,7 +195,7 @@ struct ProjectDetailSheet: View {
                         PIStatusBanner(
                             kind: .warning,
                             text: "服务器离线",
-                            detail: "当前显示上次同步的会话统计，恢复连接后自动更新。"
+                            detail: "显示上次同步数据，联网后更新。"
                         )
                     }
 

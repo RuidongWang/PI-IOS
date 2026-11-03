@@ -145,7 +145,7 @@ struct SettingsScreen: View {
             if model.hosts.isEmpty {
                 PIEmptyState(
                     title: "还没有服务器",
-                    message: "添加一台服务器后，才能在服务器页安装 PI-adaptor 并完成配对。当前只保存本机记录。",
+                    message: "添加服务器后即可安装 PI-adaptor 并配对。",
                     actionTitle: "＋ 添加服务器",
                     action: { path.append(.addServer) }
                 )
@@ -157,7 +157,7 @@ struct SettingsScreen: View {
                     if let current = model.currentHost, current.pairedAt == nil {
                         PIListRow(
                             title: "重新配对",
-                            subtitle: "打开服务器页，使用 PI-adaptor 的一次性令牌完成配对",
+                            subtitle: "打开服务器页完成配对",
                             showsChevron: true,
                             showsDivider: false,
                             action: { path.append(.editServer(current.id)) }
@@ -264,7 +264,6 @@ struct SettingsScreen: View {
                     if connection.state.isOnline {
                         PIListRow(
                             title: "刷新项目与会话",
-                            subtitle: "重新发送 project/list 与 session/list",
                             showsChevron: true,
                             showsDivider: true,
                             action: { Task { await connection.refreshRemote() } }
@@ -284,7 +283,6 @@ struct SettingsScreen: View {
                         )
                         PIListRow(
                             title: "断开隧道",
-                            subtitle: "当前没有已建立的隧道",
                             isEnabled: false,
                             showsDivider: false
                         )
@@ -304,22 +302,10 @@ struct SettingsScreen: View {
                     )
                     .accessibilityIdentifier("settings.runtimeVersionMismatch")
                 }
-                if !connection.state.isOnline, model.currentHost != nil {
-                    // AC-17：服务停止时给出可复制的重启命令，不假装在线。
-                    PICard {
-                        Text("Host 离线时的排查")
-                            .font(PIFont.captionStrong)
-                            .foregroundStyle(PIColor.text2)
-                        Text("在服务器上重启：systemctl --user restart pi-adaptor.service")
-                            .font(PIFont.caption)
-                            .foregroundStyle(PIColor.text3)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
             } else {
                 PIListRow(
                     title: "连接状态",
-                    subtitle: "还没有服务器，先在「服务器」里添加一台",
+                    subtitle: "还没有服务器",
                     isEnabled: false,
                     showsDivider: false
                 )
@@ -391,7 +377,6 @@ struct SettingsScreen: View {
             )
             PIListRow(
                 title: "Host v2 Provider",
-                subtitle: "直接管理服务器保存的 provider 与密钥",
                 showsChevron: true,
                 showsDivider: true,
                 action: { path.append(.hostProviders) }
@@ -430,7 +415,7 @@ struct SettingsScreen: View {
             )
             PIListRow(
                 title: "离线缓存上限",
-                subtitle: "每个会话最多缓存 \(connection.cacheItemLimit) 条（当前按离线上限裁剪），最多 \(PersistedState.maxCachedConversations) 个会话",
+                subtitle: "每会话 \(connection.cacheItemLimit) 条 · 最多 \(PersistedState.maxCachedConversations) 个会话",
                 value: "\(model.offlineCacheLimit) 条",
                 showsChevron: true,
                 showsDivider: true,

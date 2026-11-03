@@ -723,7 +723,7 @@ struct SidebarView: View {
             if connection.state.isOnline {
                 PIListRow(
                     title: "新建会话",
-                    subtitle: "到项目页选择项目后创建（需要项目作为工作区）",
+                    subtitle: "先选择项目（作为工作区）",
                     showsChevron: true,
                     showsDivider: false,
                     action: {

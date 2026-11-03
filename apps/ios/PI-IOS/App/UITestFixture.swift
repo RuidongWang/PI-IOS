@@ -36,6 +36,7 @@ struct UITestFixture {
         case "online-reading-two-sessions": return onlineReadingTwoSessions()
         case "online-large-tool-result": return onlineLargeToolResult()
         case "online-tool-result-body": return onlineToolResultBody()
+        case "online-markdown-message": return onlineMarkdownMessage()
         case "online-long-history-pending-approval": return onlineLongHistoryPendingApproval()
         case "online-project-lifecycle": return onlineProjectLifecycle()
         case "online-upstream-import": return onlineUpstreamImport()
@@ -187,6 +188,44 @@ struct UITestFixture {
                     "toolName": .string("bash"),
                     "input": .object(["command": .string("sleep 30")])
                 ])
+            ])),
+        ]
+        fixture.sessionSnapshots[summary.id] = snapshot
+        return fixture
+    }
+
+    /// Agent 消息的 Markdown 渲染（回归：标题、粗体、行内代码、表格、列表、围栏代码块
+    /// 曾被纯 Text 原样画成 `##`、`**`、`|`、```` ``` ````）。
+    private static func onlineMarkdownMessage() -> Self {
+        var fixture = onlineTwoSessions()
+        let summary = fixture.catalog!.sessions.first(where: { $0.id == "S1" })!
+        var snapshot = RACPSessionView.empty
+        snapshot.sessionId = summary.id
+        snapshot.summary = summary
+        snapshot.revision = 1
+        snapshot.replayComplete = true
+        snapshot.cursor = RACPCursor(epoch: "fixture-markdown", sequence: 3)
+        let text = """
+        ## 磁盘信息
+
+        **磁盘使用情况（df -h）**
+
+        | 文件系统 | 大小 | 使用率 |
+        | --- | --- | --- |
+        | /dev/sda1 | 194G | 23% |
+
+        - `sda1` — 199.9G 主磁盘
+        - 剩余约 **150G** 可用
+
+        ```bash
+        df -h
+        ```
+        """
+        snapshot.items = [
+            RACPItem(id: "markdown-message", payload: .object([
+                "id": .string("markdown-message"),
+                "role": .string("assistant"),
+                "text": .string(text),
             ])),
         ]
         fixture.sessionSnapshots[summary.id] = snapshot

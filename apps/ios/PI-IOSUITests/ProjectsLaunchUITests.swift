@@ -429,7 +429,7 @@ final class ProjectsLaunchUITests: XCTestCase {
             "An online conversation must expose the v2 image attachment picker."
         )
         XCTAssertTrue(
-            app.staticTexts["支持 JPEG、PNG、WebP；单张不超过 20 MiB，每条消息最多 10 张"]
+            app.staticTexts["JPEG / PNG / WebP · 单张 ≤20 MiB · 最多 10 张"]
                 .waitForExistence(timeout: 5),
             "The conversation composer must explain the v2 attachment limits."
         )

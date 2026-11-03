@@ -36,7 +36,7 @@ final class ModelConfigChipUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Alpha Two"].waitForExistence(timeout: 5))
         XCTAssertTrue(
             app.staticTexts.matching(
-                NSPredicate(format: "label CONTAINS %@", "当前 turn 仍在运行")
+                NSPredicate(format: "label CONTAINS %@", "当前 turn 运行中")
             ).firstMatch.waitForExistence(timeout: 5)
         )
         XCTAssertTrue(modelChip.waitForExistence(timeout: 5))

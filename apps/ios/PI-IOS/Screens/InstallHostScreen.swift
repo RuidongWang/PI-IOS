@@ -142,13 +142,12 @@ struct InstallHostScreen: View {
                 Text("上次成功安装")
                     .font(PIFont.captionStrong)
                     .foregroundStyle(PIColor.text2)
-                Text("v\(receipt.version) · 端口 \(receipt.hostPort)")
+                Text("v\(receipt.version) · 端口 \(String(receipt.hostPort))")
                     .font(PIFont.listTitle)
                     .foregroundStyle(PIColor.text)
-                Text("完成于 \(receipt.completedAt.formatted(date: .abbreviated, time: .shortened))。再次安装会复用已有安装树，除非勾选强制重装。")
+                Text("完成于 \(receipt.completedAt.formatted(date: .abbreviated, time: .shortened))")
                     .font(PIFont.caption)
                     .foregroundStyle(PIColor.text3)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -156,12 +155,12 @@ struct InstallHostScreen: View {
     private var configurationCard: some View {
         PIGroup(
             "安装参数",
-            footer: "端口是服务器 127.0.0.1 上的监听端口，不是 SSH 端口；安装成功后自动写回服务器记录。"
+            footer: "服务器本地监听端口（非 SSH 端口），安装成功后自动写回记录。"
         ) {
             VStack(alignment: .leading, spacing: PISpacing.s12) {
                 PIFormField(
                     label: "PI-adaptor 端口",
-                    hint: "建议使用现有端口或 44271；不要填 0，随机端口无法常驻。",
+                    hint: "建议 44271；不能填 0",
                     error: portError
                 ) {
                     TextField("44271", text: $portText)

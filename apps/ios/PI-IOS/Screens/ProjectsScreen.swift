@@ -268,7 +268,6 @@ struct ProjectsScreen: View {
                 }
                 PIListRow(
                     title: "浏览服务器目录并注册",
-                    subtitle: "逐级浏览目录，填写项目名称后注册",
                     isEnabled: canOpenProjectBrowser,
                     showsChevron: true,
                     showsDivider: false,
@@ -282,7 +281,7 @@ struct ProjectsScreen: View {
                     ForEach(Array(archivedProjects.enumerated()), id: \.element.id) { index, project in
                         PIListRow(
                             title: projectDisplayName(project),
-                            subtitle: "本机归档，服务器内容未变",
+                            subtitle: "本机归档",
                             value: "恢复",
                             showsChevron: true,
                             showsDivider: index < archivedProjects.count - 1,
@@ -369,7 +368,6 @@ struct ProjectsScreen: View {
             if visible.isEmpty {
                 PIListRow(
                     title: connection.sessions.isEmpty ? "服务器上没有会话" : "这个项目下没有会话",
-                    subtitle: "点下面的「新建会话」创建一条",
                     isEnabled: false,
                     showsDivider: false
                 )

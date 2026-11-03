@@ -33,7 +33,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("G-01", app.buttons["打开侧边栏"].exists, "左上角菜单可打开")
         expect("G-01", text("还没有服务器"), "服务器空态")
         expect("G-01", text("＋ 添加服务器"), "添加入口")
-        expect("G-01", text("还没有服务器，先在「服务器」里添加一台"), "无服务器连接说明")
+        expect("G-01", textContaining("还没有服务器"), "无服务器连接说明")
         scrollUntil(text: "不会收到后台推送")
         expect("G-01", text("不会收到后台推送"), "后台推送说明")
         expect("G-01", text("还没有服务器，没有可撤销的配对记录"), "撤销配对禁用原因")
@@ -98,7 +98,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         openSettings()
         expect("SET-05", text("未连接"), "离线连接状态")
         expect("SET-05", text("systemctl --user restart pi-adaptor.service"), "重启命令")
-        expect("SET-05", text("Host 离线时的排查"), "离线排查卡")
+        expect("SET-05", text("重启命令"), "离线重启入口")
         expect("SET-05", text("inactive"), "systemd inactive")
         snapshot("SET-05", step: 1)
 
@@ -529,7 +529,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("PRJ-06", text("已归档 · 1"), "已归档分组")
         let archived = app.descendants(matching: .any)["projects.archived.P2"]
         expect("PRJ-06", archived.waitForExistence(timeout: 5), "归档项目行")
-        expect("PRJ-06", archived.label.contains("本机归档，服务器内容未变") && archived.label.contains("恢复"), "归档行说明")
+        expect("PRJ-06", archived.label.contains("本机归档") && archived.label.contains("恢复"), "归档行说明")
         archived.tap()
         expect("PRJ-06", app.buttons["projects.row.P2"].waitForExistence(timeout: 5), "恢复项目")
 
@@ -775,7 +775,7 @@ final class UIRegressionSuiteTests: XCTestCase {
             "CNV-16",
             app.buttons["添加图片附件"].exists
                 && app.buttons["添加图片附件"].isEnabled
-                && text("支持 JPEG、PNG、WebP；单张不超过 20 MiB，每条消息最多 10 张"),
+                && text("JPEG / PNG / WebP · 单张 ≤20 MiB · 最多 10 张"),
             "附件入口可点与说明"
         )
         snapshot("CNV-16", step: 1)
@@ -786,7 +786,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "fixture-session-B")).firstMatch.tap()
         expect("OFF-01", text("离线，内容可能不是最新"), "离线横幅")
         expect("OFF-01", text("缓存的历史（只读）") && text("离线只读 · 缓存可能已过期"), "缓存历史标识")
-        expect("OFF-01", text("缓存的待审批（1）") && text("离线状态不可提交；恢复在线后只使用新快照里的卡片与 revision。"), "缓存审批说明")
+        expect("OFF-01", text("缓存的待审批（1）") && text("离线时不可提交，恢复在线后再操作。"), "缓存审批说明")
         expect("OFF-01", text("未发送草稿（离线只读）") && text("Fixture B unsent draft"), "缓存草稿")
         expect("OFF-01", text("Fixture B private history"), "缓存历史文本")
         expect("OFF-01", !app.buttons["允许一次"].isEnabled && !app.buttons["本会话允许"].isEnabled && !app.buttons["拒绝"].isEnabled, "审批按钮禁用")

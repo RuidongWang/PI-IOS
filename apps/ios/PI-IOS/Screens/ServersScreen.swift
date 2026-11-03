@@ -147,12 +147,6 @@ struct ServersScreen: View {
             )
         } else if let message = resultMessage {
             PIStatusBanner(kind: .info, text: "测试结果", detail: message)
-        } else {
-            PIStatusBanner(
-                kind: .info,
-                text: "保存并测试连接",
-                detail: "测试会真实连接一次服务器；凭证只保存在本机。"
-            )
         }
     }
 
@@ -211,7 +205,7 @@ struct ServersScreen: View {
             formRow {
                 PIFormField(
                     label: "PI-adaptor 端口",
-                    hint: "可留空：连接时会通过 SSH 自动探测服务器上 PI-adaptor 监听的端口，无需手动填写",
+                    hint: "留空自动探测",
                     error: errors.hostPort
                 ) {
                     TextField("自动探测", text: $draft.hostPort)
@@ -239,7 +233,7 @@ struct ServersScreen: View {
                 case .password:
                     PIFormField(
                         label: "密码",
-                        hint: "保存在 Keychain，不写入 state-v1.json",
+                        hint: "保存在 Keychain",
                         error: errors.secret
                     ) {
                         SecureField("服务器登录密码", text: $draft.secret)
@@ -301,7 +295,7 @@ struct ServersScreen: View {
                         }
                         PIFormField(
                             label: "私钥口令（可选）",
-                            hint: "只在私钥带口令时需要；保存在 Keychain，不写入 state-v1.json",
+                            hint: "私钥带口令时填写",
                             error: errors.passphrase
                         ) {
                             SecureField("私钥口令", text: $draft.passphrase)
@@ -354,7 +348,7 @@ struct ServersScreen: View {
     private func fingerprintSection(for host: HostRecord) -> some View {
         PIGroup(
             "主机指纹",
-            footer: "指纹变化会被拒绝连接（AC-02.2）。服务器合法重装后，先「移除旧指纹」，再重新连接并确认新指纹（AC-02.3）。"
+            footer: "指纹变化会拒绝连接；服务器重装后请先移除旧指纹，再重新核对。"
         ) {
             if let pinned = pinnedHostKey {
                 PIListRow(
@@ -365,7 +359,7 @@ struct ServersScreen: View {
                 )
                 PIListRow(
                     title: "移除旧指纹后重新核对",
-                    subtitle: "移除后不会自动信任新指纹：下次连接仍需你确认",
+                    subtitle: "下次连接仍需确认新指纹",
                     showsChevron: true,
                     showsDivider: false,
                     action: {
@@ -384,7 +378,7 @@ struct ServersScreen: View {
             } else {
                 PIListRow(
                     title: "尚未固定",
-                    subtitle: "下次连接会显示 SHA256 指纹，确认后才写入 Keychain",
+                    subtitle: "首次连接需确认 SHA256 指纹",
                     isEnabled: false,
                     showsDivider: false
                 )
@@ -398,11 +392,10 @@ struct ServersScreen: View {
         let hasDeviceToken = KeychainStore.loadDeviceToken(hostID: host.id) != nil
         return PIGroup(
             "PI-adaptor 连接",
-            footer: "配对令牌由服务器执行 `pi-adaptor --pair` 时输出，只能使用一次。配对成功后设备令牌只保存在本机 Keychain。"
+            footer: "配对令牌一次性有效；设备令牌只保存在本机 Keychain。"
         ) {
             PIListRow(
                 title: "安装或修复 PI-adaptor",
-                subtitle: "远端探测、下载校验、systemd 常驻、配对与设备令牌重连",
                 isEnabled: !isSaving && !isPairing && !isDeleting,
                 showsChevron: true,
                 showsDivider: true,
@@ -427,7 +420,7 @@ struct ServersScreen: View {
                 VStack(alignment: .leading, spacing: PISpacing.s8) {
                     PIFormField(
                         label: "一次性配对令牌",
-                        hint: "默认安装格式：ppt2.…；安装流程会在远端启动 PI-adaptor --pair"
+                        hint: "安装流程会输出 ppt2.… 令牌"
                     ) {
                         SecureField("ppt2.…", text: $pairingToken)
                             .textInputAutocapitalization(.never)
@@ -539,11 +532,9 @@ struct ServersScreen: View {
     /// 私钥文件的提示：首次选择、重新选择、编辑态沿用已保存文件，三种情况文案不同。
     private var keyFileHint: String {
         if draft.secret.isEmpty, let name = draft.keyFileName {
-            return "Keychain 里已有来自文件「\(name)」的私钥；重新选择会覆盖旧凭证。"
+            return "重新选择会覆盖 Keychain 里来自「\(name)」的私钥。"
         }
-        return "从「文件」App 或 iCloud 云盘选 OpenSSH 私钥（ed25519 / ECDSA / RSA，可带口令）。"
-            + "不限制扩展名：`.key`、`.pem`、`id_ed25519` 等都能选。"
-            + "文件只读取一次，私钥内容存进 Keychain，原文件之后可删除或移走。"
+        return "OpenSSH 私钥（ed25519 / ECDSA / RSA），读取一次后存入 Keychain。"
             + "选择器读不到文件时，用旁边的「粘贴」直接把私钥全文粘进来。"
     }
     /// 读取并校验所选私钥文件。

@@ -201,9 +201,9 @@ struct ModelsScreen: View {
     @ViewBuilder
     private var status: some View {
         if isFetching {
-            PIStatusBanner(kind: .info, text: "正在获取模型", detail: "请求由服务器发出，API Key 通过 SSH stdin 传递。")
+            PIStatusBanner(kind: .info, text: "正在获取模型")
         } else if isImporting {
-            PIStatusBanner(kind: .info, text: "正在导入模型服务", detail: "正在调用服务器上的 RACP provider/create。")
+            PIStatusBanner(kind: .info, text: "正在导入模型服务")
         } else if let errorMessage {
             PIStatusBanner(
                 kind: .danger,
@@ -262,7 +262,7 @@ struct ModelsScreen: View {
     private var addService: some View {
         PIGroup(
             "添加模型服务",
-            footer: "Base URL 填写模型请求根地址；发现接口会自动追加 /models。DeepSeek 官方预设使用 https://api.deepseek.com。"
+            footer: "Base URL 填模型请求根地址，发现接口会自动追加 /models。"
         ) {
             VStack(alignment: .leading, spacing: PISpacing.s16) {
                 PIFormField(label: "服务预设", hint: "选择官方服务会自动填入 Base URL") {
@@ -303,7 +303,7 @@ struct ModelsScreen: View {
                         .disabled(authPreset != .apiKey)
                         .accessibilityIdentifier("models.baseURL")
                 }
-                PIFormField(label: "API Key", hint: "只进入内存并经 SSH stdin 发送；不写入本机状态文件") {
+                PIFormField(label: "API Key", hint: "经 SSH 发送，不写入本机文件") {
                     SecureField("API Key", text: $apiKey)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()

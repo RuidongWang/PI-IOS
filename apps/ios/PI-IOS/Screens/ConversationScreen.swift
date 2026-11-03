@@ -425,7 +425,6 @@ struct ConversationScreen: View {
 
     private var threadSection: some View {
         VStack(alignment: .leading, spacing: PISpacing.s8) {
-            PISectionHeader(text: "消息")
             if session.view.items.isEmpty {
                 PIListRow(
                     title: "这个会话还没有消息",
@@ -517,10 +516,10 @@ struct ConversationScreen: View {
                             }
                         }
                     }
-                    Text(item.text ?? item.kind ?? "条目")
-                        .font(PIFont.body)
-                        .foregroundStyle(PIColor.text)
-                        .fixedSize(horizontal: false, vertical: true)
+                    // Agent 输出几乎都是 Markdown（表格、围栏代码块、粗体、列表），
+                    // 纯 Text 会把标记原样画出来；用户气泡保持纯文本，避免把用户输入的
+                    // `*`、`_` 当成语法解释。
+                    PIMarkdownView(text: item.text ?? item.kind ?? "条目")
                     if let status = item.status {
                         Text(status)
                             .font(PIFont.meta)
@@ -744,7 +743,7 @@ struct ConversationScreen: View {
                             .font(PIFont.body)
                             .foregroundStyle(PIColor.text)
                             .fixedSize(horizontal: false, vertical: true)
-                        Text("恢复在线并完成快照重建后可重新编辑或发送。")
+                        Text("恢复在线后可继续编辑或发送。")
                             .font(PIFont.meta)
                             .foregroundStyle(PIColor.text3)
                     }
@@ -753,14 +752,14 @@ struct ConversationScreen: View {
             if cached == nil {
                 PIListRow(
                     title: "本机没有这个会话的缓存",
-                    subtitle: "缓存只保存曾在联网时读到的内容，最多 \(PersistedState.maxCachedConversations) 个会话",
+                    subtitle: "只包含联网时缓存的内容（最多 \(PersistedState.maxCachedConversations) 个会话）",
                     isEnabled: false,
                     showsDivider: false
                 )
             } else if entries.isEmpty {
                 PIListRow(
                     title: "缓存里没有文本消息",
-                    subtitle: "审批卡或未发送草稿仍可在上方查看，全部为只读。",
+                    subtitle: "审批卡与草稿仍可在上方查看。",
                     isEnabled: false,
                     showsDivider: false
                 )
@@ -799,11 +798,6 @@ struct ConversationScreen: View {
                     .font(PIFont.body)
                     .foregroundStyle(PIColor.text)
                     .fixedSize(horizontal: false, vertical: true)
-                if let revision = approval.revision {
-                    Text("缓存 revision：\(revision)")
-                        .font(PIFont.meta)
-                        .foregroundStyle(PIColor.text3)
-                }
                 if contract {
                     HStack(spacing: PISpacing.s8) {
                         Button("批准") {}
@@ -821,7 +815,7 @@ struct ConversationScreen: View {
                     .buttonStyle(.bordered)
                     .disabled(true)
                 }
-                Text("离线状态不可提交；恢复在线后只使用新快照里的卡片与 revision。")
+                Text("离线时不可提交，恢复在线后再操作。")
                     .font(PIFont.meta)
                     .foregroundStyle(PIColor.text3)
             }
@@ -904,7 +898,7 @@ struct ConversationScreen: View {
                             }
                         }
                     } else {
-                        Text("这张卡已不可提交：请等待下一次同步重新生成。")
+                        Text("卡片已失效，等待同步后重试。")
                             .font(PIFont.caption)
                             .foregroundStyle(PIColor.text3)
                     }
@@ -964,7 +958,7 @@ struct ConversationScreen: View {
                         .font(PIFont.captionStrong)
                         .foregroundStyle(PIColor.text2)
                     if questions.isEmpty {
-                        Text("这张提问卡没有可解析的问题：只能跳过。")
+                        Text("无法解析该提问，只能跳过。")
                             .font(PIFont.caption)
                             .foregroundStyle(PIColor.text3)
                     }
@@ -975,7 +969,7 @@ struct ConversationScreen: View {
                                 .foregroundStyle(PIColor.text)
                                 .fixedSize(horizontal: false, vertical: true)
                             if question.options.isEmpty {
-                                Text("该问题没有提供选项，提交时记为跳过。")
+                                Text("没有选项，提交将跳过。")
                                     .font(PIFont.meta)
                                     .foregroundStyle(PIColor.text3)
                             } else {
@@ -1070,7 +1064,7 @@ struct ConversationScreen: View {
         return VStack(alignment: .leading, spacing: PISpacing.s8) {
             composerConfigurationChips
             if case .queue = session.sendAdmission {
-                Text("当前 turn 仍在运行：发送会排成下一条指令")
+                Text("当前 turn 运行中，发送会排队")
                     .font(PIFont.meta)
                     .foregroundStyle(PIColor.text2)
             }
@@ -1171,7 +1165,7 @@ struct ConversationScreen: View {
                     .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
             )
             .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
-            Text("支持 JPEG、PNG、WebP；单张不超过 20 MiB，每条消息最多 10 张")
+            Text("JPEG / PNG / WebP · 单张 ≤20 MiB · 最多 10 张")
                 .font(PIFont.meta)
                 .foregroundStyle(PIColor.text3)
         }
