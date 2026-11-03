@@ -35,17 +35,41 @@ enum KeychainStore {
 
     @discardableResult
     static func set(_ value: Data, service: String, account: String) -> Bool {
+        write(value, service: service, account: account) == errSecSuccess
+    }
+
+    /// 写入失败时保留原始 `OSStatus`，让界面能区分「未签名」「锁屏」这类
+    /// 用户可自行处理的原因；旧的 `Bool` 接口只用于不需要诊断的调用点。
+    private static func write(_ value: Data, service: String, account: String) -> OSStatus {
         let query = baseQuery(service: service, account: account)
         let attributes: [String: Any] = [
             kSecValueData as String: value,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
         let result = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if result == errSecSuccess { return true }
-        guard result == errSecItemNotFound else { return false }
+        if result == errSecSuccess { return errSecSuccess }
+        guard result == errSecItemNotFound else { return result }
         var insert = query
         attributes.forEach { insert[$0.key] = $0.value }
-        return SecItemAdd(insert as CFDictionary, nil) == errSecSuccess
+        return SecItemAdd(insert as CFDictionary, nil)
+    }
+
+    /// 把 Keychain 状态码翻译成可执行的提示；不回显任何凭证内容。
+    static func describe(_ status: OSStatus) -> String {
+        switch status {
+        case errSecMissingEntitlement:
+            // 典型场景：模拟器里装的是 `CODE_SIGNING_ALLOWED=NO` 的
+            // linker-signed 包，没有 application-identifier，Keychain 拒绝写入。
+            return "当前安装包缺少 Keychain 权限（未签名），请用 Xcode 重新安装后再试"
+        case errSecInteractionNotAllowed:
+            return "设备当前处于锁屏状态，解锁后再保存凭证"
+        case errSecNotAvailable:
+            return "Keychain 暂不可用，请稍后重试"
+        case errSecAuthFailed:
+            return "Keychain 鉴权失败，请解锁设备后重试"
+        default:
+            return "凭证写入 Keychain 失败（错误码 \(status)），请检查设备锁与签名后重试"
+        }
     }
 
     static func get(service: String, account: String) -> Data? {
@@ -76,6 +100,15 @@ enum KeychainStore {
 
     @discardableResult
     static func saveCredential(_ credential: SSHCredential, kind: AuthKind, account: String) -> Bool {
+        saveCredentialStatus(credential, kind: kind, account: account) == errSecSuccess
+    }
+
+    /// 与 `saveCredential` 相同，但返回原始状态码，供界面给出可行动的失败原因。
+    static func saveCredentialStatus(
+        _ credential: SSHCredential,
+        kind: AuthKind,
+        account: String
+    ) -> OSStatus {
         let stored: StoredCredential
         switch credential {
         case .password(let value):
@@ -88,8 +121,8 @@ enum KeychainStore {
             )
         }
         _ = kind
-        guard let data = try? JSONEncoder().encode(stored) else { return false }
-        return set(data, service: Service.credential, account: account)
+        guard let data = try? JSONEncoder().encode(stored) else { return errSecParam }
+        return write(data, service: Service.credential, account: account)
     }
 
     static func loadCredential(account: String) -> SSHCredential? {

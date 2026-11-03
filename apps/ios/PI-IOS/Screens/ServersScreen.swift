@@ -1,4 +1,5 @@
 import SwiftUI
+import Security
 import PIiOSNet
 import UniformTypeIdentifiers
 
@@ -670,12 +671,13 @@ struct ServersScreen: View {
                     openSSHText: draft.secret,
                     passphrase: draft.passphrase.isEmpty ? nil : draft.passphrase
                 )
-            guard KeychainStore.saveCredential(
+            let writeStatus = KeychainStore.saveCredentialStatus(
                 newCredential,
                 kind: draft.authKind,
                 account: account
-            ) else {
-                errors.secret = "凭证写入 Keychain 失败，请检查设备锁与签名后重试"
+            )
+            guard writeStatus == errSecSuccess else {
+                errors.secret = KeychainStore.describe(writeStatus)
                 return
             }
             credential = newCredential
