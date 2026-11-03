@@ -64,6 +64,18 @@ struct ModelsScreen: View {
 
     private var currentHost: HostRecord? { model.currentHost }
 
+    /// 获取模型走 SSH（只需本机保存的凭证），导入却必须经在线的 PI-adaptor
+    /// 隧道调用 `provider/create`。两者前置条件不同，必须提前说清楚，否则用户
+    /// 在隧道离线时填完表单、拿到模型清单，最后只看到一条协议错误。
+    private var importBlocker: String? {
+        if connection.state.isOnline { return nil }
+        if let host = currentHost, host.pairedAt == nil {
+            return "这台服务器还没有完成配对：请先在服务器页用一次性令牌配对，再导入模型服务。"
+        }
+        let reason = connection.state.detail.map { "（\($0)）" } ?? ""
+        return "导入模型需要 PI-adaptor 在线，当前为「\(connection.state.displayText)」\(reason)。请到设置页恢复连接后重试。"
+    }
+
     private struct EditableModelDraft: Identifiable, Equatable {
         let id = UUID()
         var source: ResolvedModelCandidate
@@ -128,6 +140,14 @@ struct ModelsScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: PISpacing.s24) {
+                if let importBlocker {
+                    PIStatusBanner(
+                        kind: .warning,
+                        text: "无法导入模型服务",
+                        detail: importBlocker
+                    )
+                    .accessibilityIdentifier("models.importBlocked")
+                }
                 status
                 configuredProviders
                 addService
@@ -344,7 +364,19 @@ struct ModelsScreen: View {
                 PIPrimaryButton(title: isImporting ? "正在导入…" : "导入 \(selectedDraftIDs.count) 个模型") {
                     importModels()
                 }
-                .disabled(isImporting || isFetching || selectedDraftIDs.isEmpty || apiKey.isEmpty)
+                .disabled(
+                    isImporting
+                        || isFetching
+                        || selectedDraftIDs.isEmpty
+                        || apiKey.isEmpty
+                        || importBlocker != nil
+                )
+                if importBlocker != nil {
+                    Text("服务器未连接：恢复 PI-adaptor 连接后才能导入。")
+                        .font(PIFont.caption)
+                        .foregroundStyle(PIColor.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(.horizontal, PISpacing.s16)
             .padding(.vertical, PISpacing.s12)
@@ -540,6 +572,10 @@ struct ModelsScreen: View {
         }
         guard let host = currentHost,
               let operation = model.providerOperationContext(for: host) else { return }
+        if let importBlocker {
+            errorMessage = importBlocker
+            return
+        }
         guard discoveryFingerprint == configurationFingerprint,
               discoveryOperation == operation else {
             invalidateDiscovery()

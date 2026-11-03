@@ -17,7 +17,7 @@ final class InstallRecoveryUITests: XCTestCase {
     func testPairFailureOffersPairOnlyRecoveryCopy() {
         openInstallFailure("pair-expired")
         XCTAssertTrue(
-            app.staticTexts["安装器会在配对失败后恢复原 current 和服务状态；请重试以启动新的 PI-adaptor 配对进程。"]
+            app.staticTexts["配对失败后服务器已恢复原状态；重试会重新启动配对。"]
                 .waitForExistence(timeout: 5)
         )
         XCTAssertEqual(app.buttons["installHost.start"].label, "重新配对")

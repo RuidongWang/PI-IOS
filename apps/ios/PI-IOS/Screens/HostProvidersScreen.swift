@@ -162,7 +162,7 @@ struct HostProvidersScreen: View {
             editingProvider = nil
             await reload()
         } catch {
-            self.error = error.localizedDescription
+            self.error = ConnectionErrorText.describe(error)
         }
     }
 
@@ -182,7 +182,7 @@ struct HostProvidersScreen: View {
             error = nil
         } catch {
             guard model.canApplyProviderOperation(context) else { return }
-            self.error = error.localizedDescription
+            self.error = ConnectionErrorText.describe(error)
         }
     }
 
@@ -215,7 +215,7 @@ struct HostProvidersScreen: View {
             modelID = ""
             await reload()
         } catch {
-            self.error = error.localizedDescription
+            self.error = ConnectionErrorText.describe(error)
         }
     }
 
@@ -283,7 +283,7 @@ struct HostProvidersScreen: View {
                 guard model.canApplyProviderOperation(context) else { return }
             }
             if let legacyError {
-                self.error = "v2 Provider 已删除，但 legacy 服务清理失败：\(legacyError.localizedDescription)。本地映射已保留以便重试。"
+                self.error = "v2 Provider 已删除，但 legacy 服务清理失败：\(ConnectionErrorText.describe(legacyError))。本地映射已保留以便重试。"
                 await reload()
                 return
             }
@@ -294,7 +294,7 @@ struct HostProvidersScreen: View {
             _ = KeychainStore.deleteProviderKey(hostID: host.id, providerId: provider.id)
             await reload()
         } catch {
-            self.error = error.localizedDescription
+            self.error = ConnectionErrorText.describe(error)
         }
     }
 }

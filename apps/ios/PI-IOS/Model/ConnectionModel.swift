@@ -2196,6 +2196,9 @@ enum ConnectionErrorText {
         if let error = error as? RACPWebSocketError {
             return describeWebSocket(error)
         }
+        if let error = error as? RACPV2Error {
+            return describeV2(error)
+        }
         return ConnectionDiagnosticRedactor.redact(error.localizedDescription)
     }
 
@@ -2234,6 +2237,25 @@ enum ConnectionErrorText {
             return ConnectionFailureKind.timeout.userMessage
         case .server(let code, _):
             return ConnectionFailureClassifier.userMessage(forRACPCode: code)
+        }
+    }
+
+    /// `RACPV2Error` 来自 Host v2 直连（provider 增删、会话配置等）。桥接成 NSError
+    /// 时只会显示「PIiOSCore.RACPV2Error 错误 N」，用户无法据此判断该做什么，
+    /// 因此这里逐项映射为可操作文案。
+    private static func describeV2(_ error: RACPV2Error) -> String {
+        switch error {
+        case .notConnected:
+            return "服务器未连接（PI-adaptor 隧道未建立）：请到设置页恢复连接后重试。"
+        case .protocolViolation(let reason):
+            return "服务器协议异常：" + ConnectionDiagnosticRedactor.redact(reason)
+        case .server(let code, let message):
+            if let message, !message.isEmpty {
+                return ConnectionDiagnosticRedactor.redact(message)
+            }
+            return ConnectionFailureClassifier.userMessage(
+                forRACPCode: RACPErrorCode(raw: code)
+            )
         }
     }
 

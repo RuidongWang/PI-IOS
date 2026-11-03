@@ -58,7 +58,9 @@ final class UIRegressionSuiteTests: XCTestCase {
         snapshot("G-02", step: 1)
     }
 
-    func testG03BackClosureAndSettingsCases() {
+    /// 覆盖 SET-01/02/03/05/06/07；原方法名误用 G-03，和下面真正验证
+    /// 返回闭合的 `testG03BackClosure` 撞了编号，此处按实际用例集重命名。
+    func testSettingsCases() {
         launch("online-host-unit-active")
         openSettings()
         expect("SET-01", text("服务器"), "服务器组")
@@ -454,6 +456,17 @@ final class UIRegressionSuiteTests: XCTestCase {
         snapshot("HPR-01", step: 1)
         goBack()
 
+        // MDL-07：导入依赖在线隧道，离线时必须提前说明，而不是等点导入才报协议错。
+        openListRow("模型服务", requireExact: false)
+        expect(
+            "MDL-07",
+            app.descendants(matching: .any)["models.importBlocked"].waitForExistence(timeout: 5),
+            "离线导入横幅"
+        )
+        expect("MDL-07", text("无法导入模型服务"), "离线导入标题")
+        expect("MDL-07", textContaining("导入模型需要 PI-adaptor 在线"), "离线导入原因")
+        goBack()
+
         expect(
             "SKL-01",
             app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "全局 Skill"))
@@ -679,7 +692,9 @@ final class UIRegressionSuiteTests: XCTestCase {
         openSession("S1", title: "Fixture S1 Alpha")
         let allowOnce = app.buttons["允许一次"]
         expect("CNV-05", allowOnce.exists && allowOnce.isHittable, "审批卡首屏可见")
-        expect("CNV-05", text("权限请求") && text("工具：bash") && text("本会话允许") && text("拒绝"), "审批卡内容")
+        // 摘要是一段多行 Text（"工具：bash\n\n…"），整体是一个无障碍元素，
+        // 不能按精确 label "工具：bash" 匹配。
+        expect("CNV-05", text("权限请求") && textContaining("工具：bash") && text("本会话允许") && text("拒绝"), "审批卡内容")
         app.scrollViews.firstMatch.swipeDown()
         expect("CNV-05", allowOnce.isHittable, "滚动后审批卡仍可点")
         snapshot("CNV-05", step: 1)
@@ -775,8 +790,9 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("OFF-01", text("未发送草稿（离线只读）") && text("Fixture B unsent draft"), "缓存草稿")
         expect("OFF-01", text("Fixture B private history"), "缓存历史文本")
         expect("OFF-01", !app.buttons["允许一次"].isEnabled && !app.buttons["本会话允许"].isEnabled && !app.buttons["拒绝"].isEnabled, "审批按钮禁用")
-        expect("OFF-03", text("离线：发送已禁用"), "离线发送禁用")
-        expect("OFF-03", !app.textFields["conversation.composer"].isEnabled && !app.buttons["发送"].isEnabled, "输入和发送禁用")
+        // OFF-02「离线发送与审批禁用」已包含发送禁用，合并回同一编号。
+        expect("OFF-02", text("离线：发送已禁用"), "离线发送禁用")
+        expect("OFF-02", !app.textFields["conversation.composer"].isEnabled && !app.buttons["发送"].isEnabled, "输入和发送禁用")
         snapshot("OFF-01", step: 1)
 
         launch("offline-cache-205", closeSidebar: false)
