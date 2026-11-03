@@ -1158,9 +1158,11 @@ final class UIRegressionSuiteTests: XCTestCase {
         field.tap()
         _ = app.keyboards.firstMatch.waitForExistence(timeout: 3)
         sleep(1)
+        // 不能拿 value 和 placeholder 比较后再决定删不删：SSH 端口默认值「22」
+        // 与占位符完全相同，会被误判成空字段，输入变成「2222」并连到错误端口。
+        // 空字段里发删除键是无害的，所以一律先清空。
         let current = field.value as? String ?? ""
-        let placeholder = field.placeholderValue ?? ""
-        if !current.isEmpty, current != placeholder || value.isEmpty {
+        if !current.isEmpty {
             field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count))
         }
         if !value.isEmpty {
