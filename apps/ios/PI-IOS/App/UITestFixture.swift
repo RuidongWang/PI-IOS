@@ -252,7 +252,13 @@ struct UITestFixture {
             authKind: .privateKey,
             createdAt: time,
             isCurrent: true,
-            pairedAt: time
+            pairedAt: time,
+            installReceipt: HostInstallReceipt(
+                version: "0.0.1",
+                hostPort: 43_871,
+                attemptId: "fixture-install",
+                completedAt: time
+            )
         )
         let state = PersistedState(
             hosts: [host],

@@ -80,6 +80,14 @@ struct InstallHostScreen: View {
                 text: "正在安装 PI-adaptor",
                 detail: coordinator.activity
             )
+            if let notice = coordinator.releaseNotice {
+                PIStatusBanner(
+                    kind: .warning,
+                    text: "未能获取最新稳定发布，已回退内置版本",
+                    detail: notice
+                )
+                .accessibilityIdentifier("installHost.fallbackNotice")
+            }
         case .stalled:
             PIStatusBanner(
                 kind: .warning,
@@ -96,6 +104,14 @@ struct InstallHostScreen: View {
                     : "安装完成，但本机记录未写回",
                 detail: coordinator.activity
             )
+            if let notice = coordinator.releaseNotice {
+                PIStatusBanner(
+                    kind: .warning,
+                    text: "本次使用内置回退版本",
+                    detail: notice
+                )
+                .accessibilityIdentifier("installHost.fallbackNotice")
+            }
         case .failed:
             PIStatusBanner(
                 kind: .danger,
@@ -142,13 +158,24 @@ struct InstallHostScreen: View {
                 Text("上次成功安装")
                     .font(PIFont.captionStrong)
                     .foregroundStyle(PIColor.text2)
-                Text("v\(receipt.version) · 端口 \(String(receipt.hostPort))")
+                Text("v\(receipt.version) · 端口 \(String(receipt.hostPort))\(receiptSourceSuffix(receipt))")
                     .font(PIFont.listTitle)
                     .foregroundStyle(PIColor.text)
                 Text("完成于 \(receipt.completedAt.formatted(date: .abbreviated, time: .shortened))")
                     .font(PIFont.caption)
                     .foregroundStyle(PIColor.text3)
             }
+        }
+    }
+
+    private func receiptSourceSuffix(_ receipt: HostInstallReceipt) -> String {
+        switch receipt.releaseSource {
+        case .latest:
+            return " · 来源：GitHub 最新稳定发布"
+        case .fallback:
+            return " · 来源：内置回退版本"
+        case nil:
+            return ""
         }
     }
 
@@ -170,10 +197,18 @@ struct InstallHostScreen: View {
                         .focused($portFocused)
                         .accessibilityIdentifier("installHost.port")
                 }
-                Text("固定版本：PI-adaptor \(ConnectionModel.defaultHostInstallReleaseVersion) · 自动匹配 CPU 架构")
+                Text("自动安装 GitHub 最新稳定发布；不可用时回退内置版本。")
                     .font(PIFont.caption)
                     .foregroundStyle(PIColor.text3)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("installHost.releasePolicy")
+                if let resolution = coordinator.resolvedRelease {
+                    Text("本次目标：PI-adaptor \(resolution.release.version) · \(resolution.source.displayName)")
+                        .font(PIFont.caption)
+                        .foregroundStyle(PIColor.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("installHost.resolvedRelease")
+                }
             }
             .padding(.horizontal, PISpacing.s16)
             .padding(.vertical, PISpacing.s12)
@@ -484,6 +519,9 @@ private final class InstallHostCoordinator: ObservableObject {
     @Published private(set) var failureCount = 0
     @Published private(set) var transitionNotes: [String] = []
     @Published private(set) var postInstallWarning: String?
+    @Published private(set) var resolvedRelease: HostReleaseResolution?
+    /// 仅在回退内置版本时非空，展示固定原因。
+    @Published private(set) var releaseNotice: String?
     @Published private(set) var logText: String?
     @Published private(set) var logError: String?
     @Published private(set) var isLoadingLog = false
@@ -543,6 +581,8 @@ private final class InstallHostCoordinator: ObservableObject {
         failureDetail = nil
         transitionNotes = []
         postInstallWarning = nil
+        resolvedRelease = nil
+        releaseNotice = nil
 
         runTask = Task { [weak self] in
             guard let self else { return }
@@ -561,10 +601,21 @@ private final class InstallHostCoordinator: ObservableObject {
                 let outcome = try await connection.installHost(
                     record: host,
                     port: port,
-                    force: forceReinstall
-                ) { event in
-                    await self.receive(event)
-                }
+                    force: forceReinstall,
+                    onReleaseResolved: { resolution in
+                        guard self.runID == generation else { return }
+                        self.resolvedRelease = resolution
+                        self.releaseNotice = resolution.fallbackReason
+                        if let reason = resolution.fallbackReason {
+                            self.activity = "未能解析最新稳定发布，已回退内置 PI-adaptor \(resolution.release.version)：\(reason)。"
+                        } else {
+                            self.activity = "已解析最新稳定发布 PI-adaptor \(resolution.release.version)，正在生成安装脚本。"
+                        }
+                    },
+                    eventHandler: { event in
+                        await self.receive(event)
+                    }
+                )
                 guard self.runID == generation else { return }
                 self.finish(outcome: outcome, host: host, model: model, connection: connection)
             } catch is CancellationError {
@@ -629,7 +680,8 @@ private final class InstallHostCoordinator: ObservableObject {
                 expectedUsername: host.username,
                 port: success.port,
                 version: outcome.releaseVersion,
-                attemptId: outcome.attemptId
+                attemptId: outcome.attemptId,
+                releaseSource: outcome.releaseSource.map { $0.isFallback ? .fallback : .latest }
             )
             switch BootstrapInstallCompletionPolicy.disposition(
                 persisted: persisted,
@@ -638,7 +690,11 @@ private final class InstallHostCoordinator: ObservableObject {
             case .succeeded:
                 let info = success.serverInfo
                 phase = .success
-                activity = "\(info.serverName) \(info.serverVersion) 正在运行；pi-adaptor.service active、设备令牌重连与 ping 均成功。"
+                let sourceName = outcome.releaseSource?.displayName ?? "版本来源未知"
+                activity = "\(info.serverName) \(info.serverVersion) 正在运行（\(sourceName)）；pi-adaptor.service active、设备令牌重连与 ping 均成功。"
+                if let source = outcome.releaseSource, source.isFallback {
+                    releaseNotice = source.fallbackReason
+                }
                 postInstallWarning = nil
                 failureCode = nil
                 failureDetail = nil
@@ -655,7 +711,16 @@ private final class InstallHostCoordinator: ObservableObject {
             state = failure.state
             phase = .failed
             failureCode = failure.code
-            failureDetail = failureMeta(failure)
+            let meta = failureMeta(failure)
+            if let source = outcome.releaseSource,
+               source.isFallback,
+               let reason = source.fallbackReason {
+                let suffix = "本次已回退内置版本 \(outcome.releaseVersion)：\(reason)。"
+                failureDetail = [meta, suffix].compactMap { $0 }.joined(separator: "\n")
+                releaseNotice = reason
+            } else {
+                failureDetail = meta
+            }
             failureCount += 1
         case .unsupported(let reason):
             phase = .failed

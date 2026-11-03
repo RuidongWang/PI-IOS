@@ -1013,6 +1013,7 @@ final class AppModel: ObservableObject {
         port: Int,
         version: String,
         attemptId: String,
+        releaseSource: HostInstallReleaseSource? = nil,
         completedAt: Date = Date()
     ) -> Bool {
         guard let index = hosts.firstIndex(where: { $0.id == id }) else { return false }
@@ -1028,7 +1029,8 @@ final class AppModel: ObservableObject {
             version: version,
             hostPort: port,
             attemptId: attemptId,
-            completedAt: completedAt
+            completedAt: completedAt,
+            releaseSource: releaseSource
         )
         return persist()
     }

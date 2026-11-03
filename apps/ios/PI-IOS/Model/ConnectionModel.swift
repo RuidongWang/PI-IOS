@@ -71,6 +71,21 @@ struct HostInstallRunOutcome: Sendable {
     let result: BootstrapRunResult
     let releaseVersion: String
     let attemptId: String
+    /// 本次安装使用的版本来源；`nil` 表示未走到版本解析（例如平台不支持）。
+    let releaseSource: HostReleaseResolutionSource?
+}
+
+/// 测试夹具里不访问网络：直接回退内置版本，并给出可展示的原因。
+private struct FixtureHostReleaseCatalog: HostReleaseResolving {
+    func resolve(
+        target: BootstrapArtifactTarget,
+        fallbackBaseURL: String
+    ) async -> HostReleaseResolution? {
+        guard let release = PiHostRelease.patched(target: target, baseURL: fallbackBaseURL) else {
+            return nil
+        }
+        return HostReleaseResolution(release: release, source: .fallback(reason: "测试环境不访问网络"))
+    }
 }
 
 /// 指纹核对页的数据（S-04「核对指纹」状态）。
@@ -148,8 +163,12 @@ final class ConnectionModel: ObservableObject {
     private var fixtureCatalogs: [UUID: UITestFixture.Catalog] = [:]
     private var fixtureConnectionState: RACPTunnelState?
     private var fixtureSupportsRevoke = false
+    /// 安装时解析最新稳定版；UI 测试夹具不访问网络。
+    private let releaseCatalog: any HostReleaseResolving
 
-    init(fixture: UITestFixture? = nil) {
+    init(fixture: UITestFixture? = nil, releaseCatalog: (any HostReleaseResolving)? = nil) {
+        self.releaseCatalog = releaseCatalog
+            ?? (fixture == nil ? HostReleaseCatalog() : FixtureHostReleaseCatalog())
         usesUITestFixture = fixture != nil
         if let fixture {
             fixtureProviderBindingStatuses = fixture.providerBindingStatuses
@@ -314,9 +333,12 @@ final class ConnectionModel: ObservableObject {
     func installHost(
         record: HostRecord,
         port: Int,
-        releaseVersion: String = ConnectionModel.defaultHostInstallReleaseVersion,
+        /// 测试专用：显式指定内置版本。正常安装传 `nil`，自动解析最新稳定发布。
+        releaseVersion: String? = nil,
         /// 强制重装：忽略 PI-adaptor install receipt，重新下载、校验并激活。
         force: Bool = false,
+        /// 版本解析完成时回调，用于在安装页显示本次目标版本与回退原因。
+        onReleaseResolved: ((HostReleaseResolution) -> Void)? = nil,
         eventHandler: BootstrapRunner.EventHandler? = nil
     ) async throws -> HostInstallRunOutcome {
         guard (1...65_535).contains(port) else {
@@ -364,21 +386,44 @@ final class ConnectionModel: ObservableObject {
             if case let .unsupported(reason) = decision {
                 return HostInstallRunOutcome(
                     result: .unsupported(reason),
-                    releaseVersion: releaseVersion,
-                    attemptId: ""
+                    releaseVersion: releaseVersion ?? PiHostRelease.releaseVersion,
+                    attemptId: "",
+                    releaseSource: nil
                 )
             }
             throw HostInstallError.malformedProbe
         }
-        guard releaseVersion == PiHostRelease.patchedReleaseVersion,
-              let release = PiHostRelease.patched(
+
+        // 架构确定后才能解析对应产物。显式版本只用于测试，仍走内置固定摘要。
+        let resolution: HostReleaseResolution
+        if let releaseVersion {
+            guard releaseVersion == PiHostRelease.patchedReleaseVersion,
+                  let release = PiHostRelease.patched(
+                    target: target,
+                    baseURL: ConnectionModel.defaultHostInstallReleaseBaseURL
+                  )
+            else {
+                await transport.close()
+                throw HostInstallError.invalidReleaseVersion
+            }
+            resolution = HostReleaseResolution(release: release, source: .fallback(reason: "已手动指定内置版本"))
+        } else {
+            guard let resolved = await releaseCatalog.resolve(
                 target: target,
-                baseURL: ConnectionModel.defaultHostInstallReleaseBaseURL
-              )
-        else {
-            await transport.close()
-            throw HostInstallError.invalidReleaseVersion
+                fallbackBaseURL: ConnectionModel.defaultHostInstallReleaseBaseURL
+            ) else {
+                await transport.close()
+                throw HostInstallError.invalidReleaseVersion
+            }
+            resolution = resolved
         }
+        // 用户取消时不能继续安装（尤其不能因为取消就静默装内置回退版）。
+        if Task.isCancelled {
+            await transport.close()
+            throw CancellationError()
+        }
+        onReleaseResolved?(resolution)
+        let release = resolution.release
 
         let attemptId = "ios-\(UUID().uuidString.lowercased())"
         let scriptConfiguration = try BootstrapScriptConfiguration(
@@ -450,7 +495,8 @@ final class ConnectionModel: ObservableObject {
         return HostInstallRunOutcome(
             result: result,
             releaseVersion: release.version,
-            attemptId: attemptId
+            attemptId: attemptId,
+            releaseSource: resolution.source
         )
     }
 

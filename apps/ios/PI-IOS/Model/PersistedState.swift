@@ -15,6 +15,12 @@ enum AuthKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// 安装回执里记录的版本来源；旧状态文件没有这个字段时按未知处理。
+enum HostInstallReleaseSource: String, Codable, Equatable, Hashable {
+    case latest
+    case fallback
+}
+
 /// Non-secret marker for the last successful bootstrap. The authoritative
 /// download/install receipt remains on the server; this local copy only avoids
 /// presenting an unknown state after relaunch.
@@ -23,6 +29,7 @@ struct HostInstallReceipt: Codable, Equatable, Hashable {
     var hostPort: Int
     var attemptId: String
     var completedAt: Date
+    var releaseSource: HostInstallReleaseSource? = nil
 }
 
 /// 一台服务器的**本机记录**。

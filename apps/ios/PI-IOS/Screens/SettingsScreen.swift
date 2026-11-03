@@ -292,12 +292,14 @@ struct SettingsScreen: View {
                     PIStatusBanner(kind: .info, text: "未连接", detail: reason)
                 }
                 if let info = connection.info,
+                   let expected = model.currentHost?.installReceipt?.version,
+                   !expected.isEmpty,
                    info.serverName != PiHostRelease.runtimeServerName
-                    || info.serverVersion != ConnectionModel.defaultHostInstallReleaseVersion {
+                    || !PiHostRelease.versionsMatch(info.serverVersion, expected) {
                     PIStatusBanner(
                         kind: .danger,
                         text: "运行版本不匹配",
-                        detail: "期望 \(PiHostRelease.runtimeServerName) \(ConnectionModel.defaultHostInstallReleaseVersion)，"
+                        detail: "期望 \(PiHostRelease.runtimeServerName) \(expected)，"
                             + "实际 \(info.serverName) \(info.serverVersion)。请重新安装 PI-adaptor。"
                     )
                     .accessibilityIdentifier("settings.runtimeVersionMismatch")
