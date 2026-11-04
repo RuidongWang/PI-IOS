@@ -37,6 +37,9 @@ struct UITestFixture {
         case "online-large-tool-result": return onlineLargeToolResult()
         case "online-tool-result-body": return onlineToolResultBody()
         case "online-tool-batch": return onlineToolBatch()
+        case "online-single-tool-turn": return onlineSingleToolTurn()
+        case "online-running-tool-turn": return onlineRunningToolTurn()
+        case "online-interleaved-tool-turn": return onlineInterleavedToolTurn()
         case "online-markdown-message": return onlineMarkdownMessage()
         case "online-long-history-pending-approval": return onlineLongHistoryPendingApproval()
         case "online-project-lifecycle": return onlineProjectLifecycle()
@@ -225,6 +228,124 @@ struct UITestFixture {
             "text": .string("以下是 CPU 分析："),
         ])))
         snapshot.items = items
+        fixture.sessionSnapshots[summary.id] = snapshot
+        return fixture
+    }
+
+    /// 单次工具调用 + 最终回复：单次调用也必须折叠成一行，最终回复始终可见。
+    private static func onlineSingleToolTurn() -> Self {
+        var fixture = onlineTwoSessions()
+        let summary = fixture.catalog!.sessions.first(where: { $0.id == "S1" })!
+        var snapshot = RACPSessionView.empty
+        snapshot.sessionId = summary.id
+        snapshot.summary = summary
+        snapshot.revision = 1
+        snapshot.replayComplete = true
+        snapshot.cursor = RACPCursor(epoch: "fixture-single-tool", sequence: 3)
+        snapshot.items = [
+            RACPItem(id: "single_user", payload: .object([
+                "id": .string("single_user"),
+                "role": .string("user"),
+                "text": .string("帮我看看磁盘"),
+            ])),
+            RACPItem(id: "single_tool", payload: .object([
+                "id": .string("single_tool"),
+                "itemType": .string("tool"),
+                "kind": .string("tool"),
+                "role": .string("tool"),
+                "toolName": .string("bash"),
+                "status": .string("completed"),
+                "turnId": .string("turn_single"),
+                "text": .string("single-output"),
+            ])),
+            RACPItem(id: "single_final", payload: .object([
+                "id": .string("single_final"),
+                "role": .string("assistant"),
+                "text": .string("磁盘检查完成。"),
+            ])),
+        ]
+        fixture.sessionSnapshots[summary.id] = snapshot
+        return fixture
+    }
+
+    /// 运行中的单次工具调用（尚无最终回复）：整轮生命周期内都必须能折叠。
+    private static func onlineRunningToolTurn() -> Self {
+        var fixture = onlineTwoSessions()
+        let summary = fixture.catalog!.sessions.first(where: { $0.id == "S1" })!
+        var snapshot = RACPSessionView.empty
+        snapshot.sessionId = summary.id
+        snapshot.summary = summary
+        snapshot.revision = 1
+        snapshot.replayComplete = true
+        snapshot.cursor = RACPCursor(epoch: "fixture-running-tool", sequence: 2)
+        snapshot.runningTurnId = "turn_running"
+        snapshot.items = [
+            RACPItem(id: "running_user", payload: .object([
+                "id": .string("running_user"),
+                "role": .string("user"),
+                "text": .string("检查一下磁盘"),
+            ])),
+            RACPItem(id: "running_tool", payload: .object([
+                "id": .string("running_tool"),
+                "itemType": .string("tool"),
+                "kind": .string("tool"),
+                "role": .string("tool"),
+                "toolName": .string("bash"),
+                "status": .string("running"),
+                "turnId": .string("turn_running"),
+            ])),
+        ]
+        fixture.sessionSnapshots[summary.id] = snapshot
+        return fixture
+    }
+
+    /// 同一轮里被 Agent 过渡消息隔开的多次工具调用：中间过程合并成一个分组。
+    private static func onlineInterleavedToolTurn() -> Self {
+        var fixture = onlineTwoSessions()
+        let summary = fixture.catalog!.sessions.first(where: { $0.id == "S1" })!
+        var snapshot = RACPSessionView.empty
+        snapshot.sessionId = summary.id
+        snapshot.summary = summary
+        snapshot.revision = 1
+        snapshot.replayComplete = true
+        snapshot.cursor = RACPCursor(epoch: "fixture-interleaved-tool", sequence: 5)
+        snapshot.items = [
+            RACPItem(id: "inter_user", payload: .object([
+                "id": .string("inter_user"),
+                "role": .string("user"),
+                "text": .string("分析一下磁盘和内存"),
+            ])),
+            RACPItem(id: "inter_tool_1", payload: .object([
+                "id": .string("inter_tool_1"),
+                "itemType": .string("tool"),
+                "kind": .string("tool"),
+                "role": .string("tool"),
+                "toolName": .string("bash"),
+                "status": .string("completed"),
+                "turnId": .string("turn_interleaved"),
+                "text": .string("disk-output"),
+            ])),
+            RACPItem(id: "inter_message", payload: .object([
+                "id": .string("inter_message"),
+                "role": .string("assistant"),
+                "text": .string("磁盘看完了，接着看内存。"),
+            ])),
+            RACPItem(id: "inter_tool_2", payload: .object([
+                "id": .string("inter_tool_2"),
+                "itemType": .string("tool"),
+                "kind": .string("tool"),
+                "role": .string("tool"),
+                "toolName": .string("grep"),
+                "status": .string("completed"),
+                "turnId": .string("turn_interleaved"),
+                "text": .string("memory-output"),
+            ])),
+            RACPItem(id: "inter_final", payload: .object([
+                "id": .string("inter_final"),
+                "role": .string("assistant"),
+                "text": .string("磁盘和内存都正常。"),
+            ])),
+        ]
         fixture.sessionSnapshots[summary.id] = snapshot
         return fixture
     }

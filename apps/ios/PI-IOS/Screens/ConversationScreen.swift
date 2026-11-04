@@ -1652,8 +1652,8 @@ private struct ToolItemCard: View {
     }
 }
 
-/// 批量工具调用分组：默认折叠成一行「N 次工具调用 + 工具名汇总 + 状态」，
-/// 展开后逐条显示紧凑的工具行；每条仍可再展开查看完整结果。
+/// 一轮对话的中间过程分组：默认折叠成一行「N 次工具调用 + 工具名汇总 + 状态」，
+/// 展开后逐条显示紧凑的工具行与工具之间的过渡消息；工具行仍可再展开查看完整结果。
 private struct ToolRunCard: View {
     let group: ToolCallGroup
     @State private var expanded = false
@@ -1685,7 +1685,11 @@ private struct ToolRunCard: View {
             if expanded {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(group.items, id: \.id) { item in
-                        ToolItemCard(item: item, style: .nested)
+                        if item.isToolItem {
+                            ToolItemCard(item: item, style: .nested)
+                        } else {
+                            ToolRunMessage(item: item)
+                        }
                     }
                 }
                 .padding(.top, PISpacing.s4)
@@ -1703,6 +1707,19 @@ private struct ToolRunCard: View {
                 .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
         )
         .animation(.easeInOut(duration: 0.22), value: expanded)
+    }
+}
+
+/// 分组内的中间过程消息：工具调用之间的过渡说明，展开分组后按正文样式展示。
+private struct ToolRunMessage: View {
+    let item: RACPItem
+
+    var body: some View {
+        PIMarkdownView(text: item.text ?? item.kind ?? "条目")
+            .padding(.horizontal, PISpacing.s8)
+            .padding(.vertical, PISpacing.s4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("toolGroup.message.\(item.id)")
     }
 }
 

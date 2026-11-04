@@ -1,23 +1,35 @@
 import Foundation
 
-/// 一组连续的批量工具调用。
+/// 一轮对话里最终回复之前的中间过程分组。
 ///
-/// 会话线程里同一轮任务常会连续出现多次工具调用（bash、grep、read…），
-/// 这些调用属于「中间过程」，对用户的价值主要是知道发生过什么、是否成功。
-/// 把它们合并成一条可折叠条目，默认只占一行摘要。
+/// 同一轮任务产生的工具调用（bash、grep、read…）以及工具之间的过渡说明都是
+/// 「中间过程」，对用户的价值主要是知道发生过什么、是否成功。把它们合并成一条
+/// 可折叠条目，默认只占一行摘要；单次工具调用同样成组，保证折叠入口一致。
 public struct ToolCallGroup: Equatable, Sendable {
     public let id: String
     public let items: [RACPItem]
 
-    public init(items: [RACPItem]) {
+    public init(id: String, items: [RACPItem]) {
         precondition(!items.isEmpty, "工具调用分组不能为空")
+        self.id = id
         self.items = items
-        // 用首条 item id 做稳定标识：流式追加时组内数量变化不会重建视图身份，
-        // 用户已经展开的分组不会因为又完成一次工具调用而被收起。
-        self.id = "tool-group:\(items[0].id)"
     }
 
-    public var count: Int { items.count }
+    /// 以首条 item 作为分组标识的旧入口，只用于没有用户消息锚点的历史片段。
+    /// 有用户消息的轮次必须传轮次锚点 id，否则组内条目变化会改变视图身份。
+    public init(items: [RACPItem]) {
+        precondition(!items.isEmpty, "工具调用分组不能为空")
+        self.init(id: "tool-group:\(items[0].id)", items: items)
+    }
+
+    /// 组内的工具调用条目（中间过程可能还包含 Agent 的过渡消息）。
+    public var toolItems: [RACPItem] { items.filter(\.isToolItem) }
+
+    /// 组内工具调用次数；过渡消息不计数，折叠行仍以「N 次工具调用」为主信息。
+    public var count: Int { toolItems.count }
+
+    /// 组内过渡消息条数。
+    public var messageCount: Int { items.count - count }
 
     public var title: String { "\(count) 次工具调用" }
 
@@ -25,7 +37,7 @@ public struct ToolCallGroup: Equatable, Sendable {
     public var toolSummary: String {
         var order: [String] = []
         var counts: [String: Int] = [:]
-        for item in items {
+        for item in toolItems {
             let trimmed = item.toolName?.trimmingCharacters(in: .whitespacesAndNewlines)
             let name = trimmed.flatMap { $0.isEmpty ? nil : $0 } ?? "工具"
             if counts[name] == nil { order.append(name) }
@@ -42,16 +54,16 @@ public struct ToolCallGroup: Equatable, Sendable {
 
     /// 组状态汇总：运行中 > 有失败 > 已取消 > 已完成。
     public var statusSummary: String {
-        if items.contains(where: { ToolStatusPresentation.isRunning($0.status) }) {
+        if toolItems.contains(where: { ToolStatusPresentation.isRunning($0.status) }) {
             return "运行中"
         }
-        if items.contains(where: { ToolStatusPresentation.isFailure($0.status) }) {
+        if toolItems.contains(where: { ToolStatusPresentation.isFailure($0.status) }) {
             return "有失败"
         }
-        if items.contains(where: { ToolStatusPresentation.isCancelled($0.status) }) {
+        if toolItems.contains(where: { ToolStatusPresentation.isCancelled($0.status) }) {
             return "已取消"
         }
-        if items.allSatisfy({ ToolStatusPresentation.isCompleted($0.status) }) {
+        if toolItems.allSatisfy({ ToolStatusPresentation.isCompleted($0.status) }) {
             return "已完成"
         }
         return "已结束"
@@ -59,11 +71,11 @@ public struct ToolCallGroup: Equatable, Sendable {
 
     /// 组内条目是否仍在运行（用于转圈/弱化等展示）。
     public var isRunning: Bool {
-        items.contains { ToolStatusPresentation.isRunning($0.status) }
+        toolItems.contains { ToolStatusPresentation.isRunning($0.status) }
     }
 
     public var hasFailure: Bool {
-        items.contains { ToolStatusPresentation.isFailure($0.status) }
+        toolItems.contains { ToolStatusPresentation.isFailure($0.status) }
     }
 }
 
@@ -157,16 +169,74 @@ public enum ConversationRow: Equatable, Sendable {
 
 /// 线程行的折叠策略。
 ///
-/// 只有满足两个条件才合并：
-/// 1. 连续工具调用达到 `minimumGroupCount`；
-/// 2. 这一串调用后面还有非工具条目（最终回复或下一轮用户消息）。
+/// 一轮对话从用户消息开始，到该轮最后一条非工具回复结束。策略把「最终回复之前」
+/// 的全部中间过程（工具调用 + 工具之间的过渡消息）合并成一条可折叠分组：
 ///
-/// 第二条是关键：本轮仍在进行、工具还在追加时保持逐条紧凑展示，
-/// 让用户能看到执行进度；结果落定并出现最终回复后，中间过程再收成一条摘要。
+/// - 只产生一次工具调用也成组，折叠入口不因调用次数而消失；
+/// - 分组以用户消息 id 作为稳定标识，流式追加条目、最终回复到达、再次发起工具
+///   调用都不会更换视图身份，用户手动展开/收起的状态在整轮生命周期内保持一致；
+/// - 没有工具调用的轮次（纯文本往来）不产生分组，避免把正常多轮对话折叠起来；
+/// - 没有用户消息锚点的历史片段（分页截断等）沿用旧规则：连续工具调用达到
+///   `minimumGroupCount` 且后面跟着非工具条目才合并。
 public enum ToolCallGroupingPolicy {
     public static let minimumGroupCount = 2
 
     public static func rows(for items: [RACPItem]) -> [ConversationRow] {
+        var rows: [ConversationRow] = []
+        var segment: [RACPItem] = []
+        var turnAnchorID: String?
+
+        func flushSegment() {
+            rows.append(contentsOf: segmentRows(segment, turnAnchorID: turnAnchorID))
+            segment.removeAll(keepingCapacity: true)
+        }
+
+        for item in items {
+            if item.role == "user", !item.isToolItem {
+                flushSegment()
+                rows.append(.item(item))
+                turnAnchorID = item.id
+            } else {
+                segment.append(item)
+            }
+        }
+        flushSegment()
+        return rows
+    }
+
+    /// 一轮对话内部的排版：中间过程一组，最终回复单独展示。
+    ///
+    /// 末尾是工具调用时说明这一轮还没结束（可能仍在运行），此时没有最终回复，
+    /// 已产生的条目都算中间过程；末尾是非工具条目时它就是最终回复。
+    private static func segmentRows(
+        _ items: [RACPItem],
+        turnAnchorID: String?
+    ) -> [ConversationRow] {
+        guard !items.isEmpty else { return [] }
+        guard let turnAnchorID else {
+            return legacyRows(for: items)
+        }
+
+        let finalReply = items.last.flatMap { $0.isToolItem ? nil : $0 }
+        let intermediateItems = finalReply == nil ? items : Array(items.dropLast())
+
+        var rows: [ConversationRow] = []
+        if intermediateItems.contains(where: \.isToolItem) {
+            rows.append(.toolGroup(ToolCallGroup(
+                id: "tool-group:turn:\(turnAnchorID)",
+                items: intermediateItems
+            )))
+        } else {
+            rows.append(contentsOf: intermediateItems.map(ConversationRow.item))
+        }
+        if let finalReply {
+            rows.append(.item(finalReply))
+        }
+        return rows
+    }
+
+    /// 没有用户消息锚点的历史片段保持旧行为。
+    private static func legacyRows(for items: [RACPItem]) -> [ConversationRow] {
         var rows: [ConversationRow] = []
         var run: [RACPItem] = []
 
