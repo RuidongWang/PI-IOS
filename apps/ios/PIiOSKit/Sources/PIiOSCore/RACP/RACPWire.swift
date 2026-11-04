@@ -208,6 +208,33 @@ public enum RACPErrorCode: Equatable, Sendable {
         }
     }
 
+    /// 线缆上的错误码字符串（`init(raw:)` 的反向映射）。
+    public var rawValue: String {
+        switch self {
+        case .unauthorized: return "UNAUTHORIZED"
+        case .forbidden: return "FORBIDDEN"
+        case .protocolMismatch: return "PROTOCOL_MISMATCH"
+        case .invalidArgument: return "INVALID_ARGUMENT"
+        case .notFound: return "NOT_FOUND"
+        case .methodNotFound: return "METHOD_NOT_FOUND"
+        case .agentUnavailable: return "AGENT_UNAVAILABLE"
+        case .agentBusy: return "AGENT_BUSY"
+        case .conflict: return "CONFLICT"
+        case .idempotencyConflict: return "IDEMPOTENCY_CONFLICT"
+        case .cursorExpired: return "CURSOR_EXPIRED"
+        case .clientTooSlow: return "CLIENT_TOO_SLOW"
+        case .approvalExpired: return "APPROVAL_EXPIRED"
+        case .approvalStale: return "APPROVAL_STALE"
+        case .payloadTooLarge: return "PAYLOAD_TOO_LARGE"
+        case .rateLimited: return "RATE_LIMITED"
+        case .pairingFailed: return "PAIRING_FAILED"
+        case .pairingTokenExpired: return "PAIRING_TOKEN_EXPIRED"
+        case .capabilityUnavailable: return "CAPABILITY_UNAVAILABLE"
+        case .serverInternal: return "INTERNAL"
+        case .unknown(let raw): return raw
+        }
+    }
+
     /// 契约 §7「可重试」列。
     public var isRetryable: Bool {
         switch self {

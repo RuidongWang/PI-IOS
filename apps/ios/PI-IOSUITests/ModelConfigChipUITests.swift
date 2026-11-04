@@ -34,10 +34,9 @@ final class ModelConfigChipUITests: XCTestCase {
         app.buttons["打开侧边栏"].tap()
         app.buttons["sidebar.session.S2"].tap()
         XCTAssertTrue(app.navigationBars["Alpha Two"].waitForExistence(timeout: 5))
+        // 运行状态在顶部状态行显示；输入栏不再重复「当前 turn 运行中，发送会排队」。
         XCTAssertTrue(
-            app.staticTexts.matching(
-                NSPredicate(format: "label CONTAINS %@", "当前 turn 运行中")
-            ).firstMatch.waitForExistence(timeout: 5)
+            app.staticTexts["conversation.runningTurn"].waitForExistence(timeout: 5)
         )
         XCTAssertTrue(modelChip.waitForExistence(timeout: 5))
         XCTAssertTrue(modelChip.label.contains("Beta Basic"))

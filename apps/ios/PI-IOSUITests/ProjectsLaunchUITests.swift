@@ -428,10 +428,9 @@ final class ProjectsLaunchUITests: XCTestCase {
             attachment.isEnabled,
             "An online conversation must expose the v2 image attachment picker."
         )
-        XCTAssertTrue(
-            app.staticTexts["JPEG / PNG / WebP · 单张 ≤20 MiB · 最多 10 张"]
-                .waitForExistence(timeout: 5),
-            "The conversation composer must explain the v2 attachment limits."
+        XCTAssertFalse(
+            app.staticTexts["JPEG / PNG / WebP · 单张 ≤20 MiB · 最多 10 张"].exists,
+            "The composer no longer shows the attachment limits caption."
         )
 
         let menu = app.buttons["打开侧边栏"]

@@ -94,6 +94,9 @@ struct ConversationScreen: View {
                             }
                         }
                         .coordinateSpace(name: "conversation-scroll")
+                        .scrollDismissesKeyboard(.immediately)
+                        // 点消息区任意空白处收起键盘；输入框在滚动区之外，不受影响。
+                        .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
                         .id(readingContextKey ?? "unbound-reading-context")
                         .transaction { transaction in
                             if isRestoringReadingPosition {
@@ -258,7 +261,9 @@ struct ConversationScreen: View {
                     .allowsHitTesting(false)
 #endif
             }
-            .piRootNavBar(sessionTitle, onMenu: model.openSidebar) {
+            // 会话页内容自带常驻状态区，用 inline 标题：大标题会跟着内嵌滚动视图
+            // 下拉进出，压在状态区上（标题被同步下拉）。
+            .piRootNavBar(sessionTitle, displayMode: .inline, onMenu: model.openSidebar) {
                 Menu {
                     Button("会话配置") { showingConfig = true }
                         .disabled(!connection.state.isOnline || session.attachedSessionId == nil)
@@ -316,6 +321,7 @@ struct ConversationScreen: View {
     // MARK: - 头部（常驻，AC-08.12）
 
     /// 副信息行：合并 host·地址与模型名，避免多行平铺 meta（spec P1 AC-4/AC-5）。
+    /// 它排在状态行下方，只做次要信息，不再占据状态行的位置。
     private var secondaryLine: String {
         let hostPart = currentHost.map { "\($0.name) · \($0.address)" }
         let modelPart = selectedModelLabel
@@ -327,15 +333,24 @@ struct ConversationScreen: View {
         }
     }
 
+    /// 运行中的 turn id 只留前 8 位：完整 UUID 会换行占两行，把真正的状态信息挤下去。
+    /// UI 测试用的 fixture id（如 `turn-s2`）短于 8 位，保持原样。
+    private var runningTurnLabel: String {
+        guard let id = session.runningTurnId else { return "正在运行" }
+        let short = id.count > 8 ? String(id.prefix(8)) + "…" : id
+        return "正在运行 \(short)"
+    }
+
     private var header: some View {
-        VStack(alignment: .leading, spacing: PISpacing.s8) {
-            // 主状态行：权限 + 会话模式 + 连接状态（原则 1：回来第一眼看到运行状态）。
+        VStack(alignment: .leading, spacing: PISpacing.s4) {
+            // 状态行统一放最顶端：权限 + 会话模式 + 连接状态 + 运行状态/中止，
+            // 一眼看到当前是否在跑，而不是被 host meta 挤到下面。
             HStack(spacing: PISpacing.s8) {
                 PIPermissionBadge(mode: session.permissionMode)
                 Text(session.sessionMode.title)
                     .font(PIFont.captionStrong)
                     .foregroundStyle(PIColor.text2)
-                Spacer()
+                    .lineLimit(1)
                 Circle()
                     .fill(connection.state.isOnline ? PIColor.success : PIColor.warning)
                     .frame(width: 7, height: 7)
@@ -343,33 +358,39 @@ struct ConversationScreen: View {
                 Text(connection.state.displayText)
                     .font(PIFont.captionStrong)
                     .foregroundStyle(connection.state.isOnline ? PIColor.success : PIColor.warning)
-            }
-            // 副信息行：host·地址 与模型合并为一行 meta，弱化次要信息。
-            Text(secondaryLine)
-                .font(PIFont.meta)
-                .foregroundStyle(PIColor.text3)
-                .lineLimit(1)
-            if session.isTurnRunning {
-                HStack(spacing: PISpacing.s8) {
-                    Text(session.runningTurnId.map { "正在运行 \($0)" } ?? "正在运行")
+                    .lineLimit(1)
+                Spacer(minLength: PISpacing.s4)
+                if session.isTurnRunning {
+                    Text(runningTurnLabel)
                         .font(PIFont.captionStrong)
                         .foregroundStyle(PIColor.text2)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .layoutPriority(1)
                         .accessibilityIdentifier("conversation.runningTurn")
-                    Spacer()
                     Button(role: .destructive) {
                         Task { await session.interrupt() }
                     } label: {
                         Label("中止", systemImage: "stop.circle")
                             .font(PIFont.caption)
+                            .lineLimit(1)
                     }
                     .accessibilityIdentifier("conversation.interrupt")
                     .disabled(!session.canInterrupt || session.isBusy)
                 }
             }
+            if !secondaryLine.isEmpty {
+                Text(secondaryLine)
+                    .font(PIFont.metaSmall)
+                    .foregroundStyle(PIColor.text3)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
         }
         .padding(.horizontal, PIMetrics.pageMargin)
         .padding(.vertical, PISpacing.s8)
         .background(PIColor.surface)
+        .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
     }
 
     // MARK: - 状态区
@@ -1096,11 +1117,6 @@ struct ConversationScreen: View {
         let allowsAttachments = session.sendAdmission.isAllowed
         return VStack(alignment: .leading, spacing: PISpacing.s8) {
             composerConfigurationChips
-            if case .queue = session.sendAdmission {
-                Text("当前 turn 运行中，发送会排队")
-                    .font(PIFont.meta)
-                    .foregroundStyle(PIColor.text2)
-            }
             if !session.isOnline {
                 Text("离线：发送已禁用")
                     .font(PIFont.meta)
@@ -1171,6 +1187,9 @@ struct ConversationScreen: View {
                     .font(PIFont.body)
                     .foregroundStyle(PIColor.text)
                     .padding(.vertical, PISpacing.s8)
+                    // 与左右 44pt 按钮同高：行内用 .bottom 对齐，输入框若只有
+                    // 文本高度（约 36pt），占位文字会被压得比 + / 发送键低一截。
+                    .frame(minHeight: PIMetrics.minHitTarget)
                     .disabled(!session.sendAdmission.isAllowed || session.attachedSessionId == nil)
                     .accessibilityIdentifier("conversation.composer")
                 Button {
@@ -1198,9 +1217,6 @@ struct ConversationScreen: View {
                     .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
             )
             .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
-            Text("JPEG / PNG / WebP · 单张 ≤20 MiB · 最多 10 张")
-                .font(PIFont.meta)
-                .foregroundStyle(PIColor.text3)
         }
         .padding(.horizontal, PIMetrics.pageMargin)
         .padding(.vertical, PISpacing.s8)
@@ -1284,6 +1300,16 @@ struct ConversationScreen: View {
             session.isTurnRunning
                 ? "等待当前轮次结束后才能切换"
                 : (session.isBusy ? "等待当前操作完成" : "打开会话配置")
+        )
+    }
+
+    /// 收起键盘：输入框没有 `@FocusState`，直接让当前第一响应者 resign。
+    private func dismissKeyboard() {
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
         )
     }
 

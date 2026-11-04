@@ -1139,17 +1139,34 @@ final class ConnectionModel: ObservableObject {
         guard let client, state.isOnline else {
             throw RACPV2Error.notConnected
         }
-        let _: HostV2DeleteEnvelope = try await client.v2Request(
-            method: RACPV2Method.providerDelete.rawValue,
-            params: .object([
-                "providerId": .string(id),
-                "confirmProviderId": .string(id),
-                "context": .object([
-                    "requestId": .string("req_\(UUID().uuidString)"),
-                    "idempotencyKey": .string("provider_delete_\(UUID().uuidString)")
+        do {
+            let _: HostV2DeleteEnvelope = try await client.v2Request(
+                method: RACPV2Method.providerDelete.rawValue,
+                params: .object([
+                    "providerId": .string(id),
+                    "confirmProviderId": .string(id),
+                    "context": .object([
+                        "requestId": .string("req_\(UUID().uuidString)"),
+                        "idempotencyKey": .string("provider_delete_\(UUID().uuidString)")
+                    ])
                 ])
-            ])
-        )
+            )
+        } catch let error as RACPClientError {
+            // `v2Request` 抛的是 `RACPClientError`；统一折成 `RACPV2Error`，
+            // 调用方才能按错误码识别 NOT_FOUND 等幂等/可重试语义。
+            throw Self.v2Error(from: error)
+        }
+    }
+
+    private static func v2Error(from error: RACPClientError) -> RACPV2Error {
+        switch error {
+        case .server(let code, let message):
+            return .server(code: code.rawValue, message: message)
+        case .notConnected:
+            return .notConnected
+        case .protocolMismatch(let detail), .timedOut(let detail), .malformedFrame(let detail):
+            return .protocolViolation(detail)
+        }
     }
 
     func hostUnitSnapshot(record: HostRecord) async throws -> HostUnitSnapshot {

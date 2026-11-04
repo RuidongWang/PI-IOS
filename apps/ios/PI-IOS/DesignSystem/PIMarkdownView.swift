@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import PIiOSCore
 
 /// 会话里 Agent 消息的 Markdown 渲染。
@@ -119,28 +120,47 @@ struct PIMarkdownView: View {
         .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
     }
 
+    /// 表格：横向可滚动，列为按内容量出的固定宽度。
+    ///
+    /// 之前用 `Grid` + `fixedSize(horizontal:)` 放在横向 `ScrollView` 里：测量阶段拿到
+    /// 的是无限宽度提案，每行只按单行高度排版；真正布局时单元格又被 `maxWidth` 收窄成
+    /// 多行，行高没跟上，长文本就压到下一行上。这里先把每列宽度算出来，行内单元格再用
+    /// 显式宽度排版，测量与布局使用同一约束，行高自然由最高单元格决定。
     private func tableView(header: [String], rows: [[String]]) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        let columnCount = max(header.count, rows.map(\.count).max() ?? 0)
+        let widths = (0..<max(columnCount, 1)).map { column in
+            tableColumnWidth(
+                header: column < header.count ? header[column] : "",
+                rows: rows.map { column < $0.count ? $0[column] : "" }
+            )
+        }
+        return ScrollView(.horizontal, showsIndicators: false) {
             Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
-                    ForEach(header.indices, id: \.self) { column in
-                        tableCell(header[column], role: .tableHeader, isHeader: true)
+                    ForEach(widths.indices, id: \.self) { column in
+                        tableCell(
+                            column < header.count ? header[column] : "",
+                            role: .tableHeader,
+                            isHeader: true
+                        )
+                        .frame(width: widths[column], alignment: .leading)
                     }
                 }
                 ForEach(rows.indices, id: \.self) { row in
                     GridRow {
-                        ForEach(header.indices, id: \.self) { column in
+                        ForEach(widths.indices, id: \.self) { column in
                             tableCell(
                                 column < rows[row].count ? rows[row][column] : "",
                                 role: .tableCell,
                                 isHeader: false
                             )
+                            .frame(width: widths[column], alignment: .leading)
                         }
                     }
                 }
             }
-            // 让表格按内容宽度收边：否则 Grid 会撑满视口，表头灰色背景只盖住前几列，
-            // 右边留出一条没有内容的空框。
+            // 列宽已固定，网格宽度就是各列之和；GridRow 会把同一行的单元格拉成一致高度，
+            // 表头底色与分隔线不会因为某格多行而断开。
             .fixedSize(horizontal: true, vertical: false)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
@@ -151,12 +171,32 @@ struct PIMarkdownView: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
+    /// 列宽 = 最长内容的单行宽度（含单元格左右内边距），夹在 [56, 220]。
+    private func tableColumnWidth(header: String, rows: [String]) -> CGFloat {
+        let font = UIFont.systemFont(
+            ofSize: PIMarkdownTextRole.tableCell.size,
+            weight: .semibold
+        )
+        var widest: CGFloat = 0
+        for value in [header] + rows {
+            let plain = value
+                .replacingOccurrences(of: "**", with: "")
+                .replacingOccurrences(of: "__", with: "")
+                .replacingOccurrences(of: "~~", with: "")
+                .replacingOccurrences(of: "`", with: "")
+            let width = (plain as NSString).size(withAttributes: [.font: font]).width
+            widest = max(widest, width)
+        }
+        let horizontalPadding = PISpacing.s8 * 2
+        return min(max(widest.rounded(.up) + horizontalPadding, 56), 220)
+    }
+
     private func tableCell(_ text: String, role: PIMarkdownTextRole, isHeader: Bool) -> some View {
         Text(PIMarkdownInline.attributed(text, role: role))
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, PISpacing.s8)
             .padding(.vertical, 7)
-            .frame(minWidth: 56, maxWidth: 220, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(isHeader ? PIColor.surface2 : Color.clear)
             .overlay(alignment: .bottom) {
                 Rectangle()

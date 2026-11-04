@@ -268,7 +268,12 @@ struct HostProvidersScreen: View {
         // Capture the legacy mapping before removing the local record.
         let existing = model.storedProvider(hostID: host.id, providerId: provider.id)
         do {
-            try await connection.deleteHostProvider(id: provider.id)
+            do {
+                try await connection.deleteHostProvider(id: provider.id)
+            } catch let error as RACPV2Error {
+                // 幂等删除：Host 上已经查不到这条记录时继续清理本机镜像。
+                guard case .server(let code, _) = error, code == "NOT_FOUND" else { throw error }
+            }
             guard model.canApplyProviderOperation(context) else { return }
             // A provider mirrored from a legacy SSH import also lives in the legacy
             // store; deleting only the v2 record would leave the legacy service and

@@ -76,6 +76,12 @@ public enum RemoteProviderOperations {
                 return .failure(ProviderImportFailure(code: .timeout))
             } catch let error as RACPV2Error {
                 return .failure(ProviderImportFailure(code: importFailure(for: error)))
+            } catch let error as RACPClientError {
+                // 真实 RACP 客户端抛的是 `RACPClientError`；只匹配 `RACPV2Error`
+                // 会让服务端错误码退化成「导入失败」，用户看不到可行动的原因。
+                return .failure(
+                    ProviderImportFailure(code: importFailure(forServerCode: serverCode(of: error)))
+                )
             }
         }
         return .success(
@@ -132,19 +138,46 @@ public enum RemoteProviderOperations {
             return .failure(.timeout)
         } catch let error as RACPV2Error {
             if case .server(let code, _) = error, code == "NOT_FOUND" {
-                return .success(
-                    ProviderRemoveSummary(
-                        providerId: providerId,
-                        effect: .absent,
-                        secretCleared: true,
-                        defaultMoved: nil,
-                        remaining: 0,
-                        remainingEligible: 0
-                    )
-                )
+                return absentReceipt(providerId: providerId)
             }
             return .failure(removeFailure(for: error))
+        } catch let error as RACPClientError {
+            // 真实 RACP 客户端抛 `RACPClientError`。NOT_FOUND 是幂等删除的正常结局：
+            // 服务端已经没有这条记录，本机残留应由调用方清理，而不是报「删除未完成」。
+            switch error {
+            case .server(let code, _) where code == .notFound:
+                return absentReceipt(providerId: providerId)
+            case .server(let code, _):
+                return .failure(removeFailure(forServerCode: code.rawValue))
+            case .notConnected:
+                return .failure(.adminUnavailable)
+            case .timedOut:
+                return .failure(.timeout)
+            case .protocolMismatch, .malformedFrame:
+                return .failure(.responseInvalid)
+            }
         }
+    }
+
+    /// 目标 provider 在服务端已不存在：按成功处理，调用方继续清理本机记录。
+    private static func absentReceipt(providerId: String) -> ProviderRemoveReceipt {
+        .success(
+            ProviderRemoveSummary(
+                providerId: providerId,
+                effect: .absent,
+                secretCleared: true,
+                defaultMoved: nil,
+                remaining: 0,
+                remainingEligible: 0
+            )
+        )
+    }
+
+    /// 两种客户端错误类型里取服务端错误码（`nil` 表示不是服务端拒绝）。
+    private static func serverCode(of error: Error) -> String? {
+        if case .server(let code, _) = error as? RACPV2Error { return code }
+        if case .server(let code, _) = error as? RACPClientError { return code.rawValue }
+        return nil
     }
 
     public static func bindingStatus(
@@ -324,6 +357,10 @@ public enum RemoteProviderOperations {
 
     private static func importFailure(for error: RACPV2Error) -> ProviderImportFailureCode {
         guard case .server(let code, _) = error else { return .importFailed }
+        return importFailure(forServerCode: code)
+    }
+
+    private static func importFailure(forServerCode code: String?) -> ProviderImportFailureCode {
         switch code {
         case "INVALID_ARGUMENT", "INVALID_REQUEST": return .invalidRequest
         case "PAYLOAD_TOO_LARGE": return .payloadTooLarge
@@ -335,6 +372,10 @@ public enum RemoteProviderOperations {
 
     private static func removeFailure(for error: RACPV2Error) -> ProviderRemoveFailureCode {
         guard case .server(let code, _) = error else { return .removeFailed }
+        return removeFailure(forServerCode: code)
+    }
+
+    private static func removeFailure(forServerCode code: String?) -> ProviderRemoveFailureCode {
         switch code {
         case "INVALID_ARGUMENT", "INVALID_REQUEST": return .invalidRequest
         case "PAYLOAD_TOO_LARGE": return .payloadTooLarge

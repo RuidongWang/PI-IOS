@@ -139,6 +139,9 @@ struct ModelProviderDetailSheet: View {
             // Set when the server reported an outcome the user must act on, so the
             // parent screen can surface it as a warning rather than a plain success.
             var needsAttention = false
+            // 服务端已经查不到这条 provider：删除是幂等的，继续清本机记录并关掉详情页，
+            // 不能停在这里报「删除未完成」（NOT_FOUND 不是失败）。
+            var serverAlreadyAbsent = false
             // 1) Drop the v2 Host mirror, if this record has one. Records written
             //    before `hostV2Mirror` existed have `nil`; probe the Host in that
             //    case so an old legacy record (whose id the Host does not know) is
@@ -154,7 +157,8 @@ struct ModelProviderDetailSheet: View {
                     v2Removed = true
                 } catch let error as RACPV2Error {
                     if case .server(let code, _) = error, code == "NOT_FOUND" {
-                        // The id is not a v2 id: this is a legacy-only record.
+                        // The record may be legacy-only, or already removed elsewhere.
+                        serverAlreadyAbsent = true
                     } else {
                         errorMessage = ConnectionErrorText.describe(error)
                         return
@@ -186,6 +190,9 @@ struct ModelProviderDetailSheet: View {
                     summaryText = secretCleared
                         ? "服务器已删除记录与密钥，但默认模型因创建时间不可比未转移，请重新选择默认模型。"
                         : "服务器已删除记录，但密钥未清除且默认模型未转移，请人工在服务器上处理。"
+                case .failure(.notFound):
+                    // 服务端已无此记录：等同 `.absent`，继续清本机记录。
+                    serverAlreadyAbsent = true
                 case .failure(let failure):
                     errorMessage = failure.displayMessage
                     return
@@ -202,7 +209,11 @@ struct ModelProviderDetailSheet: View {
                 _ = KeychainStore.deleteProviderKey(hostID: provider.hostID, providerId: legacyProviderId)
             }
             let detail = summaryText
-                ?? (v2Removed ? "已从 v2 Host 删除该 provider 及其密钥。" : "已清理本机记录。")
+                ?? (v2Removed
+                    ? "已从 v2 Host 删除该 provider 及其密钥。"
+                    : (serverAlreadyAbsent
+                        ? "服务器上已不存在该记录；本机残留记录已清理。"
+                        : "已清理本机记录。"))
             resultMessage = detail
             // Hand the outcome to the parent: it owns the post-dismiss banner, so a
             // partial result cannot be hidden behind a generic success message.

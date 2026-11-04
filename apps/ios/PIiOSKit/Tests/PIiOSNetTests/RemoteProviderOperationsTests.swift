@@ -90,6 +90,35 @@ final class RemoteProviderOperationsTests: XCTestCase {
         XCTAssertFalse(methods.contains { $0.contains("main.js") })
     }
 
+    /// 真实 RACP 客户端抛 `RACPClientError`（不是 `RACPV2Error`）。删除一个服务端
+    /// 已经不存在的 provider 必须按 `.absent` 成功返回，否则界面会停在
+    /// 「删除未完成：对象不存在」并把本机残留记录留下。
+    func testDeleteMapsRealClientNotFoundToAbsent() async throws {
+        let client = FailingV2Client(error: .server(code: .notFound, message: nil))
+        let receipt = try await RemoteProviderOperations.removeProvider(
+            client: client,
+            providerId: "prv_missing"
+        )
+        guard case .success(let summary) = receipt else {
+            return XCTFail("NOT_FOUND 应视为幂等删除成功：\(receipt)")
+        }
+        XCTAssertEqual(summary.effect, .absent)
+        XCTAssertEqual(summary.providerId, "prv_missing")
+    }
+
+    /// 其它服务端错误码仍然要转成可读的失败码，而不是被吞成成功。
+    func testDeleteMapsRealClientServerErrorToFailure() async throws {
+        let client = FailingV2Client(error: .server(code: .unknown("TIMEOUT"), message: nil))
+        let receipt = try await RemoteProviderOperations.removeProvider(
+            client: client,
+            providerId: "prv_1"
+        )
+        guard case .failure(let failure) = receipt else {
+            return XCTFail("超时不能当作删除成功：\(receipt)")
+        }
+        XCTAssertEqual(failure, .timeout)
+    }
+
     func testBindingUsesV2SessionAndProviderList() async throws {
         let client = RecordingProviderV2Client()
         let receipt = try await RemoteProviderOperations.bindingStatus(
@@ -163,6 +192,19 @@ final class RemoteProviderOperationsTests: XCTestCase {
         XCTAssertLessThan(secondTimeout, firstTimeout)
         XCTAssertLessThan(secondTimeout, 0.25)
         XCTAssertGreaterThan(secondTimeout, 0)
+    }
+}
+
+/// 与真实 `RACPClient` 行为一致的失败替身：`v2Request` 抛 `RACPClientError`。
+private struct FailingV2Client: RACPV2Requesting {
+    let error: RACPClientError
+
+    func v2Request<R: Decodable & Sendable>(
+        method: String,
+        params: JSONValue,
+        timeout: TimeInterval
+    ) async throws -> R {
+        throw error
     }
 }
 

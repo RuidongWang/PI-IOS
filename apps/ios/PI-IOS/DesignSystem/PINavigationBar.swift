@@ -4,13 +4,14 @@ import SwiftUI
 /// 根页：标题 + 左上千斤顶（≡）+ 右侧最多 1 个操作；子页：标题 + 系统 `‹` 返回。
 struct PIRootNavBarModifier<Trailing: View>: ViewModifier {
     let title: String
+    var displayMode: NavigationBarItem.TitleDisplayMode = .large
     let onMenu: () -> Void
     @ViewBuilder let trailing: () -> Trailing
 
     func body(content: Content) -> some View {
         content
             .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.large)
+            .navigationBarTitleDisplayMode(displayMode)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(action: onMenu) {
@@ -41,12 +42,22 @@ struct PIDetailNavBarModifier: ViewModifier {
 
 extension View {
     /// 根页导航栏：左上 ≡ 打开侧边栏，右侧最多一个操作。
+    /// 默认大标题；页面自己已有常驻状态区时用 `.inline`，避免大标题随内嵌滚动视图
+    /// 下拉进出、压在状态区上。
     func piRootNavBar<Trailing: View>(
         _ title: String,
+        displayMode: NavigationBarItem.TitleDisplayMode = .large,
         onMenu: @escaping () -> Void,
         @ViewBuilder trailing: @escaping () -> Trailing
     ) -> some View {
-        modifier(PIRootNavBarModifier(title: title, onMenu: onMenu, trailing: trailing))
+        modifier(
+            PIRootNavBarModifier(
+                title: title,
+                displayMode: displayMode,
+                onMenu: onMenu,
+                trailing: trailing
+            )
+        )
     }
 
     /// 根页导航栏（无右侧操作）。

@@ -774,9 +774,8 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect(
             "CNV-16",
             app.buttons["添加图片附件"].exists
-                && app.buttons["添加图片附件"].isEnabled
-                && text("JPEG / PNG / WebP · 单张 ≤20 MiB · 最多 10 张"),
-            "附件入口可点与说明"
+                && app.buttons["添加图片附件"].isEnabled,
+            "附件入口可点"
         )
         snapshot("CNV-16", step: 1)
     }
