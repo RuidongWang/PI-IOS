@@ -27,6 +27,14 @@ struct AppRootView: View {
                 connection.respondHostKey(confirmation, operationID: prompt.operationID)
             }
         }
+        .piMessageAlert(title: "本机设置读取异常", message: Binding(
+            get: { model.loadWarning },
+            set: { if $0 == nil { model.dismissLoadWarning() } }
+        ))
+        .piMessageAlert(title: "本机记录未能写入", message: Binding(
+            get: { model.saveError },
+            set: { if $0 == nil { model.dismissSaveError() } }
+        ))
         .task(id: model.toast?.id) {
             guard model.toast != nil else { return }
             do {

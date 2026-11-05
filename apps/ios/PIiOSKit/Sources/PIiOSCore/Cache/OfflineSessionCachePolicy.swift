@@ -1,6 +1,6 @@
 import Foundation
 
-/// 离线缓存条目。`hostID` 是分区键的一部分，同一 `sessionId` 在不同 Host 上不能互相覆盖。
+/// 离线缓存条目。`hostID` 是分区键的一部分，同一 `sessionId` 在不同 PI-adaptor 上不能互相覆盖。
 public struct OfflineSessionCacheEntry: Codable, Equatable, Sendable {
     public var id: String
     public var sessionId: String
@@ -52,7 +52,7 @@ public struct OfflineSessionCacheEntry: Codable, Equatable, Sendable {
     }
 }
 
-/// C-4 `sessions` 表。Host 与会话 ID 组成复合键，避免两个 Host 的同名会话互相覆盖。
+/// C-4 `sessions` 表。PI-adaptor 与会话 ID 组成复合键，避免两个 PI-adaptor 的同名会话互相覆盖。
 public struct OfflineSessionCacheSession: Codable, Equatable, Sendable {
     public var hostID: UUID?
     public var id: String
@@ -93,9 +93,9 @@ public struct OfflineSessionCacheSession: Codable, Equatable, Sendable {
     }
 }
 
-/// 离线缓存的纯策略：Host 分区、去重、读取隔离与保留上限。
+/// 离线缓存的纯策略：PI-adaptor 分区、去重、读取隔离与保留上限。
 public enum OfflineSessionCachePolicy {
-    /// 会话缓存键：Host + 会话 ID。`nil` Host 也不会退化成仅按会话 ID 跨 Host 合并。
+    /// 会话缓存键：PI-adaptor + 会话 ID。`nil` PI-adaptor 也不会退化成仅按会话 ID 跨 PI-adaptor 合并。
     public static func sessionKey(hostID: UUID?, sessionID: String) -> String {
         [
             lengthPrefixedField("host", hostID?.uuidString ?? "none"),
@@ -103,7 +103,7 @@ public enum OfflineSessionCachePolicy {
         ].joined(separator: "|")
     }
 
-    /// 条目缓存键：Host + 会话 ID + 条目 ID。
+    /// 条目缓存键：PI-adaptor + 会话 ID + 条目 ID。
     public static func itemKey(hostID: UUID?, sessionID: String, itemID: String) -> String {
         [
             sessionKey(hostID: hostID, sessionID: sessionID),
@@ -111,7 +111,7 @@ public enum OfflineSessionCachePolicy {
         ].joined(separator: "|")
     }
 
-    /// 同一 Host 的同一会话、同一消息只保留最新副本；不同 Host 的同名 ID 仍是不同条目。
+    /// 同一 PI-adaptor 的同一会话、同一消息只保留最新副本；不同 PI-adaptor 的同名 ID 仍是不同条目。
     public static func deduplicatedEntries(_ entries: [OfflineSessionCacheEntry]) -> [OfflineSessionCacheEntry] {
         var latestByKey: [String: OfflineSessionCacheEntry] = [:]
         for entry in entries {
@@ -128,7 +128,7 @@ public enum OfflineSessionCachePolicy {
         }
     }
 
-    /// C-4 `sessions` 表按 Host + 会话 ID 去重，保留最近写入的行。
+    /// C-4 `sessions` 表按 PI-adaptor + 会话 ID 去重，保留最近写入的行。
     public static func deduplicatedSessions(
         _ sessions: [OfflineSessionCacheSession]
     ) -> [OfflineSessionCacheSession] {
@@ -149,7 +149,7 @@ public enum OfflineSessionCachePolicy {
         }
     }
 
-    /// 当前 Host 的指定会话条目（新→旧）。Host 未确定时必须返回空，禁止跨 Host 猜取。
+    /// 当前 PI-adaptor 的指定会话条目（新→旧）。PI-adaptor 未确定时必须返回空，禁止跨 PI-adaptor 猜取。
     public static func cachedEntries(
         _ entries: [OfflineSessionCacheEntry],
         hostID: UUID?,
@@ -161,7 +161,7 @@ public enum OfflineSessionCachePolicy {
         }
     }
 
-    /// 当前 Host 已缓存过的会话 ID（按最近条目时间新→旧）。Host 未确定时返回空。
+    /// 当前 PI-adaptor 已缓存过的会话 ID（按最近条目时间新→旧）。PI-adaptor 未确定时返回空。
     public static func sessionIDs(
         _ entries: [OfflineSessionCacheEntry],
         hostID: UUID?
@@ -188,7 +188,7 @@ public enum OfflineSessionCachePolicy {
         deduplicatedEntries(existing + incoming)
     }
 
-    /// 同一会话只保留最新一份游标；Host 是键的一部分。
+    /// 同一会话只保留最新一份游标；PI-adaptor 是键的一部分。
     public static func deduplicatedCursors(
         _ cursors: [OfflineSessionCursor]
     ) -> [OfflineSessionCursor] {
@@ -211,7 +211,7 @@ public enum OfflineSessionCachePolicy {
         }
     }
 
-    /// 审批卡按 Host + 会话 + `approval.id` 去重，重复写入时保留最新状态与 revision。
+    /// 审批卡按 PI-adaptor + 会话 + `approval.id` 去重，重复写入时保留最新状态与 revision。
     public static func deduplicatedApprovals(
         _ approvals: [OfflineSessionApproval]
     ) -> [OfflineSessionApproval] {
@@ -237,7 +237,7 @@ public enum OfflineSessionCachePolicy {
         }
     }
 
-    /// 每个 Host + 会话只保留最新一份草稿。
+    /// 每个 PI-adaptor + 会话只保留最新一份草稿。
     public static func deduplicatedDrafts(
         _ drafts: [OfflineSessionDraft]
     ) -> [OfflineSessionDraft] {
@@ -260,7 +260,7 @@ public enum OfflineSessionCachePolicy {
 
     /// 对完整缓存快照执行统一裁剪：
     /// - 会话活动时间取自 items/cursors/approvals/drafts 的最新时间；
-    /// - 最多保留 20 个 Host + 会话；
+    /// - 最多保留 20 个 PI-adaptor + 会话；
     /// - 每个会话的 items 按设置上限（默认 200）保留最新记录；
     /// - 游标与草稿每会话一份，审批卡去重后只保留未淘汰会话。
     public static func prunedSnapshot(
@@ -329,7 +329,7 @@ public enum OfflineSessionCachePolicy {
         )
     }
 
-    /// 按契约保留单会话最新 N 条、最多 20 个 Host+会话；重复条目先去重，避免以重复键建字典。
+    /// 按契约保留单会话最新 N 条、最多 20 个 PI-adaptor+会话；重复条目先去重，避免以重复键建字典。
     public static func prunedEntries(
         _ entries: [OfflineSessionCacheEntry],
         offlineCacheLimit: Int?

@@ -498,13 +498,13 @@ public enum BootstrapFailureCode: Equatable, Hashable, Sendable {
         case .nodeTooOld:
             return "Node 版本过低（要求 22.19.0 及以上）"
         case .hostStopTimeout:
-            return "停止旧 Host 或 PI-adaptor 服务超时"
+            return "停止旧 PI-adaptor 或 PI-adaptor 服务超时"
         case .hostStartFailed:
             return "启动 PI-adaptor 失败"
         case .hostExited:
             return "PI-adaptor 进程已退出"
         case .readyTimeout:
-            return "等待 Host 就绪超时"
+            return "等待 PI-adaptor 就绪超时"
         case .receiptFailed:
             return "写入安装回执失败"
         case .artifactPermissions:
@@ -512,13 +512,13 @@ public enum BootstrapFailureCode: Equatable, Hashable, Sendable {
         case .platformUnsupported:
             return "当前仅支持 Linux x86_64 / arm64，未下载任何文件（AC-01.3 / AC-01.6）"
         case .pairFailed:
-            return "配对失败：配对令牌可能已过期，请重启 Host 取新令牌再配对，不复用旧令牌（AC-01.9）"
+            return "配对失败：配对令牌可能已过期，请重启 PI-adaptor 取新令牌再配对，不复用旧令牌（AC-01.9）"
         case .unitFailed:
             return "pi-adaptor.service 启动失败或旧服务仍占用端口；安装器会回滚 current 与服务状态"
         case .verifyDeviceFailed:
-            return "运行身份、完整版本或 ping 校验失败；不会把旧 Host 当作安装成功"
+            return "运行身份、完整版本或 ping 校验失败；不会把旧 PI-adaptor 当作安装成功"
         case let .unknown(raw):
-            return raw.isEmpty ? "Host 报告失败但没有给出失败码，请查看 Host 日志" : "未识别的失败码：\(raw)"
+            return raw.isEmpty ? "PI-adaptor 报告失败但没有给出失败码，请查看 PI-adaptor 日志" : "未识别的失败码：\(raw)"
         }
     }
 }

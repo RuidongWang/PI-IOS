@@ -98,7 +98,7 @@ final class SessionIdempotencyRetryTests: XCTestCase {
         let model = SessionViewModel()
         applySnapshot(to: model, revision: 3)
         let original = try frame(action, attempt: first, model: model)
-        // The first request never reached the Host, so it has no remembered result.
+        // The first request never reached the PI-adaptor, so it has no remembered result.
         applySnapshot(to: model, revision: 9)
         let retry = try store.prepare(identity(action))
         let updated = try frame(action, attempt: retry, model: model, requestID: "retry")

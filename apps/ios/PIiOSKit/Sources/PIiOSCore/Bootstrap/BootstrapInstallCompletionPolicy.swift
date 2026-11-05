@@ -6,7 +6,7 @@ public enum BootstrapInstallCompletionDisposition: Equatable, Sendable {
 }
 
 /// Final local persistence is part of installation success. A verified remote
-/// runtime whose Host record cannot be committed must never be presented as a
+/// runtime whose PI-adaptor record cannot be committed must never be presented as a
 /// successful install.
 public enum BootstrapInstallCompletionPolicy {
     public static func disposition(

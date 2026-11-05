@@ -2,7 +2,7 @@ import XCTest
 
 @testable import PIiOSCore
 
-/// 离线缓存的 Host 分区、去重和保留上限。
+/// 离线缓存的 PI-adaptor 分区、去重和保留上限。
 final class OfflineSessionCachePolicyTests: XCTestCase {
     private let hostA = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
     private let hostB = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!

@@ -118,7 +118,7 @@ final class AppModel: ObservableObject {
     }
 
     /// Migrate endpoint-scoped device tokens from pre-UUID builds without ever
-    /// letting a second Host inherit the first Host's token.
+    /// letting a second PI-adaptor inherit the first PI-adaptor's token.
     private func migrateLegacyDeviceTokens() {
         var changed = false
         let groups = Dictionary(grouping: hosts) { host in
@@ -140,7 +140,7 @@ final class AppModel: ObservableObject {
             }
 
             // A legacy token cannot prove which pi-host port issued it. Fail
-            // closed and require each ambiguous Host to pair again.
+            // closed and require each ambiguous PI-adaptor to pair again.
             for host in unscoped {
                 guard let index = hosts.firstIndex(where: { $0.id == host.id }),
                       hosts[index].pairedAt != nil
@@ -149,14 +149,14 @@ final class AppModel: ObservableObject {
                 hosts[index].tunnelUpAt = nil
                 changed = true
             }
-            // The ambiguous legacy value must not survive until deleting a Host
+            // The ambiguous legacy value must not survive until deleting a PI-adaptor
             // later makes the group look attributable again.
             KeychainStore.deleteLegacyDeviceToken(account: legacyAccount)
         }
         if changed {
             persist()
             if loadWarning == nil {
-                loadWarning = "旧版本的部分设备令牌无法唯一归属到 Host，已要求重新配对。"
+                loadWarning = "旧版本的部分设备令牌无法唯一归属到 PI-adaptor，已要求重新配对。"
             }
         }
     }
@@ -200,9 +200,9 @@ final class AppModel: ObservableObject {
         persist()
     }
 
-    /// 离线缓存行被显式点选时，把它记在该 Host 名下。
+    /// 离线缓存行被显式点选时，把它记在该 PI-adaptor 名下。
     ///
-    /// 不能靠“缓存列表第一条”猜会话；同一进程切换 Host 或重启后都要按 Host 恢复用户的选择。
+    /// 不能靠“缓存列表第一条”猜会话；同一进程切换 PI-adaptor 或重启后都要按 PI-adaptor 恢复用户的选择。
     func selectCachedSession(hostID: UUID, sessionID: String) {
         guard hosts.contains(where: { $0.id == hostID }) else { return }
         foregroundResumeTracker.open(hostID: hostID, sessionID: sessionID)
@@ -936,9 +936,9 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    /// 清掉某个 Host UUID 下的全部派生数据，但保留 Host 身份记录本身。
+    /// 清掉某个 PI-adaptor UUID 下的全部派生数据，但保留 PI-adaptor 身份记录本身。
     ///
-    /// `deleteHost` 与“当前 Host 改成另一台服务器”共用这份规则，避免只清凭证却继续展示
+    /// `deleteHost` 与“当前 PI-adaptor 改成另一台服务器”共用这份规则，避免只清凭证却继续展示
     /// 旧服务器的模型、项目、会话与离线历史。
     private func clearHostDerivedData(_ id: UUID, detachSession: Bool) {
         let hostKey = id.uuidString
@@ -1005,7 +1005,7 @@ final class AppModel: ObservableObject {
     /// the token to Keychain, restarted the user unit, and verified `ping` with
     /// that device token.
     @discardableResult
-    func completeHostInstallation(
+    func completeAdaptorInstallation(
         id: UUID,
         expectedHost: String,
         expectedPort: Int,
@@ -1013,7 +1013,7 @@ final class AppModel: ObservableObject {
         port: Int,
         version: String,
         attemptId: String,
-        releaseSource: HostInstallReleaseSource? = nil,
+        releaseSource: AdaptorInstallReleaseSource? = nil,
         completedAt: Date = Date()
     ) -> Bool {
         guard let index = hosts.firstIndex(where: { $0.id == id }) else { return false }
@@ -1025,7 +1025,7 @@ final class AppModel: ObservableObject {
         }
         hosts[index].hostPort = port
         hosts[index].pairedAt = completedAt
-        hosts[index].installReceipt = HostInstallReceipt(
+        hosts[index].installReceipt = AdaptorInstallReceipt(
             version: version,
             hostPort: port,
             attemptId: attemptId,
@@ -1037,7 +1037,7 @@ final class AppModel: ObservableObject {
 
     /// Write a port discovered over SSH back onto the host record (requirement:
     /// the user must not configure a host port). The device token stays valid
-    /// because this is the same Host the client just resolved.
+    /// because this is the same PI-adaptor the client just resolved.
     func applyDiscoveredHostPort(hostID: UUID, port: Int) {
         guard (1...65_535).contains(port),
               let index = hosts.firstIndex(where: { $0.id == hostID }),
@@ -1062,7 +1062,7 @@ final class AppModel: ObservableObject {
         )
     }
 
-    /// The locally stored provider for a Host-side provider id, if any. Used to
+    /// The locally stored provider for a PI-adaptor-side provider id, if any. Used to
     /// carry forward the legacy mapping when the v2 record is edited in place.
     func storedProvider(hostID: UUID, providerId: String) -> StoredModelProvider? {
         modelProviders.first { $0.hostID == hostID && $0.providerId == providerId }
@@ -1088,7 +1088,9 @@ final class AppModel: ObservableObject {
         }?.defaultModelId
         let defaultModelId = currentModelProviders.isEmpty && serverDefaultSet
             ? input.defaultModelId
-            : previousDefault.flatMap { id in input.models.contains(where: { $0.id == id }) ? id : nil }
+            : ProviderUpdateComposer.resolvedDefaultModelID(
+                previous: previousDefault, models: input.models
+            )
         modelProviders.removeAll { $0.hostID == hostID && $0.providerId == providerId }
         modelProviders.append(
             StoredModelProvider(
@@ -1242,7 +1244,7 @@ final class AppModel: ObservableObject {
         hostSwitchGeneration &+= 1
         let generation = hostSwitchGeneration
         pendingHostID = id
-        // 先清空旧连接的目录与隧道，避免旧 Host 的列表在新 Host 标记生效后到达本机元数据合并。
+        // 先清空旧连接的目录与隧道，避免旧 PI-adaptor 的列表在新 PI-adaptor 标记生效后到达本机元数据合并。
         if let previousHostID {
             await connection.disconnect(ifHostID: previousHostID)
         }
@@ -1298,7 +1300,7 @@ final class AppModel: ObservableObject {
         }),
         KeychainStore.loadDeviceId(hostID: hostID) == revokedDeviceId
         else {
-            let stale = "Host 配置已变化：撤销回执未改动新的本机记录"
+            let stale = "PI-adaptor 配置已变化：撤销回执未改动新的本机记录"
             showToast(stale)
             return stale
         }
@@ -1312,8 +1314,8 @@ final class AppModel: ObservableObject {
                 ) == account
         }
         // 主机指纹属于服务器身份，撤销配对不删它（否则会静默失去 TOFU 保护）。
-        // SSH 凭证按服务器端点共享；撤销某台 Host 的配对不能删除其他 hostPort
-        // 的 Host 仍在使用的私钥或密码。
+        // SSH 凭证按服务器端点共享；撤销某台 PI-adaptor 的配对不能删除其他 hostPort
+        // 的 PI-adaptor 仍在使用的私钥或密码。
         KeychainStore.deleteDeviceToken(
             hostID: hostID,
             legacyAccount: account,

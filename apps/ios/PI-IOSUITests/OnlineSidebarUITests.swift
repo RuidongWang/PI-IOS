@@ -1,6 +1,6 @@
 import XCTest
 
-/// Synthetic catalog only: these tests never attach a session or contact a Host.
+/// Synthetic catalog only: these tests never attach a session or contact a PI-adaptor.
 /// Long-press reorder needs manual verification: title/grip/slow-drag probes did
 /// not change order. SessionDragPolicyTests cover the 500 ms / 8 pt contract only.
 final class OnlineSidebarUITests: XCTestCase {
@@ -14,7 +14,7 @@ final class OnlineSidebarUITests: XCTestCase {
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         app.launch()
         XCTAssertTrue(group.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Fixture Online Host"].exists)
+        XCTAssertTrue(app.staticTexts["Fixture Online PI-adaptor"].exists)
         XCTAssertTrue(group.label.hasPrefix("Fixture Workspace，2 个会话"))
         assertOrder("S2", before: "S1")
     }

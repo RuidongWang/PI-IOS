@@ -20,11 +20,13 @@ struct UITestFixture {
     var sessionSnapshots: [String: RACPSessionView] = [:]
     var providerBindingStatuses: [String: ProviderBindingStatus] = [:]
     var supportsFixtureInterrupt = false
-    var hostUnitSnapshot: HostUnitSnapshot? = nil
+    var adaptorUnitSnapshot: AdaptorUnitSnapshot? = nil
     var connectionState: RACPTunnelState? = nil
     /// 夹具没有真实 RACP 连接；SET-04 需要覆盖「服务器确认后取消配对」的 UI 路径，
     /// 因此由夹具显式声明撤销会成功，而不是让 `revokeThisDevice` 因缺 client 报离线。
     var supportsFixtureRevoke = false
+    /// 仅用于模型更新 UI 的内存 Provider；不代表真实 PI-adaptor 已响应。
+    var updatableProviders: [RACPV2Provider] = []
 
     static var current: Self? {
 #if DEBUG
@@ -45,6 +47,7 @@ struct UITestFixture {
         case "online-project-lifecycle": return onlineProjectLifecycle()
         case "online-upstream-import": return onlineUpstreamImport()
         case "online-model-config": return onlineModelConfig()
+        case "online-model-update": return onlineModelUpdate()
         case "online-host-unit-active": return onlineHostUnitActive()
         case "online-host-unit-stopped": return onlineHostUnitStopped()
         case "online-two-hosts": return onlineTwoHosts()
@@ -401,7 +404,7 @@ struct UITestFixture {
         ).sessions
         let host = HostRecord(
             id: hostID,
-            name: "Fixture Lifecycle Host",
+            name: "Fixture Lifecycle PI-adaptor",
             host: "fixture-lifecycle.invalid",
             port: 22,
             username: "fixture",
@@ -409,7 +412,7 @@ struct UITestFixture {
             createdAt: time,
             isCurrent: true,
             pairedAt: time,
-            installReceipt: HostInstallReceipt(
+            installReceipt: AdaptorInstallReceipt(
                 version: "0.0.1",
                 hostPort: 43_871,
                 attemptId: "fixture-install",
@@ -495,6 +498,46 @@ struct UITestFixture {
             sessionSnapshots: fixture.sessionSnapshots
         )
     }
+
+    private static func onlineModelUpdate() -> Self {
+        let fixture = onlineProjectLifecycle()
+        var state = fixture.state
+        let hostID = state.hosts[0].id
+        let spec = ProviderModelSpec(
+            id: "alpha-pro", contextWindow: 200_000, maxTokens: 8_192,
+            thinkingLevels: ["off", "low", "high"], defaultThinkingLevel: "low",
+            alias: "Alpha Pro", supportsDocuments: true
+        )
+        state.modelProviders = [StoredModelProvider(
+            providerId: "prv_alpha", hostV2Mirror: true, hostID: hostID,
+            name: "Alpha Models", baseURL: "https://alpha.invalid",
+            apiStyle: "chat_completions",
+            models: [StoredModelBinding(spec: spec)],
+            defaultModelId: "alpha-pro",
+            importedAt: Date(timeIntervalSince1970: 1_704_164_640)
+        )]
+        return Self(
+            state: state,
+            cache: fixture.cache,
+            catalog: fixture.catalog,
+            sessionSnapshots: fixture.sessionSnapshots,
+            updatableProviders: [try! JSONDecoder().decode(RACPV2Provider.self, from: Data(#"""
+            {
+                "id":"prv_alpha","name":"Alpha Models","vendorKey":"custom",
+                "type":"openai_compatible","protocol":"openai_completions",
+                "baseUrl":"https://alpha.invalid","authKind":"api_key",
+                "hasApiKey":true,"isDefault":true,"models":[{
+                    "id":"alpha-pro","displayName":"Alpha Pro",
+                    "contextWindow":200000,"maxTokens":8192,
+                    "thinkingLevels":["off","low","high"],
+                    "defaultThinkingLevel":"low","supportsImages":false
+                }],
+                "createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"
+            }
+            """#.utf8))]
+        )
+    }
+
 
     private static func onlineModelConfig() -> Self {
         let fixture = onlineProjectLifecycle()
@@ -588,7 +631,7 @@ struct UITestFixture {
 
     private static func onlineHostUnitActive() -> Self {
         var fixture = onlineProjectLifecycle()
-        fixture.hostUnitSnapshot = HostUnitSnapshot(
+        fixture.adaptorUnitSnapshot = AdaptorUnitSnapshot(
             loadState: "loaded",
             activeState: "active",
             unitFileState: "enabled"
@@ -599,7 +642,7 @@ struct UITestFixture {
 
     private static func onlineHostUnitStopped() -> Self {
         var fixture = onlineProjectLifecycle()
-        fixture.hostUnitSnapshot = HostUnitSnapshot(
+        fixture.adaptorUnitSnapshot = AdaptorUnitSnapshot(
             loadState: "loaded",
             activeState: "inactive",
             unitFileState: "disabled"
@@ -614,31 +657,31 @@ struct UITestFixture {
         let time = Date(timeIntervalSince1970: 1_704_164_640)
         let hosts = [
             HostRecord(
-                id: hostA, name: "Fixture Online Host A", host: "fixture-oa.invalid",
+                id: hostA, name: "Fixture Online PI-adaptor A", host: "fixture-oa.invalid",
                 port: 22, username: "fixture", authKind: .privateKey,
                 createdAt: time, isCurrent: false, pairedAt: time
             ),
             HostRecord(
-                id: hostB, name: "Fixture Online Host B", host: "fixture-ob.invalid",
+                id: hostB, name: "Fixture Online PI-adaptor B", host: "fixture-ob.invalid",
                 port: 22, username: "fixture", authKind: .privateKey,
                 createdAt: time, isCurrent: true, pairedAt: time
             ),
         ]
         let projectA = try! JSONDecoder().decode(
             RACPProjectListResult.self,
-            from: Data(#"{"projects":[{"id":"A-project","label":"Host A Project","archived":false}]}"#.utf8)
+            from: Data(#"{"projects":[{"id":"A-project","label":"PI-adaptor A Project","archived":false}]}"#.utf8)
         ).projects
         let projectB = try! JSONDecoder().decode(
             RACPProjectListResult.self,
-            from: Data(#"{"projects":[{"id":"B-project","label":"Host B Project","archived":false}]}"#.utf8)
+            from: Data(#"{"projects":[{"id":"B-project","label":"PI-adaptor B Project","archived":false}]}"#.utf8)
         ).projects
         let sessionA = try! JSONDecoder().decode(
             RACPSessionListResult.self,
-            from: Data(#"{"sessions":[{"id":"A-session","title":"Host A Session","projectId":"A-project","status":"idle","revision":1}]}"#.utf8)
+            from: Data(#"{"sessions":[{"id":"A-session","title":"PI-adaptor A Session","projectId":"A-project","status":"idle","revision":1}]}"#.utf8)
         ).sessions
         let sessionB = try! JSONDecoder().decode(
             RACPSessionListResult.self,
-            from: Data(#"{"sessions":[{"id":"B-session","title":"Host B Session","projectId":"B-project","status":"idle","revision":1}]}"#.utf8)
+            from: Data(#"{"sessions":[{"id":"B-session","title":"PI-adaptor B Session","projectId":"B-project","status":"idle","revision":1}]}"#.utf8)
         ).sessions
         let catalogA = Catalog(
             projects: projectA, sessions: sessionA,
@@ -662,7 +705,7 @@ struct UITestFixture {
                 StoredModelProvider(
                     providerId: "prv_host_a",
                     hostID: hostA,
-                    name: "Host A Models",
+                    name: "PI-adaptor A Models",
                     baseURL: "https://host-a.invalid",
                     apiStyle: "chat_completions",
                     models: [StoredModelBinding(spec: ProviderModelSpec(
@@ -675,7 +718,7 @@ struct UITestFixture {
                 StoredModelProvider(
                     providerId: "prv_host_b",
                     hostID: hostB,
-                    name: "Host B Models",
+                    name: "PI-adaptor B Models",
                     baseURL: "https://host-b.invalid",
                     apiStyle: "chat_completions",
                     models: [StoredModelBinding(spec: ProviderModelSpec(
@@ -691,11 +734,11 @@ struct UITestFixture {
             projectBindings: [
                 StoredProjectBinding(
                     hostID: hostA, projectID: "A-project", path: "/fixture/a",
-                    name: "Host A Project", createdAt: time, updatedAt: time
+                    name: "PI-adaptor A Project", createdAt: time, updatedAt: time
                 ),
                 StoredProjectBinding(
                     hostID: hostB, projectID: "B-project", path: "/fixture/b",
-                    name: "Host B Project", createdAt: time, updatedAt: time
+                    name: "PI-adaptor B Project", createdAt: time, updatedAt: time
                 ),
             ],
             sessionBindings: [
@@ -712,7 +755,7 @@ struct UITestFixture {
             lastProjectByHost: [hostA.uuidString: "A-project", hostB.uuidString: "B-project"]
         )
         var snapshots: [String: RACPSessionView] = [:]
-        for (summary, title) in [(sessionA[0], "Host A Session"), (sessionB[0], "Host B Session")] {
+        for (summary, title) in [(sessionA[0], "PI-adaptor A Session"), (sessionB[0], "PI-adaptor B Session")] {
             var snapshot = RACPSessionView.empty
             snapshot.sessionId = summary.id
             snapshot.summary = summary
@@ -759,7 +802,7 @@ struct UITestFixture {
         let projects = try! JSONDecoder().decode(RACPProjectListResult.self, from: Data(#"{"projects":[{"id":"fixture-online-project","label":"Fixture Workspace","archived":false}]}"#.utf8)).projects
         let sessions = try! JSONDecoder().decode(RACPSessionListResult.self, from: Data(#"{"sessions":[{"id":"S1","title":"Fixture S1 Alpha","projectId":"fixture-online-project","status":"idle","revision":1},{"id":"S2","title":"Fixture S2 Beta","projectId":"fixture-online-project","status":"running","revision":1}]}"#.utf8)).sessions
         let host = HostRecord(
-            id: hostID, name: "Fixture Online Host", host: "fixture-online.invalid",
+            id: hostID, name: "Fixture Online PI-adaptor", host: "fixture-online.invalid",
             port: 22, username: "fixture", authKind: .privateKey,
             createdAt: time, isCurrent: true, pairedAt: time
         )
@@ -835,7 +878,7 @@ struct UITestFixture {
             let sessionID = "fixture-session-\(suffix)"
             state.hosts.append(HostRecord(
                 id: hostID,
-                name: "Fixture Host \(suffix)",
+                name: "Fixture PI-adaptor \(suffix)",
                 host: "fixture-\(suffix.lowercased()).invalid",
                 port: 22,
                 username: "fixture",
@@ -896,7 +939,7 @@ struct UITestFixture {
         let sessionID = "fixture-cache-session"
         let host = HostRecord(
             id: hostID,
-            name: "Fixture Cache Host",
+            name: "Fixture Cache PI-adaptor",
             host: "fixture-cache.invalid",
             port: 22,
             username: "fixture",

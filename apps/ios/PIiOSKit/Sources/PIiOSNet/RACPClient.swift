@@ -75,7 +75,7 @@ public enum RACPClientUpdate: Sendable {
     case ready(RACPServerInfo)
     /// 会话视图（items / 快照）已变化。
     case sessionChanged
-    /// Host 级事件表明会话目录或某个会话的 revision 已变化，需要刷新列表。
+    /// PI-adaptor 级事件表明会话目录或某个会话的 revision 已变化，需要刷新列表。
     case hostChanged(RACPHostChange)
     /// 收到一条事件（已按契约 §3.2 归约）。
     case event(RACPEvent)
@@ -85,17 +85,17 @@ public enum RACPClientUpdate: Sendable {
 public enum RACPHostChangeReason: String, Equatable, Sendable {
     /// `session.created` / `session.changed` / `session.archived` / `host.changed`。
     case catalogChanged
-    /// Host 无可重放事件；客户端必须拉取完整目录。
+    /// PI-adaptor 无可重放事件；客户端必须拉取完整目录。
     case replayIncomplete
-    /// Host 明确要求重新同步。
+    /// PI-adaptor 明确要求重新同步。
     case resyncRequired
-    /// Host 事件流的 epoch 已变化。
+    /// PI-adaptor 事件流的 epoch 已变化。
     case epochChanged
     /// durable sequence 不连续，说明中间有事件丢失。
     case eventGap
 }
 
-/// Host 级变更的最小投影。原始载荷仍保留在事件的 `payload` 中。
+/// PI-adaptor 级变更的最小投影。原始载荷仍保留在事件的 `payload` 中。
 public struct RACPHostChange: Equatable, Sendable {
     public var reason: RACPHostChangeReason
     public var kind: String?
@@ -121,7 +121,7 @@ public struct RACPHostChange: Equatable, Sendable {
     }
 }
 
-/// 事件帧只冻结了 `{epoch, sequence}` 与 `payload`；Host 订阅需要的分类字段从原始载荷读取。
+/// 事件帧只冻结了 `{epoch, sequence}` 与 `payload`；PI-adaptor 订阅需要的分类字段从原始载荷读取。
 extension RACPEvent {
     public var scope: RACPSubscriptionScope? {
         guard let raw = payload.value(at: ["scope"])?.stringValue else { return nil }
@@ -147,7 +147,7 @@ enum RACPEventRoute: Equatable {
     case ignored
 }
 
-/// 会话事件只能归约到当前 attach 的会话；Host 事件走独立通道。
+/// 会话事件只能归约到当前 attach 的会话；PI-adaptor 事件走独立通道。
 enum RACPEventRouter {
     static func route(_ event: RACPEvent, currentSessionID: String?) -> RACPEventRoute {
         switch event.scope {
@@ -175,7 +175,7 @@ struct RACPHostEventObservation: Equatable {
     var requiresCatalogRefresh: Bool
 }
 
-/// Host 订阅跨重连保留“最后已处理游标”，但每次连接都重建 subscription id。
+/// PI-adaptor 订阅跨重连保留“最后已处理游标”，但每次连接都重建 subscription id。
 struct RACPHostSubscriptionTracker: Equatable, Sendable {
     static let catalogKinds: Set<String> = [
         "session.created",
@@ -260,7 +260,7 @@ struct RACPHostSubscriptionTracker: Equatable, Sendable {
         let epoch = event.epoch ?? cursor?.epoch ?? "unknown"
         let next = RACPCursor(epoch: epoch, sequence: sequence)
         cursor = next
-        // 不要用序号连续性判定缺口：`sequence` 是 Host 的**全局**序号（契约 §3.2），
+        // 不要用序号连续性判定缺口：`sequence` 是 PI-adaptor 的**全局**序号（契约 §3.2），
         // host 订阅只收到 host 事件，会话事件会穿插占用序号，因此「相邻 host 事件
         // 序号不连续」是常态。真正的重同步信号是 epoch 变化、`resync.required`
         // 以及服务端 `CURSOR_EXPIRED`。
@@ -304,7 +304,7 @@ struct RACPHostSubscriptionTracker: Equatable, Sendable {
 
 public struct RACPConfiguration: Sendable {
     public var ssh: SSHConnectionRequest
-    /// Host 在服务器回环上的端口（`direct-tcpip` 目标端口）。
+    /// PI-adaptor 在服务器回环上的端口（`direct-tcpip` 目标端口）。
     public var hostPort: Int
     /// 设备令牌（契约 §2.3，走 `Authorization: Bearer`）。
     public var deviceToken: String?
@@ -393,7 +393,7 @@ public enum RACPClientError: Error, Equatable, CustomStringConvertible {
         case .notConnected:
             return "隧道未连接"
         case .protocolMismatch(let detail):
-            return "Host 版本不兼容：\(detail)"
+            return "PI-adaptor 版本不兼容：\(detail)"
         case .server(let code, let message):
             return message ?? "服务器返回错误：\(code)"
         case .timedOut(let phase):
@@ -720,7 +720,7 @@ public actor RACPClient {
             try await establish()
             try await ping()
             guard let serverInfo else {
-                throw RACPClientError.malformedFrame("设备校验未取得 Host 信息")
+                throw RACPClientError.malformedFrame("设备校验未取得 PI-adaptor 信息")
             }
             await closeWebSocketPreservingTransport()
             return serverInfo
@@ -950,7 +950,7 @@ public actor RACPClient {
         }
     }
 
-    /// Host 级订阅：感知其他客户端创建会话、归档会话与 revision 变化。
+    /// PI-adaptor 级订阅：感知其他客户端创建会话、归档会话与 revision 变化。
     ///
     /// 游标跨重连保留；subscriber id 每次连接重建。`replayComplete=false` 时
     /// 不尝试逐条补齐，而是要求上层重新拉取完整项目/会话目录。
@@ -1402,7 +1402,7 @@ public actor RACPClient {
         return try R.decoded(from: value)
     }
 
-    /// Raw-method escape hatch used by the v2 Host adapter. The existing v1
+    /// Raw-method escape hatch used by the v2 PI-adaptor adapter. The existing v1
     /// connection can carry additive v2 methods after the v1 compatibility
     /// handshake; the method string is never guessed or normalized here.
     public func v2Request<R: Decodable & Sendable>(
@@ -1491,7 +1491,7 @@ public actor RACPClient {
                 connectionStageFailures = 0
                 guard let socket else { throw RACPClientError.notConnected }
                 await emit(.state(.online))
-                // Host 订阅必须先于会话恢复建立；否则重连窗口里新建的会话会完全不可见。
+                // PI-adaptor 订阅必须先于会话恢复建立；否则重连窗口里新建的会话会完全不可见。
                 try await subscribeHost()
                 // 重连后按游标重新订阅（AC-14.1）。
                 if let sessionId = subscribedSessionId {
@@ -1727,7 +1727,7 @@ public actor RACPClient {
             }
             return
         }
-        // v2 Host 把事件包成 `params.event`（见 golden 的 `events/event`）；旧 v1 Host
+        // v2 PI-adaptor 把事件包成 `params.event`（见 golden 的 `events/event`）；旧 v1 PI-adaptor
         // 直接把事件放在 `params`。两种都接受，避免实时事件被静默丢弃。
         let eventPayload = payload?.value(at: ["event"]) ?? payload
         guard let eventPayload, let event = try? RACPEvent.decoded(from: eventPayload) else {

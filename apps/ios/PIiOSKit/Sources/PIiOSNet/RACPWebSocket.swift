@@ -149,7 +149,7 @@ enum WebSocketHandshake {
     ) -> String {
         var lines = [
             "GET \(path) HTTP/1.1",
-            "Host: \(hostHeader)",
+            "PI-adaptor: \(hostHeader)",
             "Upgrade: websocket",
             "Connection: Upgrade",
             "Sec-WebSocket-Key: \(key)",

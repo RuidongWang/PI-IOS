@@ -252,7 +252,7 @@ extension RACPEvent: Codable {
         try container.encodeIfPresent(item, forKey: .item)
     }
 
-    /// Host event envelopes keep item identity in `payload.itemId`, canonical
+    /// PI-adaptor event envelopes keep item identity in `payload.itemId`, canonical
     /// message/tool data either in `payload.event` (v1) or directly on the
     /// payload (v2); normalize both shapes to the snapshot projection.
     private static func projectedItem(from envelope: JSONValue) -> RACPItem? {
@@ -383,6 +383,7 @@ public final class SessionViewModel {
     public private(set) var items: [RACPItem] = []
     public private(set) var activeItems: [RACPItem] = []
     public private(set) var activeTurnId: String?
+    private var terminalTurnSequences: [String: Int] = [:]
     public private(set) var queuedTurns: [JSONValue] = []
     private var queuedTurnIDs: Set<String> = []
     public private(set) var pendingApprovals: [RACPApprovalRequest] = []
@@ -411,6 +412,7 @@ public final class SessionViewModel {
         items = []
         activeItems = []
         activeTurnId = nil
+        terminalTurnSequences = [:]
         queuedTurns = []
         queuedTurnIDs = []
         pendingApprovals = []
@@ -471,6 +473,19 @@ public final class SessionViewModel {
         activeItems = snapshot.activeItems
         activeTurnId = Self.validTurnId(snapshot.activeTurn?.id)
             ?? Self.inferredActiveTurnId(from: snapshot.activeItems)
+        if let activeTurnId,
+           let terminalSequence = terminalTurnSequences[activeTurnId],
+           snapshot.cursor.epoch != cursor?.epoch || snapshot.cursor.sequence >= terminalSequence {
+            // A rebuilt epoch may restart its sequence, but must not restore a
+            // running projection for a turn already settled in this session.
+            activeItems.removeAll { $0.turnId == activeTurnId }
+            self.activeTurnId = nil
+        }
+        if cursor?.epoch == snapshotEpoch {
+            terminalTurnSequences = terminalTurnSequences.filter {
+                $0.value >= snapshot.cursor.sequence
+            }
+        }
         queuedTurns = snapshot.queuedTurns
         queuedTurnIDs = Set(snapshot.queuedTurns.compactMap {
             $0.value(at: ["id"])?.stringValue
@@ -545,7 +560,7 @@ public final class SessionViewModel {
             }
         }
 
-        // 不对 sequence 连续性做判定。`sequence` 是 Host 的**全局**持久游标
+        // 不对 sequence 连续性做判定。`sequence` 是 PI-adaptor 的**全局**持久游标
         // （契约 §3.2），同一订阅里只会收到本会话的事件，其它会话/主机事件的
         // 序号会自然穿插进来，因此「本会话序号不连续」是常态而非丢事件。
         // 真正的缺口由服务端以 `CURSOR_EXPIRED` / `replayComplete=false` 显式
@@ -568,7 +583,7 @@ public final class SessionViewModel {
             reduceApprovalLifecycle(event)
             reduceInputLifecycle(event)
             guard let item = event.item else { continue }
-            // Host v1 events nest the delta under `payload.event.deltaText`; the
+            // PI-adaptor v1 events nest the delta under `payload.event.deltaText`; the
             // v2 contract flattens it to `payload.delta`. Accept both shapes.
             let deltaText =
                 event.payload.value(at: ["payload", "event", "deltaText"])?.stringValue
@@ -654,8 +669,8 @@ public final class SessionViewModel {
     /// replacement turn that is already running.
     private func reduceTurnLifecycle(_ event: RACPEvent) {
         // v2 golden（`docs/api/pi-adaptor.golden.json`）把 turn id 放在 `payload.turn.id`，
-        // 无顶层 `turnId`；现网 Host 两者都带。优先顶层以兼容旧形态，缺失时回退到 `payload.turn.id`，
-        // 否则严格按冻结契约实现的 Host 会让 turn.completed/interrupted 无法清除运行态，
+        // 无顶层 `turnId`；现网 PI-adaptor 两者都带。优先顶层以兼容旧形态，缺失时回退到 `payload.turn.id`，
+        // 否则严格按冻结契约实现的 PI-adaptor 会让 turn.completed/interrupted 无法清除运行态，
         // 会话永久停在「正在运行」。
         guard let kind = event.payload.value(at: ["kind"])?.stringValue,
               let turnId = Self.validTurnId(
@@ -671,9 +686,14 @@ public final class SessionViewModel {
                 recordQueuedTurn(id: turnId, text: nil)
             }
         case "turn.started":
+            if let terminalSequence = terminalTurnSequences[turnId],
+               event.sequence <= terminalSequence { return }
             activeTurnId = turnId
             removeQueuedTurn(id: turnId)
         case "turn.completed", "turn.interrupted", "turn.failed", "turn.canceled":
+            if event.sequence > 0 {
+                terminalTurnSequences[turnId] = max(terminalTurnSequences[turnId] ?? 0, event.sequence)
+            }
             if activeTurnId == turnId {
                 activeTurnId = nil
                 activeItems.removeAll()
@@ -685,12 +705,17 @@ public final class SessionViewModel {
     }
 
     public func recordActiveTurn(id: String?) {
-        activeTurnId = Self.validTurnId(id)
+        guard let id = Self.validTurnId(id) else {
+            activeTurnId = nil
+            return
+        }
+        guard terminalTurnSequences[id] == nil else { return }
+        activeTurnId = id
     }
 
     /// Reduce live `approval.*` frames into `pendingApprovals`.
     ///
-    /// The Host emits a tool approval as a live session event, not as a history
+    /// The PI-adaptor emits a tool approval as a live session event, not as a history
     /// item, so without this the card never appears and the tool call waits
     /// forever for a decision that cannot be made (the model never receives a
     /// tool result). Snapshot replay covers reattach; this covers the live path.
@@ -739,7 +764,7 @@ public final class SessionViewModel {
             }
         case "input.resolved":
             // Contract payload is `{inputId, status}`; accept a nested id too for
-            // Host versions that echo the whole input object.
+            // PI-adaptor versions that echo the whole input object.
             guard let inputId = event.payload.value(at: ["payload", "inputId"])?.stringValue
                 ?? event.payload.value(at: ["payload", "input", "id"])?.stringValue
             else { return }

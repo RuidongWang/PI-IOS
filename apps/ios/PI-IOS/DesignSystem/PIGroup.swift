@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 分组容器：--surface 底、--separator 细边、16pt 圆角，普通分组不加阴影（design-system.md §2.3 / §2.5）。
+/// 分组容器：--surface 底、--separator 细边、14pt 圆角，普通分组只给极轻投影。
 /// 行之间用 `PIRowDivider` 分隔，最后一行不画分隔线。
 struct PIGroup<Content: View>: View {
     let header: String?
@@ -26,6 +26,7 @@ struct PIGroup<Content: View>: View {
                 RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous)
                     .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
             )
+            .shadow(color: PIColor.cardShadow, radius: 10, y: 3)
             if let footer {
                 Text(footer)
                     .font(PIFont.caption)
@@ -37,16 +38,23 @@ struct PIGroup<Content: View>: View {
     }
 }
 
-/// 分组标题：中文正常大小写，不用大写（design-system.md §3）。
+/// 分组标题：中文正常大小写；左侧一条短琥珀刻度，给页面一点「仪表分区」的辨识度。
 struct PISectionHeader: View {
     let text: String
 
     var body: some View {
-        Text(text)
-            .font(PIFont.section)
-            .foregroundStyle(PIColor.text2)
-            .padding(.horizontal, PISpacing.s4)
-            .accessibilityAddTraits(.isHeader)
+        HStack(spacing: PISpacing.s8) {
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(PIColor.accent)
+                .frame(width: 3, height: 12)
+                .accessibilityHidden(true)
+            Text(text)
+                .font(PIFont.section)
+                .tracking(0.6)
+                .foregroundStyle(PIColor.text2)
+                .accessibilityAddTraits(.isHeader)
+        }
+        .padding(.horizontal, PISpacing.s4)
     }
 }
 
@@ -62,7 +70,7 @@ struct PIRowDivider: View {
     }
 }
 
-/// 详情卡 / 说明卡：20pt 圆角，--separator 描边，无投影。
+/// 详情卡 / 说明卡：18pt 圆角，--separator 描边，极轻投影。
 struct PICard<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
@@ -81,5 +89,18 @@ struct PICard<Content: View>: View {
             RoundedRectangle(cornerRadius: PIRadius.card, style: .continuous)
                 .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
         )
+        .shadow(color: PIColor.cardShadow, radius: 12, y: 4)
+    }
+}
+
+/// 卡片上的小标题：等宽大写英文或中文短标签，统一「仪表读数」气质。
+struct PICardLabel: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(PIFont.metaSmall)
+            .tracking(1.0)
+            .foregroundStyle(PIColor.text3)
     }
 }

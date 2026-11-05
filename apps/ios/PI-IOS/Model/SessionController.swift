@@ -54,7 +54,7 @@ final class SessionController: ObservableObject {
         didSet { persistDraftIfNeeded() }
     }
 
-    /// 由 `ConnectionModel` 注入：按 Host/连接代次门控后写入离线缓存。
+    /// 由 `ConnectionModel` 注入：按 PI-adaptor/连接代次门控后写入离线缓存。
     var onDraftChanged: ((String, String, String?) -> Void)?
     /// Flush the outgoing session's coalesced cache before changing `attachedSessionId`.
     var onSessionWillChange: (() async -> Void)?
@@ -463,7 +463,7 @@ final class SessionController: ObservableObject {
         do {
             var turnId = runningTurnId
             do {
-                // A queued turn promoted by the Host has no local start response.
+                // A queued turn promoted by the PI-adaptor has no local start response.
                 // Resolve the authoritative active id immediately before interrupting.
                 _ = try await client.getSession(id: sessionId)
                 guard isCurrent(client, generation: generation, selection: selection),
@@ -740,7 +740,7 @@ final class SessionController: ObservableObject {
 
     private func currentRequestHostID() -> String? {
         guard isOnline, let hostID = attachedHostID, !hostID.isEmpty else {
-            lastError = "未确认在线 Host 身份：请重新连接后重试"
+            lastError = "未确认在线 PI-adaptor 身份：请重新连接后重试"
             return nil
         }
         return hostID

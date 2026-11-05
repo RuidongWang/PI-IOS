@@ -183,7 +183,7 @@ public enum RACPV2Error: Error, Equatable, Sendable, CustomStringConvertible {
         switch self {
         case .server(let code, let message): return message ?? code
         case .protocolViolation(let message): return message
-        case .notConnected: return "Host v2 未连接"
+        case .notConnected: return "PI-adaptor v2 未连接"
         }
     }
 }

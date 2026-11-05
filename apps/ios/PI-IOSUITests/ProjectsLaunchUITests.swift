@@ -4,7 +4,7 @@ import UIKit
 final class ProjectsLaunchUITests: XCTestCase {
     private let app = XCUIApplication()
     /// 仓库里只保留脱敏后的保留地址（203.0.113.10，RFC 5737）。
-    /// 要对着真实 Host 跑，用 `PI_IOS_EXPECTED_HOST=<真实地址片段>` 覆盖，不要把真实地址写回仓库。
+    /// 要对着真实 PI-adaptor 跑，用 `PI_IOS_EXPECTED_HOST=<真实地址片段>` 覆盖，不要把真实地址写回仓库。
     private let expectedHostFragment =
         ProcessInfo.processInfo.environment["PI_IOS_EXPECTED_HOST"] ?? "203.0.113.10"
     private let expectedProjectName = "pi-test-proj"
@@ -34,11 +34,11 @@ final class ProjectsLaunchUITests: XCTestCase {
             .firstMatch
             .waitForExistence(timeout: 3)
         else {
-            throw XCTSkip("The expected real Host is not configured for this host-backed smoke test.")
+            throw XCTSkip("The expected real PI-adaptor is not configured for this host-backed smoke test.")
         }
 
-        // The browse-and-register row only exists when the Host has an active project.
-        // Keep that assertion conditional so the smoke test also runs with an empty Host.
+        // The browse-and-register row only exists when the PI-adaptor has an active project.
+        // Keep that assertion conditional so the smoke test also runs with an empty PI-adaptor.
         let browseRow = app.buttons
             .matching(NSPredicate(format: "label CONTAINS %@", "浏览服务器目录并注册"))
             .firstMatch
@@ -81,14 +81,14 @@ final class ProjectsLaunchUITests: XCTestCase {
 
         let addProject = app.buttons["projects.add"]
         guard addProject.waitForExistence(timeout: 8) else {
-            throw XCTSkip("The current Host has no browsable project catalog.")
+            throw XCTSkip("The current PI-adaptor has no browsable project catalog.")
         }
         let catalogReady = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "enabled == true"),
             object: addProject
         )
         guard XCTWaiter.wait(for: [catalogReady], timeout: 10) == .completed else {
-            throw XCTSkip("The current Host has no browsable project catalog.")
+            throw XCTSkip("The current PI-adaptor has no browsable project catalog.")
         }
         addProject.tap()
 
@@ -128,7 +128,7 @@ final class ProjectsLaunchUITests: XCTestCase {
             )
             .firstMatch
         guard navigationTarget.waitForExistence(timeout: 25) else {
-            throw XCTSkip("The current Host has no navigable server directory.")
+            throw XCTSkip("The current PI-adaptor has no navigable server directory.")
         }
         for _ in 0..<3 where !navigationTarget.isHittable {
             app.swipeDown()
@@ -169,7 +169,7 @@ final class ProjectsLaunchUITests: XCTestCase {
             .firstMatch
             .waitForExistence(timeout: 8)
         else {
-            throw XCTSkip("The expected real Host is not configured for this host-backed smoke test.")
+            throw XCTSkip("The expected real PI-adaptor is not configured for this host-backed smoke test.")
         }
         XCTAssertTrue(
             app.staticTexts
@@ -190,12 +190,12 @@ final class ProjectsLaunchUITests: XCTestCase {
     func testUnreadableChildClearsStaleParentAndDisablesRegistration() throws {
         guard let deniedPath = ProcessInfo.processInfo.environment["PI_IOS_UI_TEST_UNREADABLE_DIRECTORY"],
               deniedPath.hasPrefix("/"), deniedPath != "/" else {
-            throw XCTSkip("Provide an existing unreadable child directory on the QA Host.")
+            throw XCTSkip("Provide an existing unreadable child directory on the QA PI-adaptor.")
         }
         showRoot("项目")
         let addProject = app.buttons["projects.add"]
         guard addProject.waitForExistence(timeout: 10), addProject.isEnabled else {
-            throw XCTSkip("The QA Host has no browsable project catalog.")
+            throw XCTSkip("The QA PI-adaptor has no browsable project catalog.")
         }
         addProject.tap()
         let currentPath = app.staticTexts["projectBrowser.currentPath"]
@@ -223,7 +223,7 @@ final class ProjectsLaunchUITests: XCTestCase {
                 next = app.buttons["projectBrowser.parent"]
             }
             guard next.waitForExistence(timeout: 5) else {
-                throw XCTSkip("The unreadable fixture is outside the Host's browsable tree.")
+                throw XCTSkip("The unreadable fixture is outside the PI-adaptor's browsable tree.")
             }
             let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: next)
             XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed)
@@ -284,10 +284,10 @@ final class ProjectsLaunchUITests: XCTestCase {
         showRoot("设置")
 
         let hostVersion = app.staticTexts
-            .matching(NSPredicate(format: "label CONTAINS %@", "Host 版本"))
+            .matching(NSPredicate(format: "label CONTAINS %@", "PI-adaptor 版本"))
             .firstMatch
         guard hostVersion.waitForExistence(timeout: 10) else {
-            throw XCTSkip("No real Host is configured for the host-backed settings smoke test.")
+            throw XCTSkip("No real PI-adaptor is configured for the host-backed settings smoke test.")
         }
 
         let systemd = app.buttons
@@ -374,14 +374,14 @@ final class ProjectsLaunchUITests: XCTestCase {
         XCTAssertFalse(apiKey.isEnabled, "Subscription login must disable API Key.")
     }
 
-    func testInstallHostScreenIsReachableWithoutStartingInstallation() throws {
+    func testInstallAdaptorScreenIsReachableWithoutStartingInstallation() throws {
         showRoot("设置")
 
         let host = app.buttons
             .matching(NSPredicate(format: "label CONTAINS %@", expectedHostFragment))
             .firstMatch
         guard host.waitForExistence(timeout: 8) else {
-            throw XCTSkip("The current Host row is unavailable.")
+            throw XCTSkip("The current PI-adaptor row is unavailable.")
         }
         host.tap()
         XCTAssertTrue(app.navigationBars["服务器"].waitForExistence(timeout: 8))
@@ -390,7 +390,7 @@ final class ProjectsLaunchUITests: XCTestCase {
             .matching(NSPredicate(format: "label CONTAINS %@", "安装或修复 PI-adaptor"))
             .firstMatch
         guard install.waitForExistence(timeout: 8) else {
-            throw XCTSkip("The install entry is unavailable for this Host.")
+            throw XCTSkip("The install entry is unavailable for this PI-adaptor.")
         }
         install.tap()
 

@@ -469,7 +469,7 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         let stateURL: URL
         let stdoutURL: URL
         let stderrURL: URL
-        let release: PiHostRelease
+        let release: PIAdaptorRelease
         let assetSha256: String
         let artifactName: String
         let processEnvironment: [String: String]
@@ -495,7 +495,7 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
 
         let placeholder = try XCTUnwrap(
-            PiHostRelease(
+            PIAdaptorRelease(
                 version: "2.0.1",
                 target: .linuxArm64,
                 baseURL: "https://example.test/pi-adaptor-v2.0.1",
@@ -536,7 +536,7 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         )
         let digest = sha256(try Data(contentsOf: artifactURL))
         let release = try XCTUnwrap(
-            PiHostRelease(
+            PIAdaptorRelease(
                 version: "2.0.1",
                 target: .linuxArm64,
                 baseURL: "https://example.test/pi-adaptor-v2.0.1",

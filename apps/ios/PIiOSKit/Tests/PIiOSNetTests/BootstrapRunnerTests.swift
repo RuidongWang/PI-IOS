@@ -12,7 +12,7 @@ final class BootstrapRunnerTests: XCTestCase {
         attemptId: String = "boot_test"
     ) throws -> BootstrapScriptConfiguration {
         let release = try XCTUnwrap(
-            PiHostRelease(version: "0.21.0", target: .linuxArm64)
+            PIAdaptorRelease(version: "0.21.0", target: .linuxArm64)
         )
         return try BootstrapScriptConfiguration(
             release: release,
@@ -338,7 +338,7 @@ final class BootstrapRunnerTests: XCTestCase {
             )
         )
         guard case let .failed(failure) = result else {
-            return XCTFail("旧 Host 名称不得通过安装验证：\(result)")
+            return XCTFail("旧 PI-adaptor 名称不得通过安装验证：\(result)")
         }
         XCTAssertEqual(failure.code, .verifyDeviceFailed)
         XCTAssertTrue(failure.detail?.contains("pi-host") ?? false)

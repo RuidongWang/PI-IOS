@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// 常驻顶部状态条（design-system.md §3 `StatusBanner` / §4 关键状态）。
-/// 用 `.safeAreaInset(edge: .top)` 或页面内容顶部放置，不随滚动隐藏。
+/// 常驻顶部状态条：用 `.safeAreaInset(edge: .top)` 或页面内容顶部放置，不随滚动隐藏。
+/// 图标装在信号色小方块里，让「状态」和「正文」在第一眼就分层。
 enum PIStatusKind {
     case info
     case warning
@@ -35,10 +35,12 @@ struct PIStatusBanner: View {
     var action: (() -> Void)? = nil
 
     var body: some View {
-        HStack(alignment: .top, spacing: PISpacing.s8) {
+        HStack(alignment: .top, spacing: PISpacing.s12) {
             Image(systemName: kind.icon)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(kind.tint)
+                .frame(width: 28, height: 28)
+                .background(kind.tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: PISpacing.s4) {
                 Text(text)
@@ -52,36 +54,48 @@ struct PIStatusBanner: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if let actionTitle, let action {
-                    Button(actionTitle, action: action)
-                        .font(PIFont.captionStrong)
-                        .foregroundStyle(kind.tint)
-                        .frame(minHeight: PIMetrics.minHitTarget, alignment: .leading)
+                    Button(action: action) {
+                        Text(actionTitle)
+                            .font(PIFont.captionStrong)
+                            .foregroundStyle(kind.tint)
+                            .frame(minHeight: PIMetrics.minHitTarget, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             Spacer(minLength: 0)
         }
         .padding(PISpacing.s12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(kind.tint.opacity(0.10), in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
+        .background(kind.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
-                .strokeBorder(kind.tint.opacity(0.28), lineWidth: PIMetrics.hairline)
+            RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous)
+                .strokeBorder(kind.tint.opacity(0.24), lineWidth: PIMetrics.hairline)
         )
         .accessibilityElement(children: .combine)
     }
 }
 
-/// 空态（design-system.md §3 `EmptyState`）：一句解释 + 一个主操作，不放插画。
+/// 空态：图标 + 一句解释 + 一个主操作，不放插画。
 struct PIEmptyState: View {
     let title: String
     let message: String
     var actionTitle: String? = nil
     var action: (() -> Void)? = nil
+    var actionIdentifier: String? = nil
+    var icon: String = "tray"
 
     var body: some View {
         VStack(alignment: .leading, spacing: PISpacing.s12) {
+            Image(systemName: icon)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(PIColor.accent)
+                .frame(width: 40, height: 40)
+                .background(PIColor.accentSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .accessibilityHidden(true)
             Text(title)
-                .font(PIFont.listTitle)
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(PIColor.text)
             Text(message)
                 .font(PIFont.caption)
@@ -96,15 +110,31 @@ struct PIEmptyState: View {
                         .frame(minHeight: PIMetrics.minHitTarget)
                         .background(PIColor.accent, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PIPressableButtonStyle())
+                .modifier(PIEmptyStateActionIdentifier(identifier: actionIdentifier))
+                .padding(.top, PISpacing.s4)
             }
         }
         .padding(PIMetrics.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(PIColor.surface, in: RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous))
+        .background(PIColor.surface, in: RoundedRectangle(cornerRadius: PIRadius.card, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous)
+            RoundedRectangle(cornerRadius: PIRadius.card, style: .continuous)
                 .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
         )
+        .shadow(color: PIColor.cardShadow, radius: 12, y: 4)
+    }
+}
+
+private struct PIEmptyStateActionIdentifier: ViewModifier {
+    let identifier: String?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let identifier {
+            content.accessibilityIdentifier(identifier)
+        } else {
+            content
+        }
     }
 }

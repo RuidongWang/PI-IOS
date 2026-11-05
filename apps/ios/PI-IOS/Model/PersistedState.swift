@@ -16,7 +16,7 @@ enum AuthKind: String, Codable, CaseIterable, Identifiable {
 }
 
 /// 安装回执里记录的版本来源；旧状态文件没有这个字段时按未知处理。
-enum HostInstallReleaseSource: String, Codable, Equatable, Hashable {
+enum AdaptorInstallReleaseSource: String, Codable, Equatable, Hashable {
     case latest
     case fallback
 }
@@ -24,12 +24,12 @@ enum HostInstallReleaseSource: String, Codable, Equatable, Hashable {
 /// Non-secret marker for the last successful bootstrap. The authoritative
 /// download/install receipt remains on the server; this local copy only avoids
 /// presenting an unknown state after relaunch.
-struct HostInstallReceipt: Codable, Equatable, Hashable {
+struct AdaptorInstallReceipt: Codable, Equatable, Hashable {
     var version: String
     var hostPort: Int
     var attemptId: String
     var completedAt: Date
-    var releaseSource: HostInstallReleaseSource? = nil
+    var releaseSource: AdaptorInstallReleaseSource? = nil
 }
 
 /// 一台服务器的**本机记录**。
@@ -45,17 +45,17 @@ struct HostRecord: Codable, Identifiable, Hashable {
     var authKind: AuthKind
     var createdAt: Date
     var isCurrent: Bool
-    /// 本机与 Host 完成 RACP 配对的时间；设备令牌本身只存 Keychain。
+    /// 本机与 PI-adaptor 完成 RACP 配对的时间；设备令牌本身只存 Keychain。
     var pairedAt: Date?
     /// 上一次隧道建立成功的时间；`nil` 表示本机没成功连过。
     var tunnelUpAt: Date?
-    /// Host 在服务器回环上的 RACP 端口（`direct-tcpip` 目标端口）。
+    /// PI-adaptor 在服务器回环上的 RACP 端口（`direct-tcpip` 目标端口）。
     /// 属于客户端本地配置：契约只冻结 `127.0.0.1:<port>` 与路径，没有固定端口值。
     var hostPort: Int?
     /// 上次选择的私钥**文件名**（仅用于界面回显；私钥内容只在 Keychain，不进本文件）。
     var keyFileName: String?
     /// 最近一次 bootstrap 成功回执（不含配对令牌或设备令牌）。
-    var installReceipt: HostInstallReceipt? = nil
+    var installReceipt: AdaptorInstallReceipt? = nil
 
     var address: String { "\(username)@\(host):\(port)" }
 

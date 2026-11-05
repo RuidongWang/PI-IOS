@@ -59,7 +59,7 @@ final class OfflineHostCacheUITests: XCTestCase {
 
     private func assertSidebar(host: String, absent: String) {
         XCTAssertTrue(app.buttons["切换服务器"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Fixture Host \(host)"].exists)
+        XCTAssertTrue(app.staticTexts["Fixture PI-adaptor \(host)"].exists)
         let projectGroup = app.buttons["sidebar.project.fixture-project-\(host)"]
         XCTAssertTrue(projectGroup.waitForExistence(timeout: 5))
         XCTAssertTrue(projectGroup.label.contains("当前项目"))
@@ -101,7 +101,7 @@ final class OfflineHostCacheUITests: XCTestCase {
 
         let history = app.staticTexts["Fixture \(host) \(kind) history"]
         for _ in 0..<5 where !history.isHittable { app.scrollViews.firstMatch.swipeUp() }
-        XCTAssertTrue(history.isHittable, "The selected Host's original cache text must be visible.")
+        XCTAssertTrue(history.isHittable, "The selected PI-adaptor's original cache text must be visible.")
         XCTAssertTrue(app.staticTexts["Fixture \(host) unsent draft"].exists)
         let time = Date(timeIntervalSince1970: 1_704_164_640 + (kind == "shared" ? 60 : 0))
         let originalTimestamp = time.formatted(Date.FormatStyle(
@@ -119,7 +119,7 @@ final class OfflineHostCacheUITests: XCTestCase {
             "Fixture \(host) ", "fixture-session-\(host)",
             "Fixture Project \(host)", "fixture-project-\(host)"
         ))
-        XCTAssertEqual(leaked.count, 0, "The other Host's titles, IDs and cache payloads must be absent.")
+        XCTAssertEqual(leaked.count, 0, "The other PI-adaptor's titles, IDs and cache payloads must be absent.")
     }
 
     private func openSidebar() {
@@ -134,9 +134,9 @@ final class OfflineHostCacheUITests: XCTestCase {
 
     private func switchHost(to host: String) {
         app.buttons["切换服务器"].tap()
-        let choice = app.buttons["Fixture Host \(host)"]
+        let choice = app.buttons["Fixture PI-adaptor \(host)"]
         XCTAssertTrue(choice.waitForExistence(timeout: 5))
         choice.tap()
-        XCTAssertTrue(app.staticTexts["Fixture Host \(host)"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Fixture PI-adaptor \(host)"].waitForExistence(timeout: 5))
     }
 }

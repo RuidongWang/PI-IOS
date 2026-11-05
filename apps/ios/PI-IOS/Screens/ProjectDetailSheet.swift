@@ -16,7 +16,16 @@ struct ProjectSummaryRow: View {
         VStack(spacing: 0) {
             HStack(spacing: PISpacing.s8) {
                 Button(action: onOpen) {
-                    HStack(alignment: .center, spacing: PISpacing.s8) {
+                    HStack(alignment: .center, spacing: PISpacing.s12) {
+                        Image(systemName: "folder.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(isCurrent ? PIColor.accent : PIColor.text2)
+                            .frame(width: 34, height: 34)
+                            .background(
+                                (isCurrent ? PIColor.accent : PIColor.text2).opacity(0.12),
+                                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            )
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: PISpacing.s4) {
                             Text(name)
                                 .font(PIFont.listTitle)
@@ -25,18 +34,28 @@ struct ProjectSummaryRow: View {
                             HStack(spacing: PISpacing.s8) {
                                 if isCurrent {
                                     Text("当前")
-                                        .font(PIFont.metaSmall)
+                                        .font(PIFont.metaSmall.weight(.semibold))
                                         .foregroundStyle(PIColor.accent)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 1)
+                                        .background(PIColor.accentSoft, in: Capsule())
                                 }
-                                Text(summary)
+                                Text("\(sessionCount) 个会话")
                                     .font(PIFont.caption)
                                     .foregroundStyle(PIColor.text2)
+                                if runningCount > 0 {
+                                    statusChip("运行 \(runningCount)", tint: PIColor.success)
+                                }
+                                if pendingCount > 0 {
+                                    statusChip("待处理 \(pendingCount)", tint: PIColor.warning)
+                                }
                             }
                         }
                         Spacer(minLength: PISpacing.s8)
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(PIColor.text3)
+                            .accessibilityHidden(true)
                     }
                     .padding(.leading, PISpacing.s16)
                     .padding(.vertical, PISpacing.s12)
@@ -58,6 +77,21 @@ struct ProjectSummaryRow: View {
             }
             if showsDivider { PIRowDivider() }
         }
+    }
+
+    private func statusChip(_ text: String, tint: Color) -> some View {
+        HStack(spacing: PISpacing.s4) {
+            Circle()
+                .fill(tint)
+                .frame(width: 5, height: 5)
+                .accessibilityHidden(true)
+            Text(text)
+                .font(PIFont.metaSmall)
+                .foregroundStyle(tint)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 1)
+        .background(tint.opacity(0.12), in: Capsule())
     }
 
     private var summary: String {
@@ -166,7 +200,7 @@ struct ProjectDetailSheet: View {
                 VStack(alignment: .leading, spacing: PISpacing.s24) {
                     PICard {
                         Text(binding?.name ?? initialName)
-                            .font(PIFont.navTitle)
+                            .font(PIFont.display)
                             .foregroundStyle(PIColor.text)
                         Text(binding?.path ?? "路径未在本机记录；服务器上的目录不会因此改变。")
                             .font(PIFont.caption)
@@ -178,31 +212,27 @@ struct ProjectDetailSheet: View {
                             .foregroundStyle(PIColor.text3)
                     }
                     if !connection.hasLoadedCatalog {
-                        PIStatusBanner(
-                            kind: .info,
-                            text: "正在读取项目与会话",
-                            detail: "目录返回后自动更新。"
-                        )
+                        PIInlineMessage(kind: .info, text: "正在读取项目与会话，目录返回后自动更新。")
                     } else if let catalogError = connection.catalogError {
-                        PIStatusBanner(
-                            kind: .warning,
-                            text: "项目数据可能不是最新",
-                            detail: catalogError,
-                            actionTitle: connection.isRefreshingCatalog ? "正在重试…" : "重试",
-                            action: { Task { await connection.refreshRemote() } }
-                        )
+                        VStack(alignment: .leading, spacing: PISpacing.s8) {
+                            PIInlineMessage(
+                                kind: .warning,
+                                text: "项目数据可能不是最新：\(catalogError)"
+                            )
+                            Button(connection.isRefreshingCatalog ? "正在重试…" : "重试") {
+                                Task { await connection.refreshRemote() }
+                            }
+                            .font(PIFont.captionStrong)
+                            .disabled(connection.isRefreshingCatalog)
+                        }
                     } else if !connection.state.isOnline {
-                        PIStatusBanner(
-                            kind: .warning,
-                            text: "服务器离线",
-                            detail: "显示上次同步数据，联网后更新。"
-                        )
+                        PIInlineMessage(kind: .warning, text: "服务器离线，显示上次同步数据，联网后更新。")
                     }
 
-                    PIGroup("项目名称", footer: "名称只影响本机显示；同一 Host 内不能重名。") {
+                    PIGroup("项目名称", footer: "名称只影响本机显示；同一 PI-adaptor 内不能重名。") {
                         VStack(alignment: .leading, spacing: PISpacing.s8) {
                             TextField("项目名称", text: $projectName)
-                                .textFieldStyle(.roundedBorder)
+                                .piFieldChrome()
                             if let nameError {
                                 Text(nameError)
                                     .font(PIFont.caption)
@@ -221,7 +251,7 @@ struct ProjectDetailSheet: View {
                                 title: "会话列表尚未加载",
                                 subtitle: "联网后会自动读取",
                                 isEnabled: false,
-                                showsDivider: false
+                                showsDivider: true
                             )
                         } else if sessions.isEmpty {
                             PIListRow(
@@ -233,24 +263,24 @@ struct ProjectDetailSheet: View {
                                     ? "用下方按钮新建"
                                     : "请先重试刷新",
                                 isEnabled: false,
-                                showsDivider: false
+                                showsDivider: true
                             )
                         } else {
-                            ForEach(Array(sessions.enumerated()), id: \.element.id) { index, session in
-                                sessionRow(session, showsDivider: index < sessions.count - 1)
+                            ForEach(Array(sessions.enumerated()), id: \.element.id) { _, session in
+                                sessionRow(session, showsDivider: true)
                             }
                         }
+                        PIListRow(
+                            title: "在此项目新建会话",
+                            subtitle: newSessionSubtitle,
+                            icon: "plus.circle",
+                            iconTint: PIColor.accent,
+                            isEnabled: canCreateSession,
+                            showsChevron: true,
+                            showsDivider: false,
+                            action: onNewSession
+                        )
                     }
-
-                    PIListRow(
-                        title: "在此项目新建会话",
-                        subtitle: newSessionSubtitle,
-                        isEnabled: canCreateSession,
-                        showsChevron: true,
-                        showsDivider: false,
-                        action: onNewSession
-                    )
-                    .background(PIColor.surface, in: RoundedRectangle(cornerRadius: PIRadius.group))
 
                     PIGroup("项目状态") {
                         PIListRow(
@@ -313,7 +343,7 @@ struct ProjectDetailSheet: View {
             nameError = nil
             model.showToast("项目名称已更新")
         } else {
-            nameError = "项目名称不能为空，且同一 Host 内不能重名"
+            nameError = "项目名称不能为空，且同一 PI-adaptor 内不能重名"
         }
     }
 
@@ -329,13 +359,21 @@ struct ProjectDetailSheet: View {
                 Button {
                     if archived { restoreSession(session) } else { onOpenSession(session) }
                 } label: {
-                    VStack(alignment: .leading, spacing: PISpacing.s4) {
-                        Text(title)
-                            .font(PIFont.listTitle)
-                            .foregroundStyle(PIColor.text)
-                        Text(archived ? "已归档" : (session.status ?? "idle"))
-                            .font(PIFont.caption)
-                            .foregroundStyle(archived ? PIColor.text3 : PIColor.text2)
+                    HStack(spacing: PISpacing.s12) {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(PIColor.text2)
+                            .frame(width: 30, height: 30)
+                            .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: PISpacing.s4) {
+                            Text(title)
+                                .font(PIFont.listTitle)
+                                .foregroundStyle(PIColor.text)
+                            Text(archived ? "已归档" : (session.status ?? "idle"))
+                                .font(PIFont.caption)
+                                .foregroundStyle(archived ? PIColor.text3 : PIColor.text2)
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .frame(minHeight: PIMetrics.minHitTarget)
@@ -347,6 +385,8 @@ struct ProjectDetailSheet: View {
                     Button("恢复") { restoreSession(session) }
                         .font(PIFont.captionStrong)
                         .foregroundStyle(PIColor.accent)
+                        .frame(minWidth: PIMetrics.minHitTarget, minHeight: PIMetrics.minHitTarget)
+                        .contentShape(Rectangle())
                         .accessibilityIdentifier("projectDetail.restoreSession.\(session.id)")
                 }
             }

@@ -8,7 +8,7 @@ final class BootstrapReleaseTests: XCTestCase {
 
     func testReleaseCoordinatesForBothPublishedLinuxTargets() throws {
         let x64 = try XCTUnwrap(
-            PiHostRelease(version: "2.0.1", target: .linuxX64)
+            PIAdaptorRelease(version: "2.0.1", target: .linuxX64)
         )
         XCTAssertEqual(x64.repository, "RuidongWang/PI-adaptor")
         XCTAssertEqual(x64.version, "2.0.1")
@@ -28,7 +28,7 @@ final class BootstrapReleaseTests: XCTestCase {
         )
 
         let arm64 = try XCTUnwrap(
-            PiHostRelease(version: "v2.0.1", target: .linuxArm64)
+            PIAdaptorRelease(version: "v2.0.1", target: .linuxArm64)
         )
         XCTAssertEqual(arm64.version, "2.0.1")
         XCTAssertEqual(arm64.bundleDirectoryName, "pi-adaptor-2.0.1-linux-arm64")
@@ -36,57 +36,57 @@ final class BootstrapReleaseTests: XCTestCase {
     }
 
     func testReleaseRejectsUnsafeVersionAndRepository() {
-        XCTAssertNil(PiHostRelease(version: "", target: .linuxX64))
-        XCTAssertNil(PiHostRelease(version: "v", target: .linuxX64))
-        XCTAssertNil(PiHostRelease(version: "2.0.1/other", target: .linuxX64))
-        XCTAssertNil(PiHostRelease(version: "2.0.1 beta", target: .linuxX64))
-        XCTAssertNil(PiHostRelease(version: "2.0.1", target: .linuxX64, repository: "vastsa"))
-        XCTAssertNil(PiHostRelease(version: "2.0.1", target: .linuxX64, repository: "a/b/c"))
-        XCTAssertNil(PiHostRelease(version: "2.0.1", target: .linuxX64, repository: "owner/repo?x=1"))
+        XCTAssertNil(PIAdaptorRelease(version: "", target: .linuxX64))
+        XCTAssertNil(PIAdaptorRelease(version: "v", target: .linuxX64))
+        XCTAssertNil(PIAdaptorRelease(version: "2.0.1/other", target: .linuxX64))
+        XCTAssertNil(PIAdaptorRelease(version: "2.0.1 beta", target: .linuxX64))
+        XCTAssertNil(PIAdaptorRelease(version: "2.0.1", target: .linuxX64, repository: "vastsa"))
+        XCTAssertNil(PIAdaptorRelease(version: "2.0.1", target: .linuxX64, repository: "a/b/c"))
+        XCTAssertNil(PIAdaptorRelease(version: "2.0.1", target: .linuxX64, repository: "owner/repo?x=1"))
     }
 
     func testSelfHostedPatchedReleasePinsBothArchitectureChecksums() throws {
         XCTAssertEqual(
-            PiHostRelease.defaultPatchedBaseURL,
-            "https://github.com/RuidongWang/PI-adaptor/releases/download/\(PiHostRelease.patchedReleaseTag)"
+            PIAdaptorRelease.defaultPatchedBaseURL,
+            "https://github.com/RuidongWang/PI-adaptor/releases/download/\(PIAdaptorRelease.patchedReleaseTag)"
         )
-        let arm64 = try XCTUnwrap(PiHostRelease.patched(target: .linuxArm64))
-        XCTAssertEqual(arm64.version, PiHostRelease.patchedReleaseVersion)
-        XCTAssertEqual(arm64.pinnedChecksum, PiHostRelease.patchedChecksums[.linuxArm64])
+        let arm64 = try XCTUnwrap(PIAdaptorRelease.patched(target: .linuxArm64))
+        XCTAssertEqual(arm64.version, PIAdaptorRelease.patchedReleaseVersion)
+        XCTAssertEqual(arm64.pinnedChecksum, PIAdaptorRelease.patchedChecksums[.linuxArm64])
         XCTAssertEqual(
             arm64.artifactURL,
-            "\(PiHostRelease.defaultPatchedBaseURL)/pi-adaptor-\(PiHostRelease.patchedReleaseVersion)-linux-arm64.tar.gz"
+            "\(PIAdaptorRelease.defaultPatchedBaseURL)/pi-adaptor-\(PIAdaptorRelease.patchedReleaseVersion)-linux-arm64.tar.gz"
         )
         XCTAssertEqual(
             arm64.checksumURL,
             arm64.artifactURL + ".sha256"
         )
 
-        let x64 = try XCTUnwrap(PiHostRelease.patched(target: .linuxX64))
-        XCTAssertEqual(x64.pinnedChecksum, PiHostRelease.patchedChecksums[.linuxX64])
+        let x64 = try XCTUnwrap(PIAdaptorRelease.patched(target: .linuxX64))
+        XCTAssertEqual(x64.pinnedChecksum, PIAdaptorRelease.patchedChecksums[.linuxX64])
         XCTAssertEqual(x64.target, .linuxX64)
     }
 
     func testSelfHostedReleaseRejectsUnsafeBaseURLAndChecksum() {
         XCTAssertNil(
-            PiHostRelease(
-                version: PiHostRelease.patchedReleaseVersion,
+            PIAdaptorRelease(
+                version: PIAdaptorRelease.patchedReleaseVersion,
                 target: .linuxArm64,
                 baseURL: "http://user@example.test/releases",
                 pinnedChecksum: digest
             )
         )
         XCTAssertNil(
-            PiHostRelease(
-                version: PiHostRelease.patchedReleaseVersion,
+            PIAdaptorRelease(
+                version: PIAdaptorRelease.patchedReleaseVersion,
                 target: .linuxArm64,
                 baseURL: "file:///tmp/releases",
                 pinnedChecksum: digest
             )
         )
         XCTAssertNil(
-            PiHostRelease(
-                version: PiHostRelease.patchedReleaseVersion,
+            PIAdaptorRelease(
+                version: PIAdaptorRelease.patchedReleaseVersion,
                 target: .linuxArm64,
                 baseURL: "http://example.test/releases",
                 pinnedChecksum: "not-a-digest"
@@ -95,32 +95,32 @@ final class BootstrapReleaseTests: XCTestCase {
     }
 
     func testChecksumNormalizationAcceptsOnlyFullSha256() {
-        XCTAssertEqual(PiHostRelease.normalizeChecksum(" \(digest.uppercased())\n"), digest)
-        XCTAssertNil(PiHostRelease.normalizeChecksum(String(digest.dropLast())))
-        XCTAssertNil(PiHostRelease.normalizeChecksum(digest + "0"))
-        XCTAssertNil(PiHostRelease.normalizeChecksum(String(digest.dropLast()) + "g"))
-        XCTAssertNil(PiHostRelease.normalizeChecksum(""))
+        XCTAssertEqual(PIAdaptorRelease.normalizeChecksum(" \(digest.uppercased())\n"), digest)
+        XCTAssertNil(PIAdaptorRelease.normalizeChecksum(String(digest.dropLast())))
+        XCTAssertNil(PIAdaptorRelease.normalizeChecksum(digest + "0"))
+        XCTAssertNil(PIAdaptorRelease.normalizeChecksum(String(digest.dropLast()) + "g"))
+        XCTAssertNil(PIAdaptorRelease.normalizeChecksum(""))
     }
 
     func testChecksumFileReadsOnlyTheMatchingArtifact() {
         XCTAssertEqual(
-            PiHostRelease.parseChecksumFile("\(digest.uppercased())  \(artifactName)\n", artifactName: artifactName),
+            PIAdaptorRelease.parseChecksumFile("\(digest.uppercased())  \(artifactName)\n", artifactName: artifactName),
             digest
         )
         XCTAssertEqual(
-            PiHostRelease.parseChecksumFile("\(digest) *\(artifactName)\n", artifactName: artifactName),
+            PIAdaptorRelease.parseChecksumFile("\(digest) *\(artifactName)\n", artifactName: artifactName),
             digest
         )
         XCTAssertEqual(
-            PiHostRelease.parseChecksumFile("\(digest)  /tmp/build/\(artifactName)\n", artifactName: artifactName),
+            PIAdaptorRelease.parseChecksumFile("\(digest)  /tmp/build/\(artifactName)\n", artifactName: artifactName),
             digest
         )
         XCTAssertEqual(
-            PiHostRelease.parseChecksumFile("# generated by release.sh\n\n\(digest)  \(artifactName)\n", artifactName: artifactName),
+            PIAdaptorRelease.parseChecksumFile("# generated by release.sh\n\n\(digest)  \(artifactName)\n", artifactName: artifactName),
             digest
         )
         XCTAssertNil(
-            PiHostRelease.parseChecksumFile(
+            PIAdaptorRelease.parseChecksumFile(
                 "\(digest)  pi-host-0.21.0-linux-x64.tar.gz\n",
                 artifactName: artifactName
             )
@@ -129,15 +129,15 @@ final class BootstrapReleaseTests: XCTestCase {
 
     func testChecksumComparisonAndVersionMatchingFailClosed() {
         let tampered = String(digest.dropLast()) + "e"
-        XCTAssertTrue(PiHostRelease.checksumMatches(digest.uppercased(), digest))
-        XCTAssertFalse(PiHostRelease.checksumMatches(tampered, digest))
-        XCTAssertFalse(PiHostRelease.checksumMatches("", ""))
+        XCTAssertTrue(PIAdaptorRelease.checksumMatches(digest.uppercased(), digest))
+        XCTAssertFalse(PIAdaptorRelease.checksumMatches(tampered, digest))
+        XCTAssertFalse(PIAdaptorRelease.checksumMatches("", ""))
 
-        XCTAssertTrue(PiHostRelease.versionsMatch("v2.0.1", "2.0.1"))
-        XCTAssertTrue(PiHostRelease.versionsMatch(" 2.0.1 ", "v2.0.1"))
-        XCTAssertFalse(PiHostRelease.versionsMatch("2.0.0", "2.0.1"))
-        XCTAssertFalse(PiHostRelease.versionsMatch("", ""))
-        XCTAssertFalse(PiHostRelease.versionsMatch("v", ""))
+        XCTAssertTrue(PIAdaptorRelease.versionsMatch("v2.0.1", "2.0.1"))
+        XCTAssertTrue(PIAdaptorRelease.versionsMatch(" 2.0.1 ", "v2.0.1"))
+        XCTAssertFalse(PIAdaptorRelease.versionsMatch("2.0.0", "2.0.1"))
+        XCTAssertFalse(PIAdaptorRelease.versionsMatch("", ""))
+        XCTAssertFalse(PIAdaptorRelease.versionsMatch("v", ""))
     }
 
     func testBootstrapOutputReadsStagesReadyPairingAndFailureCode() throws {

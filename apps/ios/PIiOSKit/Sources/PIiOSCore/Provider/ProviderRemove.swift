@@ -212,23 +212,23 @@ public enum ProviderRemoveFailureCode: Equatable, Sendable {
     public var displayMessage: String {
         switch self {
         case .invalidRequest:
-            return "Host 认为删除载荷不合法（providerId 或信封不符合契约），未执行删除"
+            return "PI-adaptor 认为删除载荷不合法（providerId 或信封不符合契约），未执行删除"
         case .payloadTooLarge:
             return "载荷超过上限，未执行删除"
         case .adminUnavailable:
-            return "Host 未运行或 admin.sock 不可用，字节未写出，删除未执行；修复隧道/服务后重试"
+            return "PI-adaptor 未运行或 admin.sock 不可用，字节未写出，删除未执行；修复隧道/服务后重试"
         case .adminBusy:
-            return "Host 正忙（与另一次导入或删除互斥），未执行删除，请稍后重试"
+            return "PI-adaptor 正忙（与另一次导入或删除互斥），未执行删除，请稍后重试"
         case .timeout:
             return "请求超时，删除结果不确定：请先在服务器上人工确认，勿直接重复删除"
         case .importFailed:
-            return "Host 侧操作失败，请查看 Host 日志后再决定"
+            return "PI-adaptor 侧操作失败，请查看 PI-adaptor 日志后再决定"
         case .notFound:
             return "目标模型服务不存在（可能已被删除），本机记录可清理"
         case .resultUnknown:
             return "删除结果不确定：请求已发出但未收到确认，请在服务器上人工确认，勿重复删除"
         case .removeFailed:
-            return "删除未完成（Host 明确失败），本机记录保留"
+            return "删除未完成（PI-adaptor 明确失败），本机记录保留"
         case .secretNotCleared:
             return "服务已删除但密钥未清除，请在服务器上人工清理残留密钥"
         case .defaultTransferFailed:
@@ -250,9 +250,9 @@ public enum ProviderRemoveFailureCode: Equatable, Sendable {
         case .unsupportedOp:
             return "当前 PI-adaptor 不支持该操作（能力缺失），请升级服务器上的 PI-adaptor 2.0.1"
         case .responseTooLarge:
-            return "Host 响应超过上限，结果不确定，请在服务器上人工确认"
+            return "PI-adaptor 响应超过上限，结果不确定，请在服务器上人工确认"
         case .responseInvalid:
-            return "Host 响应不符合契约，结果不确定，请在服务器上人工确认"
+            return "PI-adaptor 响应不符合契约，结果不确定，请在服务器上人工确认"
         case let .unknown(raw):
             return "未识别的失败码：\(raw)"
         }

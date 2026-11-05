@@ -4,7 +4,7 @@ import PIiOSCore
 
 /// 会话侧边栏（screens.md S-07 / information-architecture.md §2 抽屉浮层）。
 ///
-/// 构成：顶部 Host 选择器（名称、连接状态、▾）+ 右侧 ×；会话区；底部新建会话与 项目 / 设置。
+/// 构成：顶部 PI-adaptor 选择器（名称、连接状态、▾）+ 右侧 ×；会话区；底部新建会话与 项目 / 设置。
 /// 会话区读真实数据：在线时列服务器上的会话（可点开），离线时列本机缓存的会话（只读）。
 struct SidebarView: View {
     @EnvironmentObject private var model: AppModel
@@ -24,13 +24,33 @@ struct SidebarView: View {
         }
         .frame(width: PIMetrics.sidebarWidth)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(PIColor.surface.ignoresSafeArea(edges: .bottom))
+        .background {
+            // 侧边栏顶部不留一条死白：用一层由浅到无的顶光渐变把状态栏区域接进来，
+            // 与页面背景的「顶部微光」保持同一语言。
+            ZStack(alignment: .top) {
+                PIColor.surface
+                LinearGradient(
+                    colors: [PIColor.surface2.opacity(0.85), PIColor.surface.opacity(0)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 210)
+                RadialGradient(
+                    colors: [PIColor.accent.opacity(0.10), .clear],
+                    center: .topLeading,
+                    startRadius: 2,
+                    endRadius: 260
+                )
+                .frame(height: 260)
+            }
+            .ignoresSafeArea()
+        }
         .onDisappear(perform: resetSessionDrag)
         .overlay(alignment: .trailing) {
             Rectangle()
                 .fill(PIColor.separator)
                 .frame(width: PIMetrics.hairline)
-                .ignoresSafeArea(edges: .bottom)
+                .ignoresSafeArea()
         }
         .accessibilityAddTraits(.isModal)
     }
@@ -41,24 +61,55 @@ struct SidebarView: View {
             .frame(height: PIMetrics.hairline)
     }
 
-    // MARK: - Host 选择器
+    // MARK: - PI-adaptor 选择器
 
     @ViewBuilder
     private var hostSelector: some View {
-        HStack(alignment: .center, spacing: PISpacing.s8) {
+        VStack(alignment: .leading, spacing: PISpacing.s8) {
+            HStack {
+                Text("服务器")
+                    .font(PIFont.metaSmall)
+                    .tracking(1.2)
+                    .foregroundStyle(PIColor.text3)
+                Spacer()
+                Button {
+                    model.closeSidebar()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(PIColor.text2)
+                        .frame(width: PIMetrics.minHitTarget, height: PIMetrics.minHitTarget)
+                        .background(PIColor.surface2, in: Circle())
+                        .contentShape(Circle())
+                }
+                .accessibilityLabel("关闭侧边栏")
+                .accessibilityIdentifier("sidebar.close")
+            }
+
             if model.hosts.isEmpty {
                 Button {
                     model.showSettings()
                 } label: {
-                    VStack(alignment: .leading, spacing: PISpacing.s4) {
-                        Text("未配置服务器")
-                            .font(PIFont.listTitle)
-                            .foregroundStyle(PIColor.text)
-                        Text("去设置添加服务器")
-                            .font(PIFont.meta)
+                    HStack(spacing: PISpacing.s12) {
+                        Image(systemName: "server.rack")
+                            .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(PIColor.accent)
+                            .frame(width: 34, height: 34)
+                            .background(PIColor.accentSoft, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: PISpacing.s4) {
+                            Text("未配置服务器")
+                                .font(PIFont.listTitle)
+                                .foregroundStyle(PIColor.text)
+                            Text("去设置添加服务器")
+                                .font(PIFont.meta)
+                                .foregroundStyle(PIColor.accent)
+                        }
+                        Spacer(minLength: 0)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, PISpacing.s12)
+                    .padding(.vertical, PISpacing.s8)
+                    .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -75,54 +126,71 @@ struct SidebarView: View {
                     Divider()
                     Button("管理服务器…") { model.showSettings() }
                 } label: {
-                    HStack(spacing: PISpacing.s4) {
+                    HStack(spacing: PISpacing.s12) {
+                        Image(systemName: "server.rack")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(PIColor.accent)
+                            .frame(width: 34, height: 34)
+                            .background(PIColor.accentSoft, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: PISpacing.s4) {
                             Text(model.currentHost?.name ?? "选择服务器")
                                 .font(PIFont.listTitle)
                                 .foregroundStyle(PIColor.text)
                                 .lineLimit(1)
-                            Text(model.currentHost?.statusText ?? "")
-                                .font(PIFont.meta)
-                                .foregroundStyle(PIColor.text2)
-                                .lineLimit(1)
+                            HStack(spacing: PISpacing.s4) {
+                                Circle()
+                                    .fill(connection.state.isOnline ? PIColor.success : PIColor.warning)
+                                    .frame(width: 6, height: 6)
+                                    .accessibilityHidden(true)
+                                Text(model.currentHost?.statusText ?? "")
+                                    .font(PIFont.meta)
+                                    .foregroundStyle(PIColor.text2)
+                                    .lineLimit(1)
+                            }
                         }
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 11, weight: .semibold))
+                        Spacer(minLength: PISpacing.s4)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(PIColor.text3)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, PISpacing.s12)
+                    .padding(.vertical, PISpacing.s8)
+                    .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous))
                     .contentShape(Rectangle())
                 }
                 .frame(minHeight: PIMetrics.minHitTarget)
                 .accessibilityLabel("切换服务器")
             }
-
-            Button {
-                model.closeSidebar()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(PIColor.text2)
-                    .frame(width: PIMetrics.minHitTarget, height: PIMetrics.minHitTarget)
-                    .contentShape(Rectangle())
-            }
-            .accessibilityLabel("关闭侧边栏")
-            .accessibilityIdentifier("sidebar.close")
         }
         .padding(.horizontal, PISpacing.s16)
-        .padding(.top, PISpacing.s8)
+        .padding(.top, PISpacing.s12)
         .padding(.bottom, PISpacing.s12)
     }
 
     private var conversationArea: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: PISpacing.s8) {
-                TextField("搜索会话或项目", text: $searchText)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .textFieldStyle(.roundedBorder)
-                    .padding(.bottom, PISpacing.s8)
-                    .onSubmit {}
+                HStack(spacing: PISpacing.s8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(PIColor.text3)
+                        .accessibilityHidden(true)
+                    TextField("搜索会话或项目", text: $searchText)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .textFieldStyle(.plain)
+                        .font(PIFont.body)
+                        .onSubmit {}
+                }
+                .padding(.horizontal, PISpacing.s12)
+                .frame(minHeight: 40)
+                .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                        .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
+                )
+                .padding(.bottom, PISpacing.s8)
                 if connection.state.isOnline {
                     if sidebarGroups.isEmpty {
                         Text(
@@ -303,24 +371,35 @@ struct SidebarView: View {
             } label: {
                 HStack(spacing: PISpacing.s8) {
                     Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(PIColor.text3)
+                        .frame(width: 12)
                     Text(group.name)
                         .font(PIFont.captionStrong)
                         .foregroundStyle(PIColor.text)
                         .lineLimit(1)
                     Text("\(group.sessionIDs.count)")
                         .font(PIFont.metaSmall)
+                        .monospacedDigit()
                         .foregroundStyle(PIColor.text3)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(PIColor.surface2, in: Capsule())
                     if current {
-                        Text("当前")
-                            .font(PIFont.metaSmall)
-                            .foregroundStyle(PIColor.accent)
+                        HStack(spacing: PISpacing.s4) {
+                            Circle()
+                                .fill(PIColor.accent)
+                                .frame(width: 5, height: 5)
+                                .accessibilityHidden(true)
+                            Text("当前")
+                                .font(PIFont.metaSmall)
+                                .foregroundStyle(PIColor.accent)
+                        }
                     }
                     Spacer()
                 }
                 .padding(.horizontal, PISpacing.s8)
-                .frame(minHeight: 34)
+                .frame(minHeight: PIMetrics.minHitTarget)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -329,6 +408,7 @@ struct SidebarView: View {
                     + (current ? "，当前项目" : "")
                     + (collapsed ? "，已折叠" : "")
             )
+            .accessibilityHint(collapsed ? "展开会话列表" : "折叠会话列表")
             .accessibilityIdentifier("sidebar.project.\(group.projectID)")
 
             if !collapsed {
@@ -366,24 +446,35 @@ struct SidebarView: View {
             } label: {
                 HStack(spacing: PISpacing.s8) {
                     Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(PIColor.text3)
+                        .frame(width: 12)
                     Text(group.name)
                         .font(PIFont.captionStrong)
                         .foregroundStyle(PIColor.text)
                         .lineLimit(1)
                     Text("\(group.sessions.count)")
                         .font(PIFont.metaSmall)
+                        .monospacedDigit()
                         .foregroundStyle(PIColor.text3)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(PIColor.surface2, in: Capsule())
                     if current {
-                        Text("当前")
-                            .font(PIFont.metaSmall)
-                            .foregroundStyle(PIColor.accent)
+                        HStack(spacing: PISpacing.s4) {
+                            Circle()
+                                .fill(PIColor.accent)
+                                .frame(width: 5, height: 5)
+                                .accessibilityHidden(true)
+                            Text("当前")
+                                .font(PIFont.metaSmall)
+                                .foregroundStyle(PIColor.accent)
+                        }
                     }
                     Spacer()
                 }
                 .padding(.horizontal, PISpacing.s8)
-                .frame(minHeight: 34)
+                .frame(minHeight: PIMetrics.minHitTarget)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -392,6 +483,7 @@ struct SidebarView: View {
                     + (current ? "，当前项目" : "")
                     + (collapsed ? "，已折叠" : "")
             )
+            .accessibilityHint(collapsed ? "展开会话列表" : "折叠会话列表")
             .accessibilityIdentifier("sidebar.project.\(group.project.id)")
 
             if !collapsed {
@@ -457,14 +549,25 @@ struct SidebarView: View {
                             .lineLimit(1)
                         if hostID.map({ model.hasSessionUpdate(hostID: $0, sessionID: session.id) }) == true {
                             Text("新")
-                                .font(PIFont.metaSmall)
+                                .font(PIFont.metaSmall.weight(.semibold))
                                 .foregroundStyle(PIColor.accent)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(PIColor.accentSoft, in: Capsule())
                                 .accessibilityLabel("离开期间有更新")
                         }
                     }
-                    Text(sessionStatus(session, binding: binding))
-                        .font(PIFont.metaSmall)
-                        .foregroundStyle(PIColor.text3)
+                    HStack(spacing: 5) {
+                        if let tint = sessionStatusTint(session) {
+                            Circle()
+                                .fill(tint)
+                                .frame(width: 5, height: 5)
+                                .accessibilityHidden(true)
+                        }
+                        Text(sessionStatus(session, binding: binding))
+                            .font(PIFont.metaSmall)
+                            .foregroundStyle(sessionStatusTint(session) ?? PIColor.text3)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .frame(minHeight: PIMetrics.minHitTarget)
@@ -473,9 +576,15 @@ struct SidebarView: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("sidebar.session.\(session.id)")
             if isCurrent {
-                Text("当前")
-                    .font(PIFont.metaSmall)
-                    .foregroundStyle(PIColor.accent)
+                HStack(spacing: PISpacing.s4) {
+                    Circle()
+                        .fill(PIColor.accent)
+                        .frame(width: 5, height: 5)
+                        .accessibilityHidden(true)
+                    Text("当前")
+                        .font(PIFont.metaSmall.weight(.semibold))
+                        .foregroundStyle(PIColor.accent)
+                }
             }
             if let hostID {
                 Button {
@@ -488,7 +597,7 @@ struct SidebarView: View {
                     Image(systemName: isPinned ? "pin.fill" : "pin")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(isPinned ? PIColor.accent : PIColor.text3)
-                        .frame(width: 30, height: 34)
+                        .frame(width: PIMetrics.minHitTarget, height: PIMetrics.minHitTarget)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(isPinned ? "取消置顶" : "置顶会话")
@@ -496,7 +605,7 @@ struct SidebarView: View {
             }
         }
         .padding(.horizontal, PISpacing.s8)
-        .padding(.vertical, PISpacing.s8)
+        .padding(.vertical, 6)
         .background {
             GeometryReader { proxy in
                 Color.clear.preference(
@@ -510,9 +619,18 @@ struct SidebarView: View {
             }
         }
         .background(
-            (dropResolution?.targetID == session.id ? PIColor.accentSoft : Color.clear),
+            (dropResolution?.targetID == session.id || isCurrent ? PIColor.accentSoft : Color.clear),
             in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
         )
+        .overlay(alignment: .leading) {
+            if isCurrent {
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(PIColor.accent)
+                    .frame(width: 3)
+                    .padding(.vertical, 8)
+                    .accessibilityHidden(true)
+            }
+        }
         .overlay(alignment: .top) {
             if dropResolution?.targetID == session.id, dropResolution?.edge == .before {
                 dropIndicator
@@ -659,7 +777,7 @@ struct SidebarView: View {
                     before: nextID
                 )
             } else {
-                // The Host-facing model exposes "move before" only. These two
+                // The PI-adaptor-facing model exposes "move before" only. These two
                 // scoped moves append the source after the final pinned row.
                 model.movePinnedSession(
                     hostID: hostID,
@@ -695,13 +813,30 @@ struct SidebarView: View {
                     || status.contains("input")
                     || status.contains("pending") {
             parts.append("待处理")
+        } else if status == "idle" {
+            parts.append("空闲")
         } else {
-            parts.append(session.status ?? "idle")
+            parts.append(session.status ?? "空闲")
         }
         if let messageCount = binding?.messageCount {
             parts.append("\(messageCount) 条")
         }
         return parts.joined(separator: " · ")
+    }
+
+    /// 运行中 / 待处理的会话在侧边栏给一个状态色；其余保持元信息灰。
+    private func sessionStatusTint(_ session: RACPSessionSummary) -> Color? {
+        let status = session.status?.lowercased() ?? ""
+        if status.contains("running") || status.contains("working") {
+            return PIColor.success
+        }
+        if status.contains("waiting")
+            || status.contains("approval")
+            || status.contains("input")
+            || status.contains("pending") {
+            return PIColor.warning
+        }
+        return nil
     }
 
     private func openSession(_ session: RACPSessionSummary) {
@@ -724,6 +859,8 @@ struct SidebarView: View {
                 PIListRow(
                     title: "新建会话",
                     subtitle: "先选择项目（作为工作区）",
+                    icon: "plus.circle",
+                    iconTint: PIColor.accent,
                     showsChevron: true,
                     showsDivider: false,
                     action: {
@@ -747,24 +884,61 @@ struct SidebarView: View {
     }
 
     private func rootButton(_ root: AppModel.Root) -> some View {
-        PISecondaryButton(title: root.title) {
+        Button {
             model.switchRoot(root)
+        } label: {
+            VStack(spacing: PISpacing.s4) {
+                Image(systemName: rootIcon(root))
+                    .font(.system(size: 15, weight: .semibold))
+                Text(root.title)
+                    .font(PIFont.metaSmall.weight(.semibold))
+            }
+            .foregroundStyle(model.root == root ? PIColor.accent : PIColor.text2)
+            .frame(maxWidth: .infinity, minHeight: 50)
+            .background(
+                model.root == root ? PIColor.accentSoft : PIColor.surface2,
+                in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                    .strokeBorder(
+                        model.root == root ? PIColor.accentBorder : PIColor.separator,
+                        lineWidth: PIMetrics.hairline
+                    )
+            )
+        }
+        .buttonStyle(PIPressableButtonStyle())
+        .accessibilityLabel(root.title)
+        .accessibilityAddTraits(model.root == root ? .isSelected : [])
+    }
+
+    private func rootIcon(_ root: AppModel.Root) -> String {
+        switch root {
+        case .conversation: return "bubble.left.and.bubble.right"
+        case .projects: return "folder"
+        case .settings: return "gearshape"
         }
     }
 
     /// 禁用态操作：明确写清原因，不做「点了没反应」的按钮。
     private func disabledAction(title: String, reason: String) -> some View {
         VStack(alignment: .leading, spacing: PISpacing.s4) {
-            HStack(spacing: PISpacing.s4) {
+            HStack(spacing: PISpacing.s8) {
                 Image(systemName: "lock")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .accessibilityHidden(true)
                 Text(title)
                     .font(PIFont.button)
+                Spacer(minLength: 0)
             }
             .foregroundStyle(PIColor.text3)
+            .padding(.horizontal, PISpacing.s12)
             .frame(maxWidth: .infinity, minHeight: PIMetrics.minHitTarget)
             .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                    .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
+            )
             Text(reason)
                 .font(PIFont.metaSmall)
                 .foregroundStyle(PIColor.text3)

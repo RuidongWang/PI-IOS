@@ -7,7 +7,7 @@ import XCTest
 ///
 /// 典型事故：只改了 `patchedReleaseVersion` 没重发资产，或重发了同版本号的资产却没改
 /// `patchedChecksums`，结果「重新安装」永远装回旧字节。
-final class HostReleaseManifestTests: XCTestCase {
+final class AdaptorReleaseManifestTests: XCTestCase {
     private static func manifest() throws -> [String: Any] {
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { url.deleteLastPathComponent() }
@@ -23,23 +23,23 @@ final class HostReleaseManifestTests: XCTestCase {
         let tag = try XCTUnwrap(manifest["releaseTag"] as? String)
         let repository = try XCTUnwrap(manifest["repository"] as? String)
 
-        XCTAssertEqual(version, PiHostRelease.patchedReleaseVersion, "版本号必须在 host-release.json 与 PiHostRelease 之间一致")
-        XCTAssertEqual(tag, PiHostRelease.patchedReleaseTag, "发布标签必须由版本派生，且与 manifest 一致")
-        XCTAssertEqual(repository, PiHostRelease.patchedRepository, "发布仓库必须一致")
+        XCTAssertEqual(version, PIAdaptorRelease.patchedReleaseVersion, "版本号必须在 host-release.json 与 PIAdaptorRelease 之间一致")
+        XCTAssertEqual(tag, PIAdaptorRelease.patchedReleaseTag, "发布标签必须由版本派生，且与 manifest 一致")
+        XCTAssertEqual(repository, PIAdaptorRelease.patchedRepository, "发布仓库必须一致")
         XCTAssertEqual(manifest["schemaVersion"] as? Int, 2)
         XCTAssertEqual(manifest["protocolVersion"] as? String, "2.0.0")
         XCTAssertEqual(
-            PiHostRelease.defaultPatchedBaseURL,
+            PIAdaptorRelease.defaultPatchedBaseURL,
             "https://github.com/\(repository)/releases/download/\(tag)",
             "下载地址必须由仓库 + 标签派生"
         )
 
         let install = try XCTUnwrap(manifest["install"] as? [String: Any])
-        XCTAssertEqual(install["unitName"] as? String, PiHostRelease.unitName)
-        XCTAssertEqual(install["entrypoint"] as? String, PiHostRelease.entrypoint)
-        XCTAssertEqual(install["minimumNodeVersion"] as? String, PiHostRelease.minimumNodeVersion)
+        XCTAssertEqual(install["unitName"] as? String, PIAdaptorRelease.unitName)
+        XCTAssertEqual(install["entrypoint"] as? String, PIAdaptorRelease.entrypoint)
+        XCTAssertEqual(install["minimumNodeVersion"] as? String, PIAdaptorRelease.minimumNodeVersion)
         let runtime = try XCTUnwrap(manifest["runtime"] as? [String: Any])
-        XCTAssertEqual(runtime["serverName"] as? String, PiHostRelease.runtimeServerName)
+        XCTAssertEqual(runtime["serverName"] as? String, PIAdaptorRelease.runtimeServerName)
     }
 
     func testManifestArtifactsMatchPinnedChecksumsAndNames() throws {
@@ -54,14 +54,14 @@ final class HostReleaseManifestTests: XCTestCase {
             let sha = try XCTUnwrap(entry["sha256"] as? String)
             let file = try XCTUnwrap(entry["file"] as? String)
             let bundle = try XCTUnwrap(entry["bundleDirectory"] as? String)
-            XCTAssertEqual(sha, PiHostRelease.patchedChecksums[target], "\(key) 的 pinned sha256 必须与 manifest 一致")
+            XCTAssertEqual(sha, PIAdaptorRelease.patchedChecksums[target], "\(key) 的 pinned sha256 必须与 manifest 一致")
             XCTAssertEqual(file, "\(bundle).tar.gz", "\(key) 的资产名必须是 <bundleDirectory>.tar.gz")
 
-            let release = try XCTUnwrap(PiHostRelease.patched(target: target))
+            let release = try XCTUnwrap(PIAdaptorRelease.patched(target: target))
             XCTAssertEqual(release.artifactName, file)
             XCTAssertEqual(release.bundleDirectoryName, bundle)
             XCTAssertEqual(release.pinnedChecksum, sha)
-            XCTAssertEqual(release.artifactURL, "\(PiHostRelease.defaultPatchedBaseURL)/\(file)")
+            XCTAssertEqual(release.artifactURL, "\(PIAdaptorRelease.defaultPatchedBaseURL)/\(file)")
         }
     }
 
@@ -69,7 +69,7 @@ final class HostReleaseManifestTests: XCTestCase {
         let manifest = try Self.manifest()
         let version = try XCTUnwrap(manifest["version"] as? String)
         XCTAssertEqual(version, version.trimmingCharacters(in: .whitespacesAndNewlines))
-        XCTAssertNotNil(PiHostRelease.canonicalVersion(version), "版本必须能安全出现在资产名与 URL 里")
+        XCTAssertNotNil(PIAdaptorRelease.canonicalVersion(version), "版本必须能安全出现在资产名与 URL 里")
 
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { url.deleteLastPathComponent() }

@@ -16,7 +16,7 @@ struct PIRootNavBarModifier<Trailing: View>: ViewModifier {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(action: onMenu) {
                         Image(systemName: "line.3.horizontal")
-                            .font(.system(size: 17, weight: .semibold))
+                            .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(PIColor.text)
                             .frame(width: PIMetrics.minHitTarget, height: PIMetrics.minHitTarget)
                             .contentShape(Rectangle())
@@ -71,7 +71,17 @@ extension View {
     }
 }
 
-/// 主操作按钮：实心 --accent，深色模式使用深色文字（§2.5）。
+/// 全局按压反馈：轻缩放 + 压暗，统一所有自绘按钮的手感。
+struct PIPressableButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .opacity(configuration.isPressed ? 0.82 : 1)
+            .animation(PIMotion.quick, value: configuration.isPressed)
+    }
+}
+
+/// 主操作按钮：琥珀实心 + 深色文字（深色模式为近黑字，浅色模式白字）。
 struct PIPrimaryButton: View {
     let title: String
     var isEnabled: Bool = true
@@ -82,15 +92,20 @@ struct PIPrimaryButton: View {
         Button(action: action) {
             Text(title)
                 .font(PIFont.button)
-                .foregroundStyle(PIColor.onAccent)
+                .foregroundStyle(isEnabled ? PIColor.onAccent : PIColor.onAccent.opacity(0.6))
                 .frame(maxWidth: .infinity)
-                .frame(minHeight: PIMetrics.minHitTarget)
+                .frame(minHeight: 46)
                 .background(
                     RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
-                        .fill(isEnabled ? PIColor.accent : PIColor.accent.opacity(0.4))
+                        .fill(isEnabled ? PIColor.accent : PIColor.accent.opacity(0.38))
+                )
+                .shadow(
+                    color: isEnabled ? PIColor.accent.opacity(0.22) : .clear,
+                    radius: 10,
+                    y: 4
                 )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PIPressableButtonStyle())
         .modifier(OptionalAccessibilityIdentifier(identifier: identifier))
         .disabled(!isEnabled)
     }
@@ -109,7 +124,7 @@ private struct OptionalAccessibilityIdentifier: ViewModifier {
     }
 }
 
-/// 次级操作：--surface-2 底、主文本色。
+/// 次级操作：--surface-2 底、细描边、主文本色。
 struct PISecondaryButton: View {
     let title: String
     var isEnabled: Bool = true
@@ -121,15 +136,46 @@ struct PISecondaryButton: View {
                 .font(PIFont.button)
                 .foregroundStyle(isEnabled ? PIColor.text : PIColor.text3)
                 .frame(maxWidth: .infinity)
-                .frame(minHeight: PIMetrics.minHitTarget)
+                .frame(minHeight: 46)
                 .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                        .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
+                )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PIPressableButtonStyle())
         .disabled(!isEnabled)
     }
 }
 
-/// 审批卡主决策按钮：accent 实心、整宽、44pt 热区（design-system.md §3 / spec P1 AC-1/AC-3）。
+/// 行内补充动作：小号琥珀胶囊，用在状态横幅下方的「去项目页」「选择其他模型」这类次级入口。
+struct PIGhostChipButton: View {
+    let title: String
+    var systemImage: String? = nil
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: PISpacing.s4) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                Text(title)
+                    .font(PIFont.captionStrong)
+            }
+            .foregroundStyle(PIColor.accent)
+            .padding(.horizontal, PISpacing.s12)
+            .padding(.vertical, 7)
+            .background(PIColor.accentSoft, in: Capsule())
+            .overlay(Capsule().strokeBorder(PIColor.accentBorder, lineWidth: PIMetrics.hairline))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(PIPressableButtonStyle())
+    }
+}
+
+/// 审批卡主决策按钮：琥珀实心、整宽、44pt 热区。
 struct PIApprovalPrimaryButton: View {
     let title: String
     var isEnabled: Bool = true
@@ -139,17 +185,20 @@ struct PIApprovalPrimaryButton: View {
         Button(action: action) {
             Text(title)
                 .font(PIFont.captionStrong)
-                .foregroundStyle(PIColor.onAccent)
+                .foregroundStyle(isEnabled ? PIColor.onAccent : PIColor.onAccent.opacity(0.6))
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: PIMetrics.minHitTarget)
-                .background(isEnabled ? PIColor.accent : PIColor.accent.opacity(0.4), in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
+                .background(
+                    (isEnabled ? PIColor.accent : PIColor.accent.opacity(0.38)),
+                    in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PIPressableButtonStyle())
         .disabled(!isEnabled)
     }
 }
 
-/// 审批卡次级决策按钮：surface2 底、主文本色（spec P1 AC-1）。
+/// 审批卡次级决策按钮：surface2 底、主文本色。
 struct PIApprovalSecondaryButton: View {
     let title: String
     var isEnabled: Bool = true
@@ -163,14 +212,17 @@ struct PIApprovalSecondaryButton: View {
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: PIMetrics.minHitTarget)
                 .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                        .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
+                )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PIPressableButtonStyle())
         .disabled(!isEnabled)
     }
 }
 
-/// 审批卡危险决策按钮：danger 描边 + danger 文字、透明底，与安全动作视觉不共位
-/// （design-system.md §3 ApprovalCard「拒绝用 danger 描边而非填充」/ 原则 2 / spec P1 AC-1/AC-2）。
+/// 审批卡危险决策按钮：danger 描边 + danger 文字，与安全动作视觉不共位。
 struct PIDangerOutlineButton: View {
     let title: String
     var isEnabled: Bool = true
@@ -183,17 +235,21 @@ struct PIDangerOutlineButton: View {
                 .foregroundStyle(isEnabled ? PIColor.danger : PIColor.text3)
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: PIMetrics.minHitTarget)
+                .background(
+                    (isEnabled ? PIColor.dangerSoft.opacity(0.5) : Color.clear),
+                    in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                )
                 .overlay(
                     RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
-                        .strokeBorder(isEnabled ? PIColor.danger : PIColor.separator, lineWidth: PIMetrics.hairline)
+                        .strokeBorder(isEnabled ? PIColor.danger : PIColor.separator, lineWidth: 1.2)
                 )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PIPressableButtonStyle())
         .disabled(!isEnabled)
     }
 }
 
-/// 单选行（外观、离线缓存上限等浮层使用）：整行可点，选中态用强调色 + 勾选。
+/// 单选行（外观、离线缓存上限等浮层使用）：整行可点，选中态用柔和强调底 + 勾选。
 struct PIOptionRow: View {
     let title: String
     var subtitle: String? = nil
@@ -208,7 +264,7 @@ struct PIOptionRow: View {
                     VStack(alignment: .leading, spacing: PISpacing.s4) {
                         Text(title)
                             .font(PIFont.listTitle)
-                            .foregroundStyle(PIColor.text)
+                            .foregroundStyle(isSelected ? PIColor.accent : PIColor.text)
                         if let subtitle {
                             Text(subtitle)
                                 .font(PIFont.caption)
@@ -218,15 +274,20 @@ struct PIOptionRow: View {
                     }
                     Spacer(minLength: PISpacing.s8)
                     if isSelected {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 15, weight: .semibold))
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 17, weight: .semibold))
                             .foregroundStyle(PIColor.accent)
                             .accessibilityHidden(true)
                     }
                 }
-                .padding(.horizontal, PISpacing.s16)
+                .padding(.horizontal, PISpacing.s12)
                 .padding(.vertical, PISpacing.s12)
                 .frame(minHeight: PIMetrics.minHitTarget)
+                .background(
+                    isSelected ? PIColor.accentSoft : Color.clear,
+                    in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                )
+                .padding(.horizontal, PISpacing.s4)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)

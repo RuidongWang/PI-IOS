@@ -19,13 +19,14 @@ struct ConversationScreen: View {
     @State private var showingRename = false
     @State private var renameDraft = ""
     @State private var isNearBottom = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hasNewBelow = false
     @State private var scrollToBottomRequest = 0
     @State private var isCheckingModelAvailability = false
     @State private var modelAvailabilityGeneration = 0
     /// Provider ids that exist only in the legacy store (never mirrored into the
-    /// v2 Host store). Empty until a successful v2 probe confirms we are talking
-    /// to a v2 Host, so a v1 Host never gets its models wrongly marked.
+    /// v2 PI-adaptor store). Empty until a successful v2 probe confirms we are talking
+    /// to a v2 PI-adaptor, so a v1 PI-adaptor never gets its models wrongly marked.
     @State private var legacyOnlyProviderIDs: Set<String> = []
     @State private var topVisibleItemID: String?
     @State private var lastMeasuredTopItemID: String?
@@ -180,7 +181,7 @@ struct ConversationScreen: View {
                                 return
                             }
                             if isNearBottom {
-                                withAnimation(.easeOut(duration: 0.15)) {
+                                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
                                     proxy.scrollTo("thread-bottom", anchor: .bottom)
                                 }
                             } else {
@@ -189,26 +190,26 @@ struct ConversationScreen: View {
                         }
                         .onChange(of: session.view.runningTurnId) { _, _ in
                             guard !isRestoringReadingPosition, isNearBottom else { return }
-                            withAnimation(.easeOut(duration: 0.15)) {
+                            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
                                 proxy.scrollTo("thread-bottom", anchor: .bottom)
                             }
                         }
                         .onChange(of: session.view.activeItems) { _, _ in
                             guard !isRestoringReadingPosition, isNearBottom else { return }
-                            withAnimation(.easeOut(duration: 0.15)) {
+                            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
                                 proxy.scrollTo("thread-bottom", anchor: .bottom)
                             }
                         }
                         .onChange(of: session.view.queuedTurns) { _, _ in
                             guard !isRestoringReadingPosition, isNearBottom else { return }
-                            withAnimation(.easeOut(duration: 0.15)) {
+                            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
                                 proxy.scrollTo("thread-bottom", anchor: .bottom)
                             }
                         }
                         .onChange(of: scrollToBottomRequest) { _, _ in
                             isNearBottom = true
                             hasNewBelow = false
-                            withAnimation(.easeOut(duration: 0.15)) {
+                            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
                                 proxy.scrollTo("thread-bottom", anchor: .bottom)
                             }
                             recordReadingPosition()
@@ -219,7 +220,7 @@ struct ConversationScreen: View {
                         .overlay(alignment: .bottomTrailing) {
                             if !isNearBottom {
                                 Button {
-                                    withAnimation(.easeOut(duration: 0.18)) {
+                                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
                                         proxy.scrollTo("thread-bottom", anchor: .bottom)
                                     }
                                     isNearBottom = true
@@ -298,6 +299,14 @@ struct ConversationScreen: View {
             } message: {
                 Text("标题只保存在本机，不会改写服务器上的会话内容。")
             }
+            .piMessageAlert(title: "操作未完成", message: Binding(
+                get: { showingConfig ? nil : session.lastError },
+                set: { if $0 == nil { session.clearError() } }
+            ))
+            .piMessageAlert(title: "会话更新", message: Binding(
+                get: { session.notice },
+                set: { if $0 == nil { session.clearNotice() } }
+            ))
             .task(id: session.attachedSessionId) {
                 await refreshModelAvailability()
             }
@@ -320,8 +329,7 @@ struct ConversationScreen: View {
 
     // MARK: - 头部（常驻，AC-08.12）
 
-    /// 副信息行：合并 host·地址与模型名，避免多行平铺 meta（spec P1 AC-4/AC-5）。
-    /// 它排在状态行下方，只做次要信息，不再占据状态行的位置。
+    /// 服务器与模型独占第二行，避免连接状态和运行操作把模型名称挤出视口。
     private var secondaryLine: String {
         let hostPart = currentHost.map { "\($0.name) · \($0.address)" }
         let modelPart = selectedModelLabel
@@ -343,22 +351,13 @@ struct ConversationScreen: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: PISpacing.s4) {
-            // 状态行统一放最顶端：权限 + 会话模式 + 连接状态 + 运行状态/中止，
-            // 一眼看到当前是否在跑，而不是被 host meta 挤到下面。
             HStack(spacing: PISpacing.s8) {
                 PIPermissionBadge(mode: session.permissionMode)
                 Text(session.sessionMode.title)
                     .font(PIFont.captionStrong)
                     .foregroundStyle(PIColor.text2)
                     .lineLimit(1)
-                Circle()
-                    .fill(connection.state.isOnline ? PIColor.success : PIColor.warning)
-                    .frame(width: 7, height: 7)
-                    .accessibilityHidden(true)
-                Text(connection.state.displayText)
-                    .font(PIFont.captionStrong)
-                    .foregroundStyle(connection.state.isOnline ? PIColor.success : PIColor.warning)
-                    .lineLimit(1)
+                    .layoutPriority(1)
                 Spacer(minLength: PISpacing.s4)
                 if session.isTurnRunning {
                     Text(runningTurnLabel)
@@ -371,25 +370,44 @@ struct ConversationScreen: View {
                     Button(role: .destructive) {
                         Task { await session.interrupt() }
                     } label: {
-                        Label("中止", systemImage: "stop.circle")
-                            .font(PIFont.caption)
+                        Label("中止", systemImage: "stop.circle.fill")
+                            .font(PIFont.captionStrong)
                             .lineLimit(1)
+                            .padding(.horizontal, PISpacing.s8)
+                            .padding(.vertical, 5)
+                            .background(PIColor.dangerSoft, in: Capsule())
                     }
+                    .frame(minHeight: 32)
                     .accessibilityIdentifier("conversation.interrupt")
                     .disabled(!session.canInterrupt || session.isBusy)
+                } else {
+                    Circle()
+                        .fill(connection.state.isOnline ? PIColor.success : PIColor.warning)
+                        .frame(width: 7, height: 7)
+                        .accessibilityHidden(true)
+                    Text(connection.state.displayText)
+                        .font(PIFont.captionStrong)
+                        .foregroundStyle(connection.state.isOnline ? PIColor.success : PIColor.warning)
+                        .lineLimit(1)
                 }
             }
             if !secondaryLine.isEmpty {
                 Text(secondaryLine)
                     .font(PIFont.metaSmall)
-                    .foregroundStyle(PIColor.text3)
+                    .foregroundStyle(PIColor.text2)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(.horizontal, PIMetrics.pageMargin)
-        .padding(.vertical, PISpacing.s8)
+        .padding(.vertical, 8)
         .background(PIColor.surface)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(PIColor.separator)
+                .frame(height: PIMetrics.hairline)
+        }
         .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
     }
 
@@ -397,27 +415,21 @@ struct ConversationScreen: View {
 
     @ViewBuilder
     private var statusArea: some View {
-        if let error = session.lastError {
-            PIStatusBanner(kind: .danger, text: "操作未完成", detail: error)
-                .onTapGesture { session.clearError() }
-        }
-        if let notice = session.notice {
-            PIStatusBanner(kind: .success, text: notice, detail: "点一下收起")
-                .onTapGesture { session.clearNotice() }
-        }
         if !connection.state.isOnline {
-            PIStatusBanner(
+            PIInlineMessage(
                 kind: .warning,
-                text: "离线，内容可能不是最新",
-                detail: connection.state.detail.map { "\(connection.state.displayText)：\($0)" }
-                    ?? "隧道未建立时只能读到本机缓存；发送与审批已禁用。"
+                text: connection.state.detail.map {
+                    "离线，内容可能不是最新：\(connection.state.displayText)：\($0)"
+                } ?? "隧道未建立时只能读到本机缓存；发送与审批已禁用。"
             )
         } else if session.attachedSessionId == nil {
-            VStack(alignment: .leading, spacing: PISpacing.s8) {
-                PIStatusBanner(kind: .info, text: "还没有打开会话", detail: "到项目页选择或新建一个会话。")
-                Button("去项目页") { model.switchRoot(.projects) }
-                    .buttonStyle(.borderless)
-            }
+            PIEmptyState(
+                title: "还没有打开会话",
+                message: "到项目页选择或新建一个会话。",
+                actionTitle: "去项目页",
+                action: { model.switchRoot(.projects) },
+                icon: "bubble.left.and.text.bubble.right"
+            )
         } else {
             switch session.modelAvailability {
             case .available:
@@ -438,8 +450,10 @@ struct ConversationScreen: View {
                         Task { await refreshModelAvailability() }
                     }
                 )
-                Button("选择其他模型") { showingConfig = true }
-                    .buttonStyle(.borderless)
+                PIGhostChipButton(title: "选择其他模型", systemImage: "slider.horizontal.3") {
+                    showingConfig = true
+                }
+                .padding(.horizontal, PISpacing.s4)
             }
         }
     }
@@ -449,11 +463,10 @@ struct ConversationScreen: View {
     private var threadSection: some View {
         VStack(alignment: .leading, spacing: PISpacing.s8) {
             if session.view.items.isEmpty {
-                PIListRow(
+                PIEmptyState(
                     title: "这个会话还没有消息",
-                    subtitle: "在下方输入框发出第一条指令",
-                    isEnabled: false,
-                    showsDivider: false
+                    message: "在下方输入框发出第一条指令",
+                    icon: "bubble.left.and.text.bubble.right"
                 )
             } else {
                 let rows = threadRows
@@ -554,10 +567,29 @@ struct ConversationScreen: View {
                             .foregroundStyle(PIColor.text2)
                     }
                 }
-                .padding(.horizontal, PISpacing.s12)
-                .padding(.vertical, PISpacing.s8)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
                 .frame(maxWidth: 320, alignment: .leading)
-                .background(PIColor.accentSoft, in: RoundedRectangle(cornerRadius: PIRadius.card, style: .continuous))
+                .background(
+                    PIColor.accentSoft,
+                    in: UnevenRoundedRectangle(
+                        topLeadingRadius: PIRadius.card,
+                        bottomLeadingRadius: PIRadius.card,
+                        bottomTrailingRadius: 6,
+                        topTrailingRadius: PIRadius.card,
+                        style: .continuous
+                    )
+                )
+                .overlay(
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: PIRadius.card,
+                        bottomLeadingRadius: PIRadius.card,
+                        bottomTrailingRadius: 6,
+                        topTrailingRadius: PIRadius.card,
+                        style: .continuous
+                    )
+                    .strokeBorder(PIColor.accentBorder, lineWidth: PIMetrics.hairline)
+                )
             }
         } else {
             // Agent / 系统消息：左对齐、无气泡、无头像、无角色标签（design-system.md §7 / spec AC-2）。
@@ -763,7 +795,7 @@ struct ConversationScreen: View {
         }
     }
 
-    /// 离线时只显示用户在侧边栏显式点过、且按当前 Host 保存的会话。
+    /// 离线时只显示用户在侧边栏显式点过、且按当前 PI-adaptor 保存的会话。
     private var cachedSessionId: String? {
         guard let hostID = model.currentHost?.id else { return nil }
         return model.cachedSessionSelectionID(for: hostID)
@@ -775,10 +807,9 @@ struct ConversationScreen: View {
         let entries = cached?.entries ?? []
         VStack(alignment: .leading, spacing: PISpacing.s8) {
             PISectionHeader(text: "缓存的历史（只读）")
-            PIStatusBanner(
+            PIInlineMessage(
                 kind: .warning,
-                text: "离线只读 · 缓存可能已过期",
-                detail: "审批卡只用于展示，不能在离线状态提交；恢复在线后会按服务器快照重建。"
+                text: "离线只读 · 缓存可能已过期；审批卡只用于展示，恢复在线后会按服务器快照重建。"
             )
             if let approvals = cached?.approvals, !approvals.isEmpty {
                 PISectionHeader(text: "缓存的待审批（\(approvals.count)）")
@@ -854,20 +885,15 @@ struct ConversationScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if contract {
                     HStack(spacing: PISpacing.s8) {
-                        Button("批准") {}
-                            .buttonStyle(.borderedProminent)
-                        Button("驳回", role: .destructive) {}
-                            .buttonStyle(.bordered)
+                        PIApprovalPrimaryButton(title: "批准", isEnabled: false) {}
+                        PIDangerOutlineButton(title: "驳回", isEnabled: false) {}
                     }
-                    .disabled(true)
                 } else {
                     HStack(spacing: PISpacing.s8) {
-                        Button("允许一次") {}
-                        Button("本会话允许") {}
-                        Button("拒绝", role: .destructive) {}
+                        PIApprovalSecondaryButton(title: "允许一次", isEnabled: false) {}
+                        PIApprovalSecondaryButton(title: "本会话允许", isEnabled: false) {}
+                        PIDangerOutlineButton(title: "拒绝", isEnabled: false) {}
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(true)
                 }
                 Text("离线时不可提交，恢复在线后再操作。")
                     .font(PIFont.meta)
@@ -907,7 +933,11 @@ struct ConversationScreen: View {
             let availability = session.availability(for: card.id)
             PICard {
                 VStack(alignment: .leading, spacing: PISpacing.s8) {
-                    HStack {
+                    HStack(spacing: PISpacing.s4) {
+                        Circle()
+                            .fill(SessionController.isContract(card) ? PIColor.warning : PIColor.accent)
+                            .frame(width: 6, height: 6)
+                            .accessibilityHidden(true)
                         Text(SessionController.isContract(card) ? "计划 / 目标契约" : "权限请求")
                             .font(PIFont.captionStrong)
                             .foregroundStyle(PIColor.text2)
@@ -1027,16 +1057,37 @@ struct ConversationScreen: View {
                                     .font(PIFont.meta)
                                     .foregroundStyle(PIColor.text3)
                             } else {
-                                ForEach(question.options, id: \.self) { option in
-                                    Toggle(option, isOn: binding(for: card.id, question: question.id, option: option))
-                                        .toggleStyle(.button)
-                                        .font(PIFont.caption)
+                                VStack(alignment: .leading, spacing: PISpacing.s8) {
+                                    ForEach(question.options, id: \.self) { option in
+                                        PISelectableChip(
+                                            title: option,
+                                            isSelected: isSelected(
+                                                cardID: card.id,
+                                                question: question.id,
+                                                option: option
+                                            )
+                                        ) {
+                                            setSelected(
+                                                cardID: card.id,
+                                                question: question.id,
+                                                option: option,
+                                                isOn: !isSelected(
+                                                    cardID: card.id,
+                                                    question: question.id,
+                                                    option: option
+                                                )
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                     HStack(spacing: PISpacing.s8) {
-                        Button("提交回答") {
+                        PIApprovalPrimaryButton(
+                            title: "提交回答",
+                            isEnabled: !session.isBusy && connection.state.isOnline
+                        ) {
                             let answers = InputQuestionParser.answers(
                                 selections: selections[card.id] ?? [:],
                                 questionCount: questions.count
@@ -1046,34 +1097,36 @@ struct ConversationScreen: View {
                                 selections[card.id] = nil
                             }
                         }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(session.isBusy || !connection.state.isOnline)
-                        Button("全部跳过") {
+                        PIApprovalSecondaryButton(
+                            title: "全部跳过",
+                            isEnabled: !session.isBusy && connection.state.isOnline
+                        ) {
                             let answers = InputQuestionParser.answers(
                                 selections: [:],
                                 questionCount: questions.count
                             )
                             Task { await session.answer(inputId: card.id, answers: answers) }
                         }
-                        .buttonStyle(.bordered)
-                        .disabled(session.isBusy || !connection.state.isOnline)
                     }
                 }
             }
         }
     }
 
-    private func binding(for cardId: String, question: Int, option: String) -> Binding<Bool> {
-        Binding(
-            get: { selections[cardId]?[question]?.contains(option) ?? false },
-            set: { isOn in
-                var card = selections[cardId] ?? [:]
-                var set = card[question] ?? []
-                if isOn { set.insert(option) } else { set.remove(option) }
-                card[question] = set
-                selections[cardId] = card
-            }
-        )
+    private func isSelected(cardID: String, question: Int, option: String) -> Bool {
+        selections[cardID]?[question]?.contains(option) ?? false
+    }
+
+    private func setSelected(cardID: String, question: Int, option: String, isOn: Bool) {
+        var card = selections[cardID] ?? [:]
+        var set = card[question] ?? []
+        if isOn {
+            set.insert(option)
+        } else {
+            set.remove(option)
+        }
+        card[question] = set
+        selections[cardID] = card
     }
 
     // MARK: - 排队（AC-13）
@@ -1096,10 +1149,16 @@ struct ConversationScreen: View {
                                     .foregroundStyle(PIColor.text3)
                             }
                             Spacer()
-                            Button("取消", role: .destructive) {
+                            Button(role: .destructive) {
                                 Task { await session.cancelQueued(turnId: turn.id) }
+                            } label: {
+                                Text("取消")
+                                    .font(PIFont.captionStrong)
+                                    .padding(.horizontal, PISpacing.s12)
+                                    .padding(.vertical, 6)
+                                    .background(PIColor.dangerSoft, in: Capsule())
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(PIPressableButtonStyle())
                             .disabled(session.isBusy || !connection.state.isOnline)
                         }
                     }
@@ -1152,10 +1211,11 @@ struct ConversationScreen: View {
                     matching: .images
                 ) {
                     Image(systemName: "plus")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(allowsAttachments ? PIColor.text2 : PIColor.text3)
-                        .frame(width: PIMetrics.minHitTarget, height: PIMetrics.minHitTarget)
-                        .contentShape(Rectangle())
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(allowsAttachments ? PIColor.text : PIColor.text3)
+                        .frame(width: 36, height: 36)
+                        .background(PIColor.surface3, in: Circle())
+                        .contentShape(Circle())
                 }
                 .disabled(!session.sendAdmission.isAllowed || session.attachedSessionId == nil)
                 .accessibilityLabel("添加图片附件")
@@ -1181,16 +1241,25 @@ struct ConversationScreen: View {
                         if photoSelectionID == photoSelection { selectedPhotos = [] }
                     }
                 }
-                TextField("给 Agent 的指令", text: $session.draftText, axis: .vertical)
+                // 占位文字自己画、自己对齐：原生 placeholder 跟着输入框内部基线走，
+                // 单行时看起来比左右按钮低一点。输入框固定 44pt 高后，占位和实际
+                // 文字都在这条中线上，空态、输入态、换行态不会各偏各的。
+                TextField("", text: $session.draftText, axis: .vertical)
                     .lineLimit(1...5)
                     .textFieldStyle(.plain)
                     .font(PIFont.body)
                     .foregroundStyle(PIColor.text)
-                    .padding(.vertical, PISpacing.s8)
-                    // 与左右 44pt 按钮同高：行内用 .bottom 对齐，输入框若只有
-                    // 文本高度（约 36pt），占位文字会被压得比 + / 发送键低一截。
                     .frame(minHeight: PIMetrics.minHitTarget)
+                    .overlay(alignment: .leading) {
+                        if session.draftText.isEmpty {
+                            Text("给 Agent 的指令")
+                                .font(PIFont.body)
+                                .foregroundStyle(PIColor.text3)
+                                .allowsHitTesting(false)
+                        }
+                    }
                     .disabled(!session.sendAdmission.isAllowed || session.attachedSessionId == nil)
+                    .accessibilityLabel("给 Agent 的指令")
                     .accessibilityIdentifier("conversation.composer")
                 Button {
                     scrollToBottomRequest &+= 1
@@ -1199,28 +1268,40 @@ struct ConversationScreen: View {
                         await session.send()
                     }
                 } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 30, weight: .semibold))
-                        .foregroundStyle(session.canSend && !session.isBusy ? PIColor.accent : PIColor.text3)
-                        .frame(width: PIMetrics.minHitTarget, height: PIMetrics.minHitTarget)
-                        .contentShape(Rectangle())
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(session.canSend && !session.isBusy ? PIColor.onAccent : PIColor.text3)
+                        .frame(width: 36, height: 36)
+                        .background(
+                            session.canSend && !session.isBusy ? PIColor.accent : PIColor.surface3,
+                            in: Circle()
+                        )
+                        .contentShape(Circle())
                 }
                 .disabled(!session.canSend || session.isBusy)
                 .accessibilityLabel("发送")
             }
-            .padding(.leading, PISpacing.s4)
-            .padding(.trailing, PISpacing.s4)
-            .padding(.vertical, PISpacing.s4)
-            .background(PIColor.surface, in: Capsule(style: .continuous))
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
+            .padding(.leading, 6)
+            .padding(.trailing, 6)
+            .padding(.vertical, 6)
+            .background(
+                PIColor.surface2,
+                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
             )
-            .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(PIColor.separatorStrong, lineWidth: PIMetrics.hairline)
+            )
+            .shadow(color: PIColor.floatingShadow.opacity(0.5), radius: 14, y: 5)
         }
         .padding(.horizontal, PIMetrics.pageMargin)
         .padding(.vertical, PISpacing.s8)
         .background(PIColor.surface)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(PIColor.separator)
+                .frame(height: PIMetrics.hairline)
+        }
     }
 
     private func imageMimeType(_ data: Data) -> String {
@@ -1234,18 +1315,21 @@ struct ConversationScreen: View {
             configurationChip(
                 title: session.sessionMode.title,
                 tint: PIColor.text2,
-                identifier: "composer.modeChip"
+                identifier: "composer.modeChip",
+                systemImage: "slider.horizontal.3"
             )
             configurationChip(
                 title: session.permissionMode.title,
                 tint: session.permissionMode.tint,
-                identifier: "composer.permissionChip"
+                identifier: "composer.permissionChip",
+                systemImage: "lock.shield"
             )
             Spacer(minLength: PISpacing.s4)
             configurationChip(
                 title: selectedModelLabel,
                 tint: PIColor.text2,
                 identifier: "composer.modelChip",
+                systemImage: "cpu",
                 maxWidth: 190,
                 alignment: .trailing
             )
@@ -1253,7 +1337,8 @@ struct ConversationScreen: View {
                 configurationChip(
                     title: session.thinkingLevel?.rawValue ?? "",
                     tint: PIColor.text2,
-                    identifier: "composer.thinkingChip"
+                    identifier: "composer.thinkingChip",
+                    systemImage: "brain.head.profile"
                 )
             }
         }
@@ -1264,6 +1349,7 @@ struct ConversationScreen: View {
         title: String,
         tint: Color,
         identifier: String,
+        systemImage: String? = nil,
         maxWidth: CGFloat? = nil,
         alignment: Alignment = .leading
     ) -> some View {
@@ -1271,6 +1357,12 @@ struct ConversationScreen: View {
             showingConfig = true
         } label: {
             HStack(spacing: PISpacing.s4) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(PIColor.text3)
+                        .accessibilityHidden(true)
+                }
                 Text(title)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -1278,14 +1370,15 @@ struct ConversationScreen: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(PIColor.text3)
             }
-            .font(PIFont.metaSmall)
+            .font(PIFont.metaSmall.weight(.semibold))
             .foregroundStyle(tint)
-            .padding(.horizontal, PISpacing.s8 + 1)
-            .frame(minHeight: 32)
+            .padding(.horizontal, PISpacing.s8)
+            .frame(minHeight: 30)
             .frame(maxWidth: maxWidth, alignment: alignment)
             .background(PIColor.surface2, in: Capsule())
-            // 视觉 32pt 高，热区补足到 44pt（spec AC-7）。
-            .padding(.vertical, (PIMetrics.minHitTarget - 32) / 2)
+            .overlay(Capsule().strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline))
+            // 视觉 30pt 高，热区补足到 44pt（spec AC-7）。
+            .padding(.vertical, (PIMetrics.minHitTarget - 30) / 2)
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -1345,15 +1438,15 @@ struct ConversationScreen: View {
             }
         }
         do {
-            // Prefer the v2 Host's own provider store; fall back to the legacy
+            // Prefer the v2 PI-adaptor's own provider store; fall back to the legacy
             // SSH-based binding probe for old v1 Hosts.
-            let status = try await connection.hostV2BindingStatus(sessionId: sessionID)
+            let status = try await connection.adaptorV2BindingStatus(sessionId: sessionID)
             guard generation == modelAvailabilityGeneration,
                   model.currentHost?.id == host.id,
                   session.attachedSessionId == sessionID,
                   session.selectedBindingKey == bindingKey
             else { return }
-            // A successful v2 probe means the Host keeps providers in the v2
+            // A successful v2 probe means the PI-adaptor keeps providers in the v2
             // store; anything our local catalog knows only from the legacy store
             // cannot drive a turn on it.
             let legacyOnly = Set(
@@ -1409,7 +1502,7 @@ struct ConversationScreen: View {
         }
     }
 
-    /// When the v2 Host reports the pinned provider as missing but our local
+    /// When the v2 PI-adaptor reports the pinned provider as missing but our local
     /// catalog knows it only from the legacy store, the real cause is the
     /// two-store split — name it and point at the fix (re-import writes the
     /// provider and its key into PI-adaptor) instead of a generic message.
@@ -1428,7 +1521,7 @@ struct ConversationScreen: View {
 
     /// Best-effort self-heal for the two-store split (§7): when a session is
     /// bound to a provider that exists only in the legacy store, and we still
-    /// hold its API key in the Keychain, mirror it into the v2 Host store and
+    /// hold its API key in the Keychain, mirror it into the v2 PI-adaptor store and
     /// rebind the session to the mirrored provider id. Returns true when a
     /// rebind was issued (a fresh availability check follows).
     private func mirrorLegacyOnlyProvider(
@@ -1444,7 +1537,7 @@ struct ConversationScreen: View {
               let operation = model.providerOperationContext(for: host)
         else { return false }
         let specs = local.models.map(\.providerSpec)
-        guard let mirrored = try? await connection.registerHostProvider(
+        guard let mirrored = try? await connection.registerAdaptorProvider(
             name: local.name,
             vendorKey: "mirror-\(UUID().uuidString)",
             baseURL: local.baseURL,
@@ -1760,11 +1853,13 @@ private struct ToolRowHeader: View {
     let isExpanded: Bool
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: PISpacing.s8) {
             Image(systemName: icon)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(iconTint)
-                .frame(width: 16)
+                .frame(width: 24, height: 24)
+                .background(iconTint.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .accessibilityHidden(true)
             Text(title)
                 .font(PIFont.captionStrong)
                 .foregroundStyle(PIColor.text)
@@ -1772,9 +1867,12 @@ private struct ToolRowHeader: View {
                 .layoutPriority(2)
             if let statusText, !statusText.isEmpty {
                 Text(statusText)
-                    .font(PIFont.metaSmall)
+                    .font(PIFont.metaSmall.weight(.semibold))
                     .foregroundStyle(statusTint)
                     .lineLimit(1)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(statusTint.opacity(0.12), in: Capsule())
                     .layoutPriority(1)
             }
             if let summary, !summary.isEmpty {
@@ -1870,7 +1968,7 @@ private struct SessionConfigSheet: View {
     @ObservedObject var session: SessionController
     let groups: [ProviderModelGroup]
     let diagnostics: [ModelGroupingDiagnostic]
-    /// Providers our local catalog knows but the connected v2 Host's own store
+    /// Providers our local catalog knows but the connected v2 PI-adaptor's own store
     /// does not (legacy-only imports); their models cannot drive a turn.
     let unavailableProviderIDs: Set<String>
     @Environment(\.dismiss) private var dismiss
@@ -1889,32 +1987,25 @@ private struct SessionConfigSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: PISpacing.s24) {
                     if !diagnostics.isEmpty {
-                        PIStatusBanner(
+                        PIInlineMessage(
                             kind: .warning,
-                            text: "模型清单有重复记录",
-                            detail: diagnostics.map(\.message).joined(separator: "\n")
+                            text: "模型清单有重复记录：\(diagnostics.map(\.message).joined(separator: "\n"))"
                         )
                     }
                     if !unavailableProviderIDs.isEmpty {
-                        PIStatusBanner(
+                        PIInlineMessage(
                             kind: .warning,
-                            text: "部分模型未同步到服务器",
-                            detail: "标记为「未同步」的模型只存在于服务器的旧存储，无法在该服务器上运行。"
+                            text: "部分模型未同步到 PI-adaptor：标记为「未同步」的模型只存在于服务器的旧存储，无法在该服务器上运行。"
                                 + "请到 设置 → 模型服务 重新导入对应服务（会写入 PI-adaptor）。"
                         )
                     }
                     if configLocked {
-                        PIStatusBanner(
+                        PIInlineMessage(
                             kind: .warning,
-                            text: "当前轮次仍在运行",
-                            detail: "模型、会话模式和思考档位会在本轮结束后恢复可切换。"
+                            text: "当前轮次仍在运行：模型、会话模式和思考档位会在本轮结束后恢复可切换。"
                         )
                     } else if !session.isOnline {
-                        PIStatusBanner(
-                            kind: .warning,
-                            text: "服务器离线",
-                            detail: "恢复连接后才能提交会话配置。"
-                        )
+                        PIInlineMessage(kind: .warning, text: "服务器离线，恢复连接后才能提交会话配置。")
                     }
                     PIGroup("权限模式", footer: "改动通过 `session/configure` 下发，运行中的轮次不允许切换。") {
                         ForEach(RACPPermissionMode.allCases, id: \.self) { mode in
@@ -1989,10 +2080,10 @@ private struct SessionConfigSheet: View {
                         }
                     }
                     if let notice = session.thinkingFallbackNotice {
-                        PIStatusBanner(kind: .info, text: "档位已调整", detail: notice)
+                        PIInlineMessage(kind: .info, text: "档位已调整：\(notice)")
                     }
                     if let error = session.lastError {
-                        PIStatusBanner(kind: .danger, text: "配置未生效", detail: error)
+                        PIInlineMessage(kind: .danger, text: "配置未生效：\(error)")
                     }
                 }
                 .padding(.horizontal, PIMetrics.pageMargin)

@@ -21,6 +21,7 @@ struct ModelsScreen: View {
     @State private var statusMessage: String?
     @State private var errorMessage: String?
     @State private var selectedProvider: StoredModelProvider?
+    @State private var deletionNotice: ProviderDeletionNotice?
     @State private var authPreset: ProviderAuthPreset = .apiKey
     @State private var servicePreset: ProviderServicePreset = .openAICompatible
     @State private var discoveryFingerprint: String?
@@ -140,15 +141,11 @@ struct ModelsScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: PISpacing.s24) {
-                if let importBlocker {
-                    PIStatusBanner(
-                        kind: .warning,
-                        text: "无法导入模型服务",
-                        detail: importBlocker
-                    )
-                    .accessibilityIdentifier("models.importBlocked")
+                if isFetching {
+                    PIStatusBanner(kind: .info, text: "正在获取模型")
+                } else if isImporting {
+                    PIStatusBanner(kind: .info, text: "正在导入模型服务")
                 }
-                status
                 configuredProviders
                 addService
                 if !modelDrafts.isEmpty {
@@ -172,6 +169,29 @@ struct ModelsScreen: View {
             apiKey = ""
             invalidateDiscovery()
         }
+        .onChange(of: model.currentModelProviders) { _, providers in
+            if let selected = selectedProvider {
+                guard let updated = providers.first(where: { $0.id == selected.id }) else {
+                    selectedProvider = nil
+                    return
+                }
+                selectedProvider = updated
+            }
+        }
+        .piMessageAlert(title: "模型服务已删除", message: Binding(
+            get: {
+                guard selectedProvider == nil, case .success(let message)? = deletionNotice else { return nil }
+                return message
+            },
+            set: { if $0 == nil { deletionNotice = nil } }
+        ))
+        .piMessageAlert(title: "删除后需要处理", message: Binding(
+            get: {
+                guard selectedProvider == nil, case .needsAttention(let message)? = deletionNotice else { return nil }
+                return message
+            },
+            set: { if $0 == nil { deletionNotice = nil } }
+        ))
         .sheet(isPresented: Binding(
             get: { selectedProvider != nil },
             set: { if !$0 { selectedProvider = nil } }
@@ -182,14 +202,8 @@ struct ModelsScreen: View {
                     host: host,
                     onDeleted: { notice in
                         switch notice {
-                        case .success(let message):
-                            errorMessage = nil
-                            statusMessage = message
-                        case .needsAttention(let message):
-                            // Keep the warning visible after the sheet closes; a
-                            // generic "已删除" would hide the required follow-up.
-                            statusMessage = nil
-                            errorMessage = message
+                        case .success, .needsAttention:
+                            deletionNotice = notice
                         }
                         selectedProvider = nil
                     }
@@ -200,32 +214,10 @@ struct ModelsScreen: View {
 
     @ViewBuilder
     private var status: some View {
-        if isFetching {
-            PIStatusBanner(kind: .info, text: "正在获取模型")
-        } else if isImporting {
-            PIStatusBanner(kind: .info, text: "正在导入模型服务")
-        } else if let errorMessage {
-            PIStatusBanner(
-                kind: .danger,
-                text: "模型配置未完成",
-                detail: errorMessage,
-                actionTitle: "知道了",
-                action: { self.errorMessage = nil }
-            )
+        if let errorMessage {
+            PIInlineMessage(kind: .danger, text: errorMessage)
         } else if let statusMessage {
-            PIStatusBanner(
-                kind: .success,
-                text: "模型配置",
-                detail: statusMessage,
-                actionTitle: "知道了",
-                action: { self.statusMessage = nil }
-            )
-        } else {
-            PIStatusBanner(
-                kind: .info,
-                text: "自动匹配标准配置",
-                detail: "先读取服务自己的 /models，再按完整模型 ID 使用 models.dev 补全上下文、输出上限、思考档位与图片/PDF 能力。"
-            )
+            PIInlineMessage(kind: .success, text: statusMessage)
         }
     }
 
@@ -249,6 +241,8 @@ struct ModelsScreen: View {
                         value: provider.defaultModelId.flatMap { id in
                             provider.models.first(where: { $0.id == id })?.displayName
                         },
+                        icon: "cpu",
+                        iconTint: PIColor.accent,
                         isEnabled: true,
                         showsChevron: true,
                         showsDivider: index != model.currentModelProviders.count - 1,
@@ -324,7 +318,17 @@ struct ModelsScreen: View {
                     Text("先在设置 → 服务器中添加并连接服务器。")
                         .font(PIFont.caption)
                         .foregroundStyle(PIColor.text3)
+                } else if let importBlocker {
+                    VStack(alignment: .leading, spacing: PISpacing.s8) {
+                        Text("无法导入模型服务")
+                            .font(PIFont.captionStrong)
+                            .foregroundStyle(PIColor.warning)
+                        PIInlineMessage(kind: .warning, text: importBlocker)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("models.importBlocked")
                 }
+                status
             }
             .padding(.horizontal, PISpacing.s16)
             .padding(.vertical, PISpacing.s12)
@@ -340,16 +344,18 @@ struct ModelsScreen: View {
                 TextField("搜索模型 ID 或名称", text: $filter)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                    .textFieldStyle(.roundedBorder)
-                HStack {
+                    .piFieldChrome()
+                HStack(spacing: PISpacing.s8) {
                     Button("全选当前结果") {
                         selectedDraftIDs.formUnion(visibleDrafts.map(\.id))
                     }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(PIColor.accent)
                     Button("取消当前结果") {
                         selectedDraftIDs.subtract(visibleDrafts.map(\.id))
                     }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(PIColor.text2)
                     Spacer()
                 }
                 .font(PIFont.caption)
@@ -417,25 +423,25 @@ struct ModelsScreen: View {
                         TextField("模型 ID", text: binding.modelId)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                            .textFieldStyle(.roundedBorder)
+                            .piFieldChrome()
                         TextField("显示名称", text: binding.displayName)
-                            .textFieldStyle(.roundedBorder)
-                        HStack {
+                            .piFieldChrome()
+                        HStack(spacing: PISpacing.s8) {
                             TextField("上下文上限", text: binding.contextWindow)
                                 .keyboardType(.numberPad)
-                                .textFieldStyle(.roundedBorder)
+                                .piFieldChrome()
                             TextField("输出上限", text: binding.maxTokens)
                                 .keyboardType(.numberPad)
-                                .textFieldStyle(.roundedBorder)
+                                .piFieldChrome()
                         }
                         TextField("思考档位，用逗号分隔", text: binding.thinkingLevels)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                            .textFieldStyle(.roundedBorder)
+                            .piFieldChrome()
                         TextField("默认档位（可留空）", text: binding.defaultThinkingLevel)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                            .textFieldStyle(.roundedBorder)
+                            .piFieldChrome()
                     }
                     .padding(.top, PISpacing.s8)
                 }

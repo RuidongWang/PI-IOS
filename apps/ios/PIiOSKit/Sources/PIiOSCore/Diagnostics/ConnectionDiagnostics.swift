@@ -2,8 +2,8 @@ import Foundation
 
 // MARK: - systemd unit 状态
 
-/// The three `systemctl --user show` properties used by the Host status page.
-public struct HostUnitSnapshot: Equatable, Sendable {
+/// The three `systemctl --user show` properties used by the PI-adaptor status page.
+public struct AdaptorUnitSnapshot: Equatable, Sendable {
     public let loadState: String
     public let activeState: String
     public let unitFileState: String
@@ -17,26 +17,26 @@ public struct HostUnitSnapshot: Equatable, Sendable {
     public var isActive: Bool { activeState == "active" }
 }
 
-public enum HostUnitParseError: Error, Equatable, LocalizedError {
+public enum AdaptorUnitParseError: Error, Equatable, LocalizedError {
     case missingField(String)
 
     public var errorDescription: String? {
         switch self {
         case .missingField(let field):
-            return "Host unit 状态缺少必需字段：\(field)"
+            return "PI-adaptor unit 状态缺少必需字段：\(field)"
         }
     }
 }
 
 /// Parses `Key=Value` output without depending on line order or surrounding SSH noise.
-public enum HostUnitSnapshotParser {
+public enum AdaptorUnitSnapshotParser {
     public static let requiredFields = [
         "LoadState",
         "ActiveState",
         "UnitFileState",
     ]
 
-    public static func parse(_ output: String) throws -> HostUnitSnapshot {
+    public static func parse(_ output: String) throws -> AdaptorUnitSnapshot {
         var values: [String: String] = [:]
 
         for rawLine in output.split(whereSeparator: { $0.isNewline }) {
@@ -56,9 +56,9 @@ public enum HostUnitSnapshotParser {
         }
 
         for field in requiredFields where values[field] == nil {
-            throw HostUnitParseError.missingField(field)
+            throw AdaptorUnitParseError.missingField(field)
         }
-        return HostUnitSnapshot(
+        return AdaptorUnitSnapshot(
             loadState: values["LoadState"]!,
             activeState: values["ActiveState"]!,
             unitFileState: values["UnitFileState"]!
@@ -98,7 +98,7 @@ public enum ConnectionFailureKind: String, Equatable, Sendable {
         case .insufficientBalance:
             return "账户余额或调用额度不足（402）：请在模型服务侧补充额度后重试。"
         case .timeout:
-            return "连接超时：请检查网络、服务器防火墙和 Host 状态后重试。"
+            return "连接超时：请检查网络、服务器防火墙和 PI-adaptor 状态后重试。"
         case .offline:
             return "当前处于离线状态：恢复手机网络或 VPN 后再试。"
         case .hostKey:
@@ -106,9 +106,9 @@ public enum ConnectionFailureKind: String, Equatable, Sendable {
         case .remoteUnavailable:
             return "服务器或 PI-adaptor 暂不可用：请检查 PI-adaptor 服务、端口与防火墙。"
         case .protocolViolation:
-            return "连接协议异常或版本不兼容：请核对客户端与 Host 版本。"
+            return "连接协议异常或版本不兼容：请核对客户端与 PI-adaptor 版本。"
         case .unknown:
-            return "连接失败：请检查服务器地址、网络与 Host 状态后重试。"
+            return "连接失败：请检查服务器地址、网络与 PI-adaptor 状态后重试。"
         }
     }
 
@@ -139,7 +139,7 @@ public enum ConnectionFailureClassifier {
         case .invalidArgument: return "参数不合法"
         case .notFound: return "对象不存在，列表已刷新"
         case .methodNotFound: return "这台服务器不支持该操作"
-        case .agentBusy: return "Host 正忙"
+        case .agentBusy: return "PI-adaptor 正忙"
         case .conflict: return "状态已变化，重新拉取后再试"
         case .idempotencyConflict: return "同一幂等键对应了不同内容，需要人工确认"
         case .cursorExpired: return "事件游标已过期，已按快照重建"
@@ -148,7 +148,7 @@ public enum ConnectionFailureClassifier {
         case .approvalStale: return "审批已失效"
         case .payloadTooLarge: return "内容超过上限，请压缩后重试"
         case .pairingFailed: return "配对失败"
-        case .pairingTokenExpired: return "配对令牌已过期，需要重启 Host 取新令牌"
+        case .pairingTokenExpired: return "配对令牌已过期，需要重启 PI-adaptor 取新令牌"
         case .capabilityUnavailable: return "服务器未提供该能力"
         }
     }

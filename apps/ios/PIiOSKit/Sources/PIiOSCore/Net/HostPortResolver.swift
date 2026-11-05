@@ -6,7 +6,7 @@ import Foundation
 /// The probe runs over SSH and prints one candidate port per line; the resolver
 /// picks the first value that is a valid TCP port. Ordering is defined by the
 /// command (running process first, then the systemd user unit), so an
-/// already-running Host wins over a stale unit definition.
+/// already-running PI-adaptor wins over a stale unit definition.
 public enum HostPortResolver {
     /// Port used when nothing can be discovered and the record has no port.
     public static let fallbackPort = 44271

@@ -241,7 +241,7 @@ enum KeychainStore {
         )
     }
 
-    /// Enumerates only attempt-scoped accounts for this Host. Primary
+    /// Enumerates only attempt-scoped accounts for this PI-adaptor. Primary
     /// `host-token:` records are excluded before decoding, so recovery can
     /// never select or overwrite the currently active credential.
     static func loadAllStagedPairings(hostID: UUID) -> [BootstrapStagedCredential] {

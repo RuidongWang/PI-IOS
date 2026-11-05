@@ -18,8 +18,8 @@ public enum OfflineSessionCacheSQLiteError: Error, LocalizedError {
 /// C-4 的 SQLite 落盘实现。
 ///
 /// 表的主键使用 `(host_id, ...)` 复合键。契约表格只写了逻辑主键 `id`，
-/// 但同一份本地库必须同时保存多个 Host；若只按 `id` 建主键，A/B 两个
-/// Host 的同名 session/item/approval 会互相覆盖，违反 AC-18.3。
+/// 但同一份本地库必须同时保存多个 PI-adaptor；若只按 `id` 建主键，A/B 两个
+/// PI-adaptor 的同名 session/item/approval 会互相覆盖，违反 AC-18.3。
 public final class OfflineSessionCacheSQLite {
     public struct DatabaseError: Error, CustomStringConvertible, Equatable {
         public let message: String

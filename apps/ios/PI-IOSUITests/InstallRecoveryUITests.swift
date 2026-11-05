@@ -48,7 +48,7 @@ final class InstallRecoveryUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["设置"].waitForExistence(timeout: 5))
 
         let host = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS %@", "Fixture Host B")
+            NSPredicate(format: "label CONTAINS %@", "Fixture PI-adaptor B")
         ).firstMatch
         XCTAssertTrue(host.waitForExistence(timeout: 5))
         host.tap()
@@ -61,5 +61,8 @@ final class InstallRecoveryUITests: XCTestCase {
         XCTAssertTrue(install.isHittable)
         install.tap()
         XCTAssertTrue(app.navigationBars["安装 PI-adaptor"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.alerts["安装未完成"].waitForExistence(timeout: 5))
+        app.alerts["安装未完成"].buttons["知道了"].tap()
+        XCTAssertTrue(app.alerts["安装未完成"].waitForNonExistence(timeout: 5))
     }
 }

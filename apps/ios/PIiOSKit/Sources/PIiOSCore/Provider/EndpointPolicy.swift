@@ -286,12 +286,12 @@ public enum EndpointRejection: Equatable, Sendable {
         }
     }
 
-    /// 中文原因。措辞按契约 §4.5 与 spec §4.1.1 的说明写：这类端点由 Host 侧的
+    /// 中文原因。措辞按契约 §4.5 与 spec §4.1.1 的说明写：这类端点由 PI-adaptor 侧的
     /// `provider-import` 拒绝，客户端在提交前就拦下，并解释为什么不能用。
     public var message: String {
         switch self {
         case let .excludedVendorKey(key):
-            return "「\(key)」属于本地推理服务，Host 侧不接受这类 provider（P0 不支持本地模型）"
+            return "「\(key)」属于本地推理服务，PI-adaptor 侧不接受这类 provider（P0 不支持本地模型）"
         case let .missingBaseURL(vendorKey):
             return "provider「\(vendorKey)」必须填写 Base URL"
         case let .malformedURL(raw):
@@ -305,19 +305,19 @@ public enum EndpointRejection: Equatable, Sendable {
         case .fragmentNotAllowed:
             return "Base URL 不能带片段标识（#…）"
         case let .loopbackHost(host):
-            return "Base URL 指向回环地址「\(host)」：该地址在服务器上指向服务器自己，Host 会拒绝导入。请改成服务器能访问的域名或公网/内网地址"
+            return "Base URL 指向回环地址「\(host)」：该地址在服务器上指向服务器自己，PI-adaptor 会拒绝导入。请改成服务器能访问的域名或公网/内网地址"
         case let .localHostname(host):
-            return "Base URL 使用「\(host)」这类 .local 局域网名，Host 会拒绝，请改成可解析的域名或 IP"
+            return "Base URL 使用「\(host)」这类 .local 局域网名，PI-adaptor 会拒绝，请改成可解析的域名或 IP"
         case let .wildcardHost(host):
-            return "Base URL 使用通配地址「\(host)」，无法作为上游端点，Host 会拒绝导入"
+            return "Base URL 使用通配地址「\(host)」，无法作为上游端点，PI-adaptor 会拒绝导入"
         case let .linkLocalHost(host):
-            return "Base URL 指向链路本地地址「\(host)」，Host 会拒绝导入；请改成公网或内网可达地址"
+            return "Base URL 指向链路本地地址「\(host)」，PI-adaptor 会拒绝导入；请改成公网或内网可达地址"
         case .ipv6Unspecified:
-            return "Base URL 使用未指定 IPv6 地址「[::]」，Host 会拒绝导入"
+            return "Base URL 使用未指定 IPv6 地址「[::]」，PI-adaptor 会拒绝导入"
         case let .ipv6Loopback(host):
-            return "Base URL 指向 IPv6 回环地址「[\(host)]」，在服务器上指向它自己，Host 会拒绝导入"
+            return "Base URL 指向 IPv6 回环地址「[\(host)]」，在服务器上指向它自己，PI-adaptor 会拒绝导入"
         case let .ipv4MappedIPv6(host):
-            return "Base URL 使用 IPv4 映射的 IPv6 地址「[\(host)]」，Host 会拒绝导入"
+            return "Base URL 使用 IPv4 映射的 IPv6 地址「[\(host)]」，PI-adaptor 会拒绝导入"
         }
     }
 }

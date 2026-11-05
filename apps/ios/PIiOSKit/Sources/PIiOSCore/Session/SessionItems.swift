@@ -69,7 +69,7 @@ public struct RACPItem: Equatable, Sendable {
         self.init(id: id, payload: payload)
     }
 
-    /// Host snapshots use `itemType + content`; older fixtures use `kind` and
+    /// PI-adaptor snapshots use `itemType + content`; older fixtures use `kind` and
     /// message fields at the top level. Accept both without changing storage.
     public var itemType: String? {
         payload.value(at: ["itemType"])?.stringValue
@@ -253,7 +253,7 @@ public struct RACPSnapshot: Equatable, Sendable {
     public var revision: Int
     public var items: [RACPItem]
     public var activeItems: [RACPItem]
-    /// Host's authoritative running/waiting turn, when present.
+    /// PI-adaptor's authoritative running/waiting turn, when present.
     public var activeTurn: RACPTurnRef?
     /// `queuedTurns` 的元素形状在 FROZEN 契约里未定义，保留原始 JSON。
     public var queuedTurns: [JSONValue]

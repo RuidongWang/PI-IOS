@@ -43,7 +43,7 @@ public enum ProviderImportSkipReason: Equatable, Sendable {
     public var clientGuidance: String {
         switch self {
         case .importIncomplete:
-            return "上次创建的提交结果不确定：先检查 Host 侧状态，再决定重装或等 P1 支持删除，不要重试"
+            return "上次创建的提交结果不确定：先检查 PI-adaptor 侧状态，再决定重装或等 P1 支持删除，不要重试"
         case .remoteChanged:
             return "服务器侧记录已变更，本次不会覆盖；如需新配置请另建一条"
         case .remoteMissing:
@@ -193,17 +193,17 @@ public enum ProviderImportFailureCode: Equatable, Sendable {
     public var displayMessage: String {
         switch self {
         case .invalidRequest:
-            return "Host 认为载荷不合法（字段不符合 RACP provider/create 契约），请检查模型 ID、思考档位与 Base URL"
+            return "PI-adaptor 认为载荷不合法（字段不符合 RACP provider/create 契约），请检查模型 ID、思考档位与 Base URL"
         case .payloadTooLarge:
             return "载荷超过 1 MiB 上限，请减少 provider 或模型数量"
         case .adminUnavailable:
             return "PI-adaptor 未运行或 admin.sock 不可用，请先启动 pi-adaptor.service 再重试"
         case .adminBusy:
-            return "Host 正忙，稍后重试"
+            return "PI-adaptor 正忙，稍后重试"
         case .timeout:
             return "整次导入超过 30 秒截止时间"
         case .importFailed:
-            return "Host 侧导入失败，请查看 Host 日志"
+            return "PI-adaptor 侧导入失败，请查看 PI-adaptor 日志"
         case .conflict:
             return "远端已有同名 provider，无法安全证明其密钥和模型与本次输入一致；请编辑现有服务，或明确选择覆盖后重试"
         case let .unknown(raw):
@@ -248,7 +248,7 @@ public enum ProviderImportReceiptParser {
 
     /// - Parameters:
     ///   - stdout: `provider-import` 的完整 stdout（可能含无关的告警行）。
-    ///   - exitCode: 进程退出码。非 0 时不得判成功：Host 可能只打印了成功标记就异常退出，
+    ///   - exitCode: 进程退出码。非 0 时不得判成功：PI-adaptor 可能只打印了成功标记就异常退出，
     ///     因此成功标记会降级为 `unparseable` 并说明退出码，交由调用方按失败处理。
     public static func parse(stdout: String, exitCode: Int32? = nil) -> ProviderImportReceipt {
         let lines = stdout.split(whereSeparator: { $0 == "\n" || $0 == "\r" })

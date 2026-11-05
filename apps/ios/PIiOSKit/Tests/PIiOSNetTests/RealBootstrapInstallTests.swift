@@ -20,7 +20,7 @@ final class RealBootstrapInstallTests: XCTestCase {
             throw XCTSkip("未配置真实 bootstrap 安装环境")
         }
         let releaseBaseURL = env["PI_BOOTSTRAP_RELEASE_BASE_URL"]
-            ?? PiHostRelease.defaultPatchedBaseURL
+            ?? PIAdaptorRelease.defaultPatchedBaseURL
 
         let key = try String(contentsOfFile: keyPath, encoding: .utf8)
         let sshAuth = SSHCredential.privateKey(openSSHText: key, passphrase: nil)
@@ -45,7 +45,7 @@ final class RealBootstrapInstallTests: XCTestCase {
         )
         let target = try XCTUnwrap(decision.target)
         let release = try XCTUnwrap(
-            PiHostRelease.patched(target: target, baseURL: releaseBaseURL)
+            PIAdaptorRelease.patched(target: target, baseURL: releaseBaseURL)
         )
         let attempt = "real-\(UUID().uuidString.lowercased())"
         let configuration = try BootstrapScriptConfiguration(

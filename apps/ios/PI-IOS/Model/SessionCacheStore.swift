@@ -6,7 +6,7 @@ import PIiOSCore
 /// 文件 `Application Support/PIiOS/session-cache.sqlite` 保存 sessions、items、cursors、
 /// approvals 与 drafts。旧版 `session-cache-v1.json` 在首次读取时一次性迁移到 SQLite；
 /// 迁移成功后才删除旧文件。保留策略仍统一使用 PIiOSCore 的 `CacheRetention`
-///（每会话 200、最多 20 个 Host+会话）。
+///（每会话 200、最多 20 个 PI-adaptor+会话）。
 struct SessionCacheStore {
     /// 一条缓存条目（对应契约 §6 `items` 表的关键列子集）。
     typealias Entry = OfflineSessionCacheEntry
@@ -33,7 +33,7 @@ struct SessionCacheStore {
         self.fileURL = fileURL
     }
 
-    /// UI fixtures use the same pruning and Host partitioning without touching disk.
+    /// UI fixtures use the same pruning and PI-adaptor partitioning without touching disk.
     init(offlineCacheLimit: Int, inMemory snapshot: Snapshot) {
         self.offlineCacheLimit = offlineCacheLimit
         fileURL = nil

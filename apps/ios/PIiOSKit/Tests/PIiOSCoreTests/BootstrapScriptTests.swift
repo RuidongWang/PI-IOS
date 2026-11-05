@@ -11,7 +11,7 @@ final class BootstrapScriptTests: XCTestCase {
         port: Int = 43_871
     ) throws -> BootstrapScriptConfiguration {
         let release = try XCTUnwrap(
-            PiHostRelease(
+            PIAdaptorRelease(
                 version: "2.0.1",
                 target: target,
                 baseURL: "https://example.test/pi-adaptor-v2.0.1",
@@ -185,7 +185,7 @@ final class BootstrapScriptTests: XCTestCase {
 
     func testAttemptIdPortAndTimeoutsRejectUnsafeValues() throws {
         let release = try XCTUnwrap(
-            PiHostRelease(
+            PIAdaptorRelease(
                 version: "2.0.1",
                 target: .linuxX64,
                 baseURL: "https://example.test/releases",

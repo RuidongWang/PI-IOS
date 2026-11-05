@@ -113,7 +113,7 @@ final class ProviderImportPayloadTests: XCTestCase {
             raw.value(at: ["providers"])?.arrayValue?.first?
                 .value(at: ["input", "headers"]),
             expectedHeaders,
-            "Host 要求 headers 是 Record<string, string>，不能编码为 [{name,value}] 数组"
+            "PI-adaptor 要求 headers 是 Record<string, string>，不能编码为 [{name,value}] 数组"
         )
 
         let decoded = try ProviderImportEncoder.decode(data)
@@ -643,7 +643,7 @@ final class ProviderImportPayloadTests: XCTestCase {
 
     func testAC04_6_explainsEachSkippedReasonWithoutAutoRetry() {
         let cases: [(String, ProviderImportSkipReason, String)] = [
-            ("import_incomplete", .importIncomplete, "Host 侧状态"),
+            ("import_incomplete", .importIncomplete, "PI-adaptor 侧状态"),
             ("remote_changed", .remoteChanged, "不会覆盖"),
             ("remote_missing", .remoteMissing, "重新导入"),
         ]
@@ -708,7 +708,7 @@ final class ProviderImportPayloadTests: XCTestCase {
         XCTAssertFalse(body.defaultSet)
         XCTAssertEqual(body.outcome(forSourceId: "s1"), .imported(providerId: "prv_1"))
 
-        // 主体里没有任何已知字段时不是「零条目的成功」：Host 若只打标记而主体不合契约，
+        // 主体里没有任何已知字段时不是「零条目的成功」：PI-adaptor 若只打标记而主体不合契约，
         // 客户端必须按回执异常处理，不能让调用方以为导入成功。
         guard case let .unparseable(reason) = ProviderImportReceiptParser.parse(stdout: "PI_HOST_PROVIDERS {}", exitCode: 0) else {
             return XCTFail("空主体必须按回执异常处理，而不是零条目的成功")

@@ -3,7 +3,7 @@ import UIKit
 import PIiOSCore
 import PIiOSNet
 
-typealias HostUnitSnapshot = PIiOSCore.HostUnitSnapshot
+typealias AdaptorUnitSnapshot = PIiOSCore.AdaptorUnitSnapshot
 
 enum ConnectionPairingError: LocalizedError {
     case missingCredential
@@ -33,18 +33,18 @@ enum ConnectionLifecycleError: LocalizedError {
     }
 }
 
-enum HostUnitProbeError: LocalizedError {
+enum AdaptorUnitProbeError: LocalizedError {
     case commandFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .commandFailed(let detail):
-            return detail.isEmpty ? "无法读取 Host systemd 状态" : detail
+            return detail.isEmpty ? "无法读取 PI-adaptor systemd 状态" : detail
         }
     }
 }
 
-enum HostInstallError: LocalizedError {
+enum AdaptorInstallError: LocalizedError {
     case invalidReleaseVersion
     case probeFailed(String)
     case malformedProbe
@@ -67,24 +67,24 @@ enum HostInstallError: LocalizedError {
     }
 }
 
-struct HostInstallRunOutcome: Sendable {
+struct AdaptorInstallRunOutcome: Sendable {
     let result: BootstrapRunResult
     let releaseVersion: String
     let attemptId: String
     /// 本次安装使用的版本来源；`nil` 表示未走到版本解析（例如平台不支持）。
-    let releaseSource: HostReleaseResolutionSource?
+    let releaseSource: AdaptorReleaseResolutionSource?
 }
 
 /// 测试夹具里不访问网络：直接回退内置版本，并给出可展示的原因。
-private struct FixtureHostReleaseCatalog: HostReleaseResolving {
+private struct FixtureAdaptorReleaseCatalog: AdaptorReleaseResolving {
     func resolve(
         target: BootstrapArtifactTarget,
         fallbackBaseURL: String
-    ) async -> HostReleaseResolution? {
-        guard let release = PiHostRelease.patched(target: target, baseURL: fallbackBaseURL) else {
+    ) async -> AdaptorReleaseResolution? {
+        guard let release = PIAdaptorRelease.patched(target: target, baseURL: fallbackBaseURL) else {
             return nil
         }
-        return HostReleaseResolution(release: release, source: .fallback(reason: "测试环境不访问网络"))
+        return AdaptorReleaseResolution(release: release, source: .fallback(reason: "测试环境不访问网络"))
     }
 }
 
@@ -106,8 +106,8 @@ final class ConnectionModel: ObservableObject {
     static let deviceRevokeUnconfirmedMessage =
         "撤销结果未确认：连接在服务器确认前中断，本机凭证尚未改动。请重新连接后确认设备状态，再决定是否重试。"
 
-    nonisolated static let defaultHostInstallReleaseVersion = PiHostRelease.patchedReleaseVersion
-    nonisolated static let defaultHostInstallReleaseBaseURL = PiHostRelease.defaultPatchedBaseURL
+    nonisolated static let defaultAdaptorInstallReleaseVersion = PIAdaptorRelease.patchedReleaseVersion
+    nonisolated static let defaultAdaptorInstallReleaseBaseURL = PIAdaptorRelease.defaultPatchedBaseURL
 
     @Published private(set) var state: RACPTunnelState = .offline(reason: nil)
     @Published private(set) var projects: [RACPProjectSummary] = []
@@ -159,23 +159,25 @@ final class ConnectionModel: ObservableObject {
     let session: SessionController
     private let usesUITestFixture: Bool
     private var fixtureProviderBindingStatuses: [String: ProviderBindingStatus] = [:]
-    private var fixtureHostUnitSnapshot: HostUnitSnapshot?
+    private var fixtureAdaptorUnitSnapshot: AdaptorUnitSnapshot?
+    private var fixtureUpdatableProviders: [RACPV2Provider] = []
     private var fixtureCatalogs: [UUID: UITestFixture.Catalog] = [:]
     private var fixtureConnectionState: RACPTunnelState?
     private var fixtureSupportsRevoke = false
     /// 安装时解析最新稳定版；UI 测试夹具不访问网络。
-    private let releaseCatalog: any HostReleaseResolving
+    private let releaseCatalog: any AdaptorReleaseResolving
 
-    init(fixture: UITestFixture? = nil, releaseCatalog: (any HostReleaseResolving)? = nil) {
+    init(fixture: UITestFixture? = nil, releaseCatalog: (any AdaptorReleaseResolving)? = nil) {
         self.releaseCatalog = releaseCatalog
-            ?? (fixture == nil ? HostReleaseCatalog() : FixtureHostReleaseCatalog())
+            ?? (fixture == nil ? AdaptorReleaseCatalog() : FixtureAdaptorReleaseCatalog())
         usesUITestFixture = fixture != nil
         if let fixture {
             fixtureProviderBindingStatuses = fixture.providerBindingStatuses
-            fixtureHostUnitSnapshot = fixture.hostUnitSnapshot
+            fixtureAdaptorUnitSnapshot = fixture.adaptorUnitSnapshot
             fixtureCatalogs = fixture.catalogs
             fixtureConnectionState = fixture.connectionState
             fixtureSupportsRevoke = fixture.supportsFixtureRevoke
+            fixtureUpdatableProviders = fixture.updatableProviders
             cacheStore = SessionCacheStore(
                 offlineCacheLimit: PersistedState.defaultOfflineCacheLimit,
                 inMemory: fixture.cache
@@ -329,8 +331,8 @@ final class ConnectionModel: ObservableObject {
     ///
     /// The same transport is passed to the pairing and device-verification
     /// adapters. This is an isolated/test-injected operation; callers must not
-    /// invoke it against a production Host without explicit user action.
-    func installHost(
+    /// invoke it against a production PI-adaptor without explicit user action.
+    func installAdaptor(
         record: HostRecord,
         port: Int,
         /// 测试专用：显式指定内置版本。正常安装传 `nil`，自动解析最新稳定发布。
@@ -338,9 +340,9 @@ final class ConnectionModel: ObservableObject {
         /// 强制重装：忽略 PI-adaptor install receipt，重新下载、校验并激活。
         force: Bool = false,
         /// 版本解析完成时回调，用于在安装页显示本次目标版本与回退原因。
-        onReleaseResolved: ((HostReleaseResolution) -> Void)? = nil,
+        onReleaseResolved: ((AdaptorReleaseResolution) -> Void)? = nil,
         eventHandler: BootstrapRunner.EventHandler? = nil
-    ) async throws -> HostInstallRunOutcome {
+    ) async throws -> AdaptorInstallRunOutcome {
         guard (1...65_535).contains(port) else {
             throw BootstrapScriptError.invalidPort
         }
@@ -374,7 +376,7 @@ final class ConnectionModel: ObservableObject {
         }
         guard probe.exitStatus == 0 else {
             await transport.close()
-            throw HostInstallError.probeFailed(probe.stderrText)
+            throw AdaptorInstallError.probeFailed(probe.stderrText)
         }
         let identity = try parseBootstrapProbe(probe.stdoutText)
         let decision = BootstrapPlatformProbe.decide(
@@ -384,36 +386,36 @@ final class ConnectionModel: ObservableObject {
         guard case let .supported(target) = decision else {
             await transport.close()
             if case let .unsupported(reason) = decision {
-                return HostInstallRunOutcome(
+                return AdaptorInstallRunOutcome(
                     result: .unsupported(reason),
-                    releaseVersion: releaseVersion ?? PiHostRelease.releaseVersion,
+                    releaseVersion: releaseVersion ?? PIAdaptorRelease.releaseVersion,
                     attemptId: "",
                     releaseSource: nil
                 )
             }
-            throw HostInstallError.malformedProbe
+            throw AdaptorInstallError.malformedProbe
         }
 
         // 架构确定后才能解析对应产物。显式版本只用于测试，仍走内置固定摘要。
-        let resolution: HostReleaseResolution
+        let resolution: AdaptorReleaseResolution
         if let releaseVersion {
-            guard releaseVersion == PiHostRelease.patchedReleaseVersion,
-                  let release = PiHostRelease.patched(
+            guard releaseVersion == PIAdaptorRelease.patchedReleaseVersion,
+                  let release = PIAdaptorRelease.patched(
                     target: target,
-                    baseURL: ConnectionModel.defaultHostInstallReleaseBaseURL
+                    baseURL: ConnectionModel.defaultAdaptorInstallReleaseBaseURL
                   )
             else {
                 await transport.close()
-                throw HostInstallError.invalidReleaseVersion
+                throw AdaptorInstallError.invalidReleaseVersion
             }
-            resolution = HostReleaseResolution(release: release, source: .fallback(reason: "已手动指定内置版本"))
+            resolution = AdaptorReleaseResolution(release: release, source: .fallback(reason: "已手动指定内置版本"))
         } else {
             guard let resolved = await releaseCatalog.resolve(
                 target: target,
-                fallbackBaseURL: ConnectionModel.defaultHostInstallReleaseBaseURL
+                fallbackBaseURL: ConnectionModel.defaultAdaptorInstallReleaseBaseURL
             ) else {
                 await transport.close()
-                throw HostInstallError.invalidReleaseVersion
+                throw AdaptorInstallError.invalidReleaseVersion
             }
             resolution = resolved
         }
@@ -435,7 +437,7 @@ final class ConnectionModel: ObservableObject {
         )
         // Keep the newly issued token in memory until runtime identity and
         // version have been proven. A failed reinstall therefore cannot
-        // overwrite the previous Host's working token.
+        // overwrite the previous PI-adaptor's working token.
         let pairingAdapter = BootstrapInstallPairingAdapter(
             persist: { device in
                 guard KeychainStore.saveStagedPairing(
@@ -492,7 +494,7 @@ final class ConnectionModel: ObservableObject {
             )
             KeychainStore.clearStagedPairing(hostID: record.id, attemptId: attemptId)
         }
-        return HostInstallRunOutcome(
+        return AdaptorInstallRunOutcome(
             result: result,
             releaseVersion: release.version,
             attemptId: attemptId,
@@ -500,7 +502,7 @@ final class ConnectionModel: ObservableObject {
         )
     }
 
-    /// Best-effort cleanup for a failed install. The active Host token is never
+    /// Best-effort cleanup for a failed install. The active PI-adaptor token is never
     /// touched; only the attempt-scoped token is used and then deleted locally.
     private func revokeStagedPairingBestEffort(
         record: HostRecord,
@@ -620,7 +622,7 @@ final class ConnectionModel: ObservableObject {
             )
             await connection.transport.close()
             guard result.exitStatus == 0 else {
-                throw HostUnitProbeError.commandFailed(result.stderrText)
+                throw AdaptorUnitProbeError.commandFailed(result.stderrText)
             }
             let text = result.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
             return text.isEmpty ? "服务器上还没有 bootstrap 日志。" : text
@@ -632,8 +634,8 @@ final class ConnectionModel: ObservableObject {
 
     /// Grants the one privilege required by the user-unit installation path:
     /// `loginctl enable-linger`. The password goes over SSH stdin only.
-    func authorizeHostInstall(record: HostRecord, sudoPassword: String) async throws {
-        guard !sudoPassword.isEmpty else { throw HostInstallError.emptySudoPassword }
+    func authorizeAdaptorInstall(record: HostRecord, sudoPassword: String) async throws {
+        guard !sudoPassword.isEmpty else { throw AdaptorInstallError.emptySudoPassword }
         let account = KeychainStore.account(
             username: record.username,
             host: record.host,
@@ -656,7 +658,7 @@ final class ConnectionModel: ObservableObject {
             )
             await connection.transport.close()
             guard result.exitStatus == 0 else {
-                throw HostInstallError.sudoFailed(result.stderrText)
+                throw AdaptorInstallError.sudoFailed(result.stderrText)
             }
         } catch {
             await connection.transport.close()
@@ -677,7 +679,7 @@ final class ConnectionModel: ObservableObject {
         }
         guard let platform, let architecture,
               !platform.isEmpty, !architecture.isEmpty else {
-            throw HostInstallError.malformedProbe
+            throw AdaptorInstallError.malformedProbe
         }
         return (platform, architecture)
     }
@@ -740,7 +742,7 @@ final class ConnectionModel: ObservableObject {
         record: HostRecord,
         providerId: String
     ) async throws -> ProviderRemoveReceipt {
-        if info?.serverName == PiHostRelease.runtimeServerName {
+        if info?.serverName == PIAdaptorRelease.runtimeServerName {
             guard cacheHostID == record.id,
                   state.isOnline,
                   let client
@@ -804,7 +806,7 @@ final class ConnectionModel: ObservableObject {
             }
             return .success(status)
         }
-        if info?.serverName == PiHostRelease.runtimeServerName {
+        if info?.serverName == PIAdaptorRelease.runtimeServerName {
             guard cacheHostID == record.id,
                   state.isOnline,
                   let client
@@ -855,31 +857,31 @@ final class ConnectionModel: ObservableObject {
         }
     }
 
-    // MARK: - Host v2 additive features
+    // MARK: - PI-adaptor v2 additive features
 
-    private struct HostV2SkillList: Decodable {
+    private struct AdaptorV2SkillList: Decodable {
         var skills: [RACPV2Skill]
     }
 
-    private struct HostV2SkillEnvelope: Decodable {
+    private struct AdaptorV2SkillEnvelope: Decodable {
         var skill: RACPV2Skill
     }
 
-    private struct HostV2DeleteEnvelope: Decodable {
+    private struct AdaptorV2DeleteEnvelope: Decodable {
         var deleted: Bool
     }
 
-    private struct HostV2ProviderList: Decodable {
+    private struct AdaptorV2ProviderList: Decodable {
         var providers: [RACPV2Provider]
     }
 
-    private struct HostV2ProviderEnvelope: Decodable {
+    private struct AdaptorV2ProviderEnvelope: Decodable {
         var provider: RACPV2Provider
     }
 
     /// v2 equivalent of the legacy SSL `provider-binding-status` probe: read the
-    /// session's pinned provider/model, then verify it against the Host store.
-    func hostV2BindingStatus(sessionId: String) async throws -> ProviderBindingStatus {
+    /// session's pinned provider/model, then verify it against the PI-adaptor store.
+    func adaptorV2BindingStatus(sessionId: String) async throws -> ProviderBindingStatus {
         guard let client, state.isOnline else { throw RACPV2Error.notConnected }
         let receipt = try await RemoteProviderOperations.bindingStatus(
             client: client,
@@ -898,22 +900,22 @@ final class ConnectionModel: ObservableObject {
         }
     }
 
-    func listHostSkills() async throws -> [RACPV2Skill] {
+    func listAdaptorSkills() async throws -> [RACPV2Skill] {
         guard let client, state.isOnline else {
             throw RACPV2Error.notConnected
         }
-        let result: HostV2SkillList = try await client.v2Request(
+        let result: AdaptorV2SkillList = try await client.v2Request(
             method: RACPV2Method.skillList.rawValue,
             params: .object([:])
         )
         return result.skills
     }
 
-    func installHostSkill(source: JSONValue, replace: Bool = false) async throws -> RACPV2Skill {
+    func installAdaptorSkill(source: JSONValue, replace: Bool = false) async throws -> RACPV2Skill {
         guard let client, state.isOnline else {
             throw RACPV2Error.notConnected
         }
-        let result: HostV2SkillEnvelope = try await client.v2Request(
+        let result: AdaptorV2SkillEnvelope = try await client.v2Request(
             method: RACPV2Method.skillInstall.rawValue,
             params: .object([
                 "source": source,
@@ -927,11 +929,11 @@ final class ConnectionModel: ObservableObject {
         return result.skill
     }
 
-    func deleteHostSkill(id: String) async throws {
+    func deleteAdaptorSkill(id: String) async throws {
         guard let client, state.isOnline else {
             throw RACPV2Error.notConnected
         }
-        let _: HostV2DeleteEnvelope = try await client.v2Request(
+        let _: AdaptorV2DeleteEnvelope = try await client.v2Request(
             method: RACPV2Method.skillDelete.rawValue,
             params: .object([
                 "skillId": .string(id),
@@ -944,18 +946,18 @@ final class ConnectionModel: ObservableObject {
         )
     }
 
-    func listHostProviders() async throws -> [RACPV2Provider] {
+    func listAdaptorProviders() async throws -> [RACPV2Provider] {
         guard let client, state.isOnline else {
             throw RACPV2Error.notConnected
         }
-        let result: HostV2ProviderList = try await client.v2Request(
+        let result: AdaptorV2ProviderList = try await client.v2Request(
             method: RACPV2Method.providerList.rawValue,
             params: .object([:])
         )
         return result.providers
     }
 
-    func createHostProvider(
+    func createAdaptorProvider(
         name: String,
         baseURL: String,
         apiKey: String,
@@ -973,7 +975,7 @@ final class ConnectionModel: ObservableObject {
             "defaultThinkingLevel": .null,
             "supportsImages": .bool(false)
         ])
-        let result: HostV2ProviderEnvelope = try await client.v2Request(
+        let result: AdaptorV2ProviderEnvelope = try await client.v2Request(
             method: RACPV2Method.providerCreate.rawValue,
             params: .object([
                 "provider": .object([
@@ -995,14 +997,14 @@ final class ConnectionModel: ObservableObject {
         return result.provider
     }
 
-    /// Mirror a provider (with its full model list and API key) into the v2 Host
+    /// Mirror a provider (with its full model list and API key) into the v2 PI-adaptor
     /// provider store.
     ///
-    /// The v2 Host resolves a session's provider/model only from its own store
+    /// The v2 PI-adaptor resolves a session's provider/model only from its own store
     /// (`provider/list`). Providers imported over the legacy SSH path live in a
     /// different store, so a session bound to them can never run. Mirroring keeps
-    /// both stores in sync and returns the Host-side id to record locally.
-    func registerHostProvider(
+    /// both stores in sync and returns the PI-adaptor-side id to record locally.
+    func registerAdaptorProvider(
         name: String,
         vendorKey: String,
         baseURL: String,
@@ -1026,7 +1028,7 @@ final class ConnectionModel: ObservableObject {
                 "supportsImages": .bool(spec.supportsImages ?? false)
             ])
         }
-        let result: HostV2ProviderEnvelope = try await client.v2Request(
+        let result: AdaptorV2ProviderEnvelope = try await client.v2Request(
             method: RACPV2Method.providerCreate.rawValue,
             params: .object([
                 "provider": .object([
@@ -1048,99 +1050,95 @@ final class ConnectionModel: ObservableObject {
         return result.provider
     }
 
-    /// Encode one provider model for the v2 wire. Defaults only apply when the
-    /// Host-side provider has no models yet; otherwise callers pass the existing
-    /// values through unchanged so nothing is silently overwritten.
-    private static func providerModelJSON(
+    /// 完整替换已配置 Provider 的模型列表；密钥缺省时由 PI-adaptor 保留原密钥。
+    func updateAdaptorProvider(
         id: String,
-        displayName: String? = nil,
-        contextWindow: Int = 128_000,
-        maxTokens: Int = 16_384,
-        thinkingLevels: [String] = [],
-        defaultThinkingLevel: String? = nil,
-        supportsImages: Bool = false
-    ) -> JSONValue {
-        .object([
-            "id": .string(id),
-            "displayName": .string(displayName ?? id),
-            "contextWindow": .number(Double(contextWindow)),
-            "maxTokens": .number(Double(maxTokens)),
-            "thinkingLevels": .array(thinkingLevels.map { .string($0) }),
-            "defaultThinkingLevel": defaultThinkingLevel.map { .string($0) } ?? .null,
-            "supportsImages": .bool(supportsImages)
-        ])
+        input: ProviderUpdateInput
+    ) async throws -> RACPV2Provider {
+        if usesUITestFixture {
+            guard let existing = fixtureUpdatableProviders.first(where: { $0.id == id }) else {
+                throw RACPV2Error.server(code: "NOT_FOUND", message: "模型服务不存在")
+            }
+            let composition = ProviderUpdateComposer.compose(existing: existing, input: input)
+            guard composition.isValid else {
+                throw ProviderImportValidationFailure(issues: composition.issues)
+            }
+            let updated = RACPV2Provider.fixtureForUpdate(
+                existing: existing, input: composition.input
+            )
+            fixtureUpdatableProviders = fixtureUpdatableProviders.map {
+                $0.id == id ? updated : $0
+            }
+            return updated
+        }
+        guard let client, state.isOnline else {
+            throw RACPV2Error.notConnected
+        }
+        guard let existing = try await listAdaptorProviders().first(where: { $0.id == id }) else {
+            throw RACPV2Error.server(code: "NOT_FOUND", message: "模型服务不存在")
+        }
+        let composition = ProviderUpdateComposer.compose(existing: existing, input: input)
+        guard composition.isValid else {
+            throw ProviderImportValidationFailure(issues: composition.issues)
+        }
+        let result: AdaptorV2ProviderEnvelope
+        do {
+            result = try await client.v2Request(
+                method: RACPV2Method.providerUpdate.rawValue,
+                params: .object([
+                    "providerId": .string(id),
+                    "provider": composition.fields,
+                    "context": .object([
+                        "requestId": .string("req_\(UUID().uuidString)"),
+                        "idempotencyKey": .string("provider_update_\(UUID().uuidString)")
+                    ])
+                ])
+            )
+        } catch let error as RACPClientError {
+            throw Self.v2Error(from: error)
+        }
+        return result.provider
     }
 
-    func updateHostProvider(
+    /// 保留旧“编辑首项模型 ID”的辅助入口；主模型服务使用完整列表更新。
+
+    func updateAdaptorProvider(
         id: String,
         name: String,
         baseURL: String,
         apiKey: String?,
         modelID: String
     ) async throws -> RACPV2Provider {
-        guard let client, state.isOnline else {
-            throw RACPV2Error.notConnected
+        guard let existing = try await listAdaptorProviders().first(where: { $0.id == id }) else {
+            throw RACPV2Error.server(code: "NOT_FOUND", message: "模型服务不存在")
         }
-        // Load the provider as it currently exists on the Host and change only the
-        // fields this form actually owns. Sending a synthesised single-model
-        // payload would silently drop every other model and overwrite capability
-        // fields (context window, output limit, thinking levels, image support)
-        // that the form never displayed.
-        guard let existing = try await listHostProviders().first(where: { $0.id == id }) else {
-            throw RACPV2Error.protocolViolation("provider no longer exists on the Host")
+        let models = existing.models.enumerated().map { index, model in
+            let editsPrimary = index == 0 && !modelID.isEmpty && model.id != modelID
+            return ProviderModelSpec(
+                id: editsPrimary ? modelID : model.id,
+                contextWindow: model.contextWindow,
+                maxTokens: model.maxTokens,
+                thinkingLevels: model.thinkingLevels,
+                defaultThinkingLevel: model.defaultThinkingLevel,
+                alias: editsPrimary ? modelID : model.displayName,
+                supportsImages: model.supportsImages
+            )
         }
-        let models: [JSONValue]
-        if existing.models.isEmpty {
-            models = [Self.providerModelJSON(id: modelID)]
-        } else {
-            models = existing.models.enumerated().map { index, model in
-                // The form edits the primary (first) model id only.
-                let editsPrimary = index == 0 && !modelID.isEmpty && model.id != modelID
-                return Self.providerModelJSON(
-                    id: editsPrimary ? modelID : model.id,
-                    displayName: editsPrimary ? modelID : model.displayName,
-                    contextWindow: model.contextWindow,
-                    maxTokens: model.maxTokens,
-                    thinkingLevels: model.thinkingLevels,
-                    defaultThinkingLevel: model.defaultThinkingLevel,
-                    supportsImages: model.supportsImages
-                )
-            }
-        }
-        var providerFields: [String: JSONValue] = [
-            "name": .string(name),
-            "vendorKey": .string(existing.vendorKey),
-            "type": .string(existing.type),
-            "protocol": .string(existing.protocolName),
-            "baseUrl": .string(baseURL),
-            // Omitting apiKey keeps the stored secret; the provider stays api_key.
-            "authKind": .string(existing.authKind),
-            "models": .array(models)
-        ]
-        if let apiKey, !apiKey.isEmpty {
-            providerFields["apiKey"] = .string(apiKey)
-            providerFields["authKind"] = .string("api_key")
-        }
-        let result: HostV2ProviderEnvelope = try await client.v2Request(
-            method: RACPV2Method.providerUpdate.rawValue,
-            params: .object([
-                "providerId": .string(id),
-                "provider": .object(providerFields),
-                "context": .object([
-                    "requestId": .string("req_\(UUID().uuidString)"),
-                    "idempotencyKey": .string("provider_update_\(UUID().uuidString)")
-                ])
-            ])
+        return try await updateAdaptorProvider(
+            id: id,
+            input: ProviderUpdateInput(
+                name: name, baseURL: baseURL, apiKey: apiKey, models: models,
+                defaultModelID: models.first?.id
+            )
         )
-        return result.provider
     }
 
-    func deleteHostProvider(id: String) async throws {
+    func deleteAdaptorProvider(id: String) async throws {
         guard let client, state.isOnline else {
             throw RACPV2Error.notConnected
         }
         do {
-            let _: HostV2DeleteEnvelope = try await client.v2Request(
+            let _: AdaptorV2DeleteEnvelope = try await client.v2Request(
                 method: RACPV2Method.providerDelete.rawValue,
                 params: .object([
                     "providerId": .string(id),
@@ -1169,12 +1167,12 @@ final class ConnectionModel: ObservableObject {
         }
     }
 
-    func hostUnitSnapshot(record: HostRecord) async throws -> HostUnitSnapshot {
+    func adaptorUnitSnapshot(record: HostRecord) async throws -> AdaptorUnitSnapshot {
         if usesUITestFixture {
-            guard let fixtureHostUnitSnapshot else {
-                throw HostUnitParseError.missingField("fixture HostUnitSnapshot")
+            guard let fixtureAdaptorUnitSnapshot else {
+                throw AdaptorUnitParseError.missingField("fixture AdaptorUnitSnapshot")
             }
-            return fixtureHostUnitSnapshot
+            return fixtureAdaptorUnitSnapshot
         }
         let account = KeychainStore.account(username: record.username, host: record.host, port: record.port)
         guard let credential = KeychainStore.loadCredential(account: account) else {
@@ -1198,10 +1196,10 @@ final class ConnectionModel: ObservableObject {
         }
         await connection.transport.close()
         guard result.exitStatus == 0 else {
-            throw HostUnitProbeError.commandFailed(result.stderrText)
+            throw AdaptorUnitProbeError.commandFailed(result.stderrText)
         }
         do {
-            return try HostUnitSnapshotParser.parse(result.stdoutText)
+            return try AdaptorUnitSnapshotParser.parse(result.stdoutText)
         } catch {
             throw RACPClientError.malformedFrame(error.localizedDescription)
         }
@@ -1239,7 +1237,7 @@ final class ConnectionModel: ObservableObject {
     /// value, otherwise discover it over SSH (see `HostPortResolver`). Returns
     /// nil when the value cannot be determined so the caller reports an explicit
     /// offline reason rather than silently tunneling to a guessed port — a guess
-    /// could reach a different Host sharing the machine.
+    /// could reach a different PI-adaptor sharing the machine.
     private func resolveHostPort(
         record: HostRecord,
         credential: SSHCredential,
@@ -1369,8 +1367,8 @@ final class ConnectionModel: ObservableObject {
             return
         }
         // `resolveHostPort` 是一次跨 await 的端口探测：期间用户可能已切到另一台
-        // Host。安装 client 前必须重新核对连接意图与 Host 身份，否则 A 的迟到结果
-        // 会取代 B，使界面上的当前 Host 与实际连接错位。
+        // PI-adaptor。安装 client 前必须重新核对连接意图与 PI-adaptor 身份，否则 A 的迟到结果
+        // 会取代 B，使界面上的当前 PI-adaptor 与实际连接错位。
         guard intent == connectionIntentGeneration, cacheHostID == record.id else { return }
         let (operationID, promptBroker) = makeHostKeyBroker(
             account: account,
@@ -1414,8 +1412,8 @@ final class ConnectionModel: ObservableObject {
         await disconnectCurrent(expectedIntent: connectionIntentGeneration)
     }
 
-    /// Only close the connection if the Host that requested teardown is still active.
-    /// A stale Host action must never disconnect the connection installed by a newer switch.
+    /// Only close the connection if the PI-adaptor that requested teardown is still active.
+    /// A stale PI-adaptor action must never disconnect the connection installed by a newer switch.
     func disconnect(ifHostID expectedHostID: UUID) async {
         guard cacheHostID == expectedHostID else { return }
         connectionIntentGeneration &+= 1
@@ -1667,7 +1665,7 @@ final class ConnectionModel: ObservableObject {
         }
     }
 
-    /// Host 事件可能一帧一个，但目录只需要每个短窗口刷新一次；刷新期间继续到达的
+    /// PI-adaptor 事件可能一帧一个，但目录只需要每个短窗口刷新一次；刷新期间继续到达的
     /// 变更会合并成下一批，避免 N 个会话 revision 触发 N 次 `project/list` + `session/list`。
     private func scheduleHostCatalogRefresh(client: RACPClient, generation: Int) {
         guard self.client === client, connectionGeneration == generation else { return }
@@ -2259,6 +2257,9 @@ enum ConnectionErrorText {
         if let error = error as? RACPWebSocketError {
             return describeWebSocket(error)
         }
+        if let error = error as? ProviderImportValidationFailure {
+            return error.description
+        }
         if let error = error as? RACPV2Error {
             return describeV2(error)
         }
@@ -2303,7 +2304,7 @@ enum ConnectionErrorText {
         }
     }
 
-    /// `RACPV2Error` 来自 Host v2 直连（provider 增删、会话配置等）。桥接成 NSError
+    /// `RACPV2Error` 来自 PI-adaptor v2 直连（provider 增删、会话配置等）。桥接成 NSError
     /// 时只会显示「PIiOSCore.RACPV2Error 错误 N」，用户无法据此判断该做什么，
     /// 因此这里逐项映射为可操作文案。
     private static func describeV2(_ error: RACPV2Error) -> String {
@@ -2334,6 +2335,26 @@ enum ConnectionErrorText {
         case .closed:
             return ConnectionFailureKind.offline.userMessage
         }
+    }
+}
+
+private extension RACPV2Provider {
+    static func fixtureForUpdate(
+        existing: RACPV2Provider,
+        input: ProviderUpdateInput
+    ) -> RACPV2Provider {
+        var provider = existing
+        provider.name = input.name
+        provider.baseUrl = input.baseURL
+        provider.models = input.models.map { spec in
+            let data = try! JSONEncoder().encode(ProviderUpdateComposer.modelJSON(spec))
+            var model = try! JSONDecoder().decode(RACPV2ProviderModel.self, from: data)
+            model.id = spec.id
+            model.displayName = spec.alias ?? spec.id
+            return model
+        }
+        provider.updatedAt = "fixture-updated"
+        return provider
     }
 }
 

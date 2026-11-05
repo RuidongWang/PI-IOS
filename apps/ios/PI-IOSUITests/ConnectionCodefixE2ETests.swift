@@ -4,7 +4,7 @@ import XCTest
 /// AC-08（RACP 握手 + `item.delta` 流式 + `turn.completed` 清除运行态）、
 /// AC-09（运行中 `turn/interrupt` 中止并清除运行态）。
 ///
-/// 前提：模拟器已配对的真实 Host 处于在线状态（与 `LiveDeepSeekChatUITests` 相同）。
+/// 前提：模拟器已配对的真实 PI-adaptor 处于在线状态（与 `LiveDeepSeekChatUITests` 相同）。
 /// 默认跳过；显式设置 `PI_IOS_CODE_FIX_E2E=1` 才运行，避免污染常规测试运行。
 final class ConnectionCodefixE2ETests: XCTestCase {
     private var app: XCUIApplication!

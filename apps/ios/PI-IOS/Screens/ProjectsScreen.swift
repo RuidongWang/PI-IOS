@@ -22,20 +22,6 @@ struct ProjectsScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: PISpacing.s24) {
                     serverCard
-                    if let actionError {
-                        PIStatusBanner(kind: .danger, text: "操作未完成", detail: actionError)
-                            .onTapGesture { self.actionError = nil }
-                    }
-                    if connection.hasLoadedCatalog,
-                       let catalogError = connection.catalogError {
-                        PIStatusBanner(
-                            kind: .warning,
-                            text: "项目与会话加载失败",
-                            detail: catalogError,
-                            actionTitle: connection.isRefreshingCatalog ? "正在重试…" : "重试",
-                            action: { Task { await refresh() } }
-                        )
-                    }
                     content
                 }
                 .padding(.horizontal, PIMetrics.pageMargin)
@@ -43,6 +29,7 @@ struct ProjectsScreen: View {
                 .padding(.bottom, PISpacing.s32)
             }
             .piPageBackground()
+            .piMessageAlert(title: "操作未完成", message: $actionError)
             .piRootNavBar("项目", onMenu: model.openSidebar) {
                 Button(action: openProjectBrowser) {
                     Image(systemName: "plus")
@@ -208,19 +195,40 @@ struct ProjectsScreen: View {
 
     private var serverCard: some View {
         PICard {
-            Text("当前服务器")
-                .font(PIFont.captionStrong)
-                .foregroundStyle(PIColor.text2)
+            HStack(alignment: .center) {
+                Text("当前服务器")
+                    .font(PIFont.metaSmall)
+                    .tracking(1.1)
+                    .foregroundStyle(PIColor.text3)
+                Spacer(minLength: PISpacing.s8)
+                if model.currentHost != nil {
+                    HStack(spacing: PISpacing.s4) {
+                        Circle()
+                            .fill(connection.state.isOnline ? PIColor.success : PIColor.warning)
+                            .frame(width: 6, height: 6)
+                            .accessibilityHidden(true)
+                        Text(connection.state.displayText)
+                            .font(PIFont.metaSmall.weight(.semibold))
+                            .foregroundStyle(connection.state.isOnline ? PIColor.success : PIColor.warning)
+                    }
+                    .padding(.horizontal, PISpacing.s8)
+                    .padding(.vertical, 3)
+                    .background(
+                        (connection.state.isOnline ? PIColor.success : PIColor.warning).opacity(0.12),
+                        in: Capsule()
+                    )
+                }
+            }
             if let host = model.currentHost {
                 Text(host.name)
-                    .font(PIFont.listTitle)
+                    .font(PIFont.display)
                     .foregroundStyle(PIColor.text)
-                Text("\(host.address) · \(host.pairingText) · \(connection.state.displayText)")
-                    .font(PIFont.caption)
+                Text("\(host.address) · \(host.pairingText)")
+                    .font(PIFont.meta)
                     .foregroundStyle(PIColor.text2)
             } else {
                 Text("未配置服务器")
-                    .font(PIFont.listTitle)
+                    .font(PIFont.display)
                     .foregroundStyle(PIColor.text)
                 Text("先在「设置 → 服务器」添加一台服务器。")
                     .font(PIFont.caption)
@@ -228,8 +236,8 @@ struct ProjectsScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let info = connection.info {
-                Text("Host \(info.serverName) \(info.serverVersion) · 协议 \(info.protocolVersion)")
-                    .font(PIFont.caption)
+                Text("PI-adaptor \(info.serverName) \(info.serverVersion) · 协议 \(info.protocolVersion)")
+                    .font(PIFont.metaMono)
                     .foregroundStyle(PIColor.text3)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -260,19 +268,21 @@ struct ProjectsScreen: View {
                             runningCount: statusCount(for: project.id, kind: .running),
                             pendingCount: statusCount(for: project.id, kind: .pending),
                             isCurrent: activeProjectId == project.id,
-                            showsDivider: index < activeProjects.count - 1,
+                            showsDivider: index < activeProjects.count,
                             onOpen: { openProjectOrDetail(project) },
                             onDetails: { selectedProject = project }
                         )
                     }
+                    PIListRow(
+                        title: "浏览服务器目录并注册",
+                        icon: "folder.badge.plus",
+                        iconTint: PIColor.accent,
+                        isEnabled: canOpenProjectBrowser,
+                        showsChevron: true,
+                        showsDivider: false,
+                        action: openProjectBrowser
+                    )
                 }
-                PIListRow(
-                    title: "浏览服务器目录并注册",
-                    isEnabled: canOpenProjectBrowser,
-                    showsChevron: true,
-                    showsDivider: false,
-                    action: openProjectBrowser
-                )
             }
             if !archivedProjects.isEmpty {
                 PISectionHeader(text: "已归档 · \(archivedProjects.count)")
@@ -283,6 +293,8 @@ struct ProjectsScreen: View {
                             title: projectDisplayName(project),
                             subtitle: "本机归档",
                             value: "恢复",
+                            icon: "archivebox",
+                            iconTint: PIColor.text3,
                             showsChevron: true,
                             showsDivider: index < archivedProjects.count - 1,
                             action: { restore(project) }
@@ -365,37 +377,45 @@ struct ProjectsScreen: View {
         VStack(alignment: .leading, spacing: PISpacing.s8) {
             PISectionHeader(text: "会话")
             let visible = visibleSessions
-            if visible.isEmpty {
-                PIListRow(
-                    title: connection.sessions.isEmpty ? "服务器上没有会话" : "这个项目下没有会话",
-                    isEnabled: false,
-                    showsDivider: false
-                )
-            } else {
-                PIGroup {
-                    ForEach(Array(visible.enumerated()), id: \.element.id) { index, session in
+            PIGroup {
+                if visible.isEmpty {
+                    PIListRow(
+                        title: connection.sessions.isEmpty ? "服务器上没有会话" : "这个项目下没有会话",
+                        isEnabled: false,
+                        showsDivider: true
+                    )
+                } else {
+                    ForEach(Array(visible.enumerated()), id: \.element.id) { _, session in
                         PIListRow(
                             title: sessionDisplayTitle(session),
                             subtitle: sessionSubtitle(session),
                             value: session.revision.map { "rev \($0)" },
+                            icon: "bubble.left.and.bubble.right",
+                            iconTint: PIColor.text2,
                             showsChevron: true,
-                            showsDivider: index < visible.count - 1,
+                            showsDivider: true,
                             action: { Task { await open(session) } }
                         )
                     }
                 }
+                newSessionRow
             }
-            PIListRow(
-                title: "新建会话",
-                subtitle: activeProjectId == nil
-                    ? "先选一个项目（会话需要项目作为工作区）"
-                    : "在「\(activeProjectName ?? "所选项目")」下新建会话",
-                isEnabled: connection.state.isOnline && activeProjectId != nil,
-                showsChevron: true,
-                showsDivider: false,
-                action: { showingNewSession = true }
-            )
         }
+    }
+
+    private var newSessionRow: some View {
+        PIListRow(
+            title: "新建会话",
+            subtitle: activeProjectId == nil
+                ? "先选一个项目（会话需要项目作为工作区）"
+                : "在「\(activeProjectName ?? "所选项目")」下新建会话",
+            icon: "plus.circle",
+            iconTint: PIColor.accent,
+            isEnabled: connection.state.isOnline && activeProjectId != nil,
+            showsChevron: true,
+            showsDivider: false,
+            action: { showingNewSession = true }
+        )
     }
 
     private var visibleSessions: [RACPSessionSummary] {
@@ -412,10 +432,19 @@ struct ProjectsScreen: View {
            let count = model.sessionBinding(hostID: hostID, sessionID: session.id)?.messageCount {
             parts.append("\(count) 条")
         }
-        if let status = session.status { parts.append(status) }
+        if let status = session.status { parts.append(Self.statusText(status)) }
         if let mode = session.mode { parts.append(mode.title) }
         if let permission = session.permissionMode { parts.append(permission.title) }
         return parts.joined(separator: " · ")
+    }
+
+    private static func statusText(_ status: String) -> String {
+        let value = status.lowercased()
+        if value.contains("running") || value.contains("working") { return "运行中" }
+        if value.contains("waiting") || value.contains("approval")
+            || value.contains("input") || value.contains("pending") { return "待处理" }
+        if value == "idle" { return "空闲" }
+        return status
     }
 
     private func sessionDisplayTitle(_ session: RACPSessionSummary) -> String {
@@ -1093,6 +1122,7 @@ private struct NewSessionSheet: View {
                         .font(PIFont.caption)
                 }
             }
+            .scrollContentBackground(.hidden)
             .piPageBackground()
             .piDetailNavBar("新建会话")
             .toolbar {

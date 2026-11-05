@@ -41,7 +41,7 @@ final class PendingApprovalVisibilityUITests: XCTestCase {
             "翻历史后审批卡仍必须在视口里，不能被滚出屏幕"
         )
 
-        // 卡片可点，且点它真的能提交决定（本用例只验证可点性，避免依赖假 Host 的响应）。
+        // 卡片可点，且点它真的能提交决定（本用例只验证可点性，避免依赖假 PI-adaptor 的响应）。
         XCTAssertTrue(allowOnce.isHittable)
     }
 }

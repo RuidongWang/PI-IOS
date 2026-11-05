@@ -7,12 +7,12 @@ import PIiOSNet
 /// 页面只展示 runner 的真实状态文件与事件，不伪造进度。远端安装脚本在
 /// `setsid nohup` 子进程里继续运行；本页通过短 exec 轮询，因此锁屏或短暂
 /// 离开页面不会把 69 MB 下载绑在单次 SSH exec 上。
-struct InstallHostScreen: View {
+struct InstallAdaptorScreen: View {
     let hostID: UUID
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var connection: ConnectionModel
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var coordinator = InstallHostCoordinator()
+    @StateObject private var coordinator = InstallAdaptorCoordinator()
 
     @State private var portText = ""
     @State private var didSeedPort = false
@@ -41,11 +41,11 @@ struct InstallHostScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: PISpacing.s24) {
-                statusBanners
                 targetCard
                 if let host {
                     receiptCard(host)
                     configurationCard
+                    statusBanners
                     if coordinator.state != nil {
                         progressCard
                     }
@@ -65,10 +65,14 @@ struct InstallHostScreen: View {
         .onAppear(perform: seedPort)
         // 指纹核对浮层统一由 AppRootView 呈现（DEF-R4-004）。
         .sheet(isPresented: $showingLog) {
-            InstallHostLogSheet(coordinator: coordinator) {
+            InstallAdaptorLogSheet(coordinator: coordinator) {
                 await coordinator.loadLog(model: model, connection: connection, hostID: hostID)
             }
         }
+        .piMessageAlert(title: "安装未完成", message: Binding(
+            get: { coordinator.phase == .failed ? coordinator.failureSummary : nil },
+            set: { if $0 == nil { coordinator.dismissFailure() } }
+        ))
     }
 
     @ViewBuilder
@@ -113,10 +117,9 @@ struct InstallHostScreen: View {
                 .accessibilityIdentifier("installHost.fallbackNotice")
             }
         case .failed:
-            PIStatusBanner(
+            PIInlineMessage(
                 kind: .danger,
-                text: "安装未完成",
-                detail: coordinator.failureSummary
+                text: "安装失败详情见下方「故障分类」。"
             )
         case .idle:
             PIStatusBanner(
@@ -130,11 +133,12 @@ struct InstallHostScreen: View {
     private var targetCard: some View {
         PICard {
             Text("目标服务器")
-                .font(PIFont.captionStrong)
-                .foregroundStyle(PIColor.text2)
+                .font(PIFont.metaSmall)
+                .tracking(1.1)
+                .foregroundStyle(PIColor.text3)
             if let host {
                 Text(host.name)
-                    .font(PIFont.listTitle)
+                    .font(PIFont.display)
                     .foregroundStyle(PIColor.text)
                 Text("\(host.address) · \(host.statusText)")
                     .font(PIFont.caption)
@@ -156,8 +160,9 @@ struct InstallHostScreen: View {
         if let receipt = host.installReceipt {
             PICard {
                 Text("上次成功安装")
-                    .font(PIFont.captionStrong)
-                    .foregroundStyle(PIColor.text2)
+                    .font(PIFont.metaSmall)
+                    .tracking(1.1)
+                    .foregroundStyle(PIColor.text3)
                 Text("v\(receipt.version) · 端口 \(String(receipt.hostPort))\(receiptSourceSuffix(receipt))")
                     .font(PIFont.listTitle)
                     .foregroundStyle(PIColor.text)
@@ -168,7 +173,7 @@ struct InstallHostScreen: View {
         }
     }
 
-    private func receiptSourceSuffix(_ receipt: HostInstallReceipt) -> String {
+    private func receiptSourceSuffix(_ receipt: AdaptorInstallReceipt) -> String {
         switch receipt.releaseSource {
         case .latest:
             return " · 来源：GitHub 最新稳定发布"
@@ -222,10 +227,13 @@ struct InstallHostScreen: View {
                 downloadCard(state)
                 PIGroup(footer: "步骤来自 ~/.pi-adaptor/.bootstrap/state.json；连接中断后重新进入本页可恢复或重新安装。") {
                     ForEach(Array(InstallStepDescriptor.all.enumerated()), id: \.element.id) { index, step in
+                        let state = coordinator.value(for: step.step)
                         PIListRow(
                             title: step.title,
                             subtitle: step.detail,
-                            value: coordinator.value(for: step.step),
+                            value: state,
+                            icon: stepIcon(state).0,
+                            iconTint: stepIcon(state).1,
                             isEnabled: false,
                             showsDivider: index < InstallStepDescriptor.all.count - 1
                         )
@@ -245,8 +253,9 @@ struct InstallHostScreen: View {
     private func downloadCard(_ state: BootstrapStateFile) -> some View {
         PICard {
             Text("下载数据")
-                .font(PIFont.captionStrong)
-                .foregroundStyle(PIColor.text2)
+                .font(PIFont.metaSmall)
+                .tracking(1.1)
+                .foregroundStyle(PIColor.text3)
             let downloaded = state.artifact?.downloadedBytes ?? 0
             let total = state.artifact?.bytes ?? 0
             Text(coordinator.byteSummary(state: state))
@@ -436,12 +445,22 @@ struct InstallHostScreen: View {
     private var privacyCard: some View {
         PICard {
             Text("安全边界")
-                .font(PIFont.captionStrong)
-                .foregroundStyle(PIColor.text2)
+                .font(PIFont.metaSmall)
+                .tracking(1.1)
+                .foregroundStyle(PIColor.text3)
             Text("配对令牌只在内存中使用，随即从服务器删除；设备令牌只写入本机 Keychain。令牌与 API Key 都不会进入日志或状态文件。")
                 .font(PIFont.caption)
                 .foregroundStyle(PIColor.text3)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func stepIcon(_ state: String) -> (String, Color) {
+        switch state {
+        case "完成": return ("checkmark.circle", PIColor.success)
+        case "进行中": return ("clock", PIColor.accent)
+        case "失败": return ("xmark.circle", PIColor.danger)
+        default: return ("circle", PIColor.text3)
         }
     }
 
@@ -456,8 +475,8 @@ struct InstallHostScreen: View {
     }
 }
 
-private struct InstallHostLogSheet: View {
-    @ObservedObject var coordinator: InstallHostCoordinator
+private struct InstallAdaptorLogSheet: View {
+    @ObservedObject var coordinator: InstallAdaptorCoordinator
     let reload: () async -> Void
     @Environment(\.dismiss) private var dismiss
 
@@ -467,10 +486,7 @@ private struct InstallHostLogSheet: View {
                 if coordinator.isLoadingLog {
                     ProgressView("正在读取 bootstrap.log…")
                         .padding(PISpacing.s24)
-                } else if let error = coordinator.logError {
-                    PIStatusBanner(kind: .danger, text: "日志读取失败", detail: error)
-                        .padding(PIMetrics.pageMargin)
-                } else {
+                } else if coordinator.logError == nil {
                     Text(coordinator.logText ?? "还没有读取日志。")
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(PIColor.text)
@@ -480,6 +496,10 @@ private struct InstallHostLogSheet: View {
                 }
             }
             .background(PIColor.bg)
+            .piMessageAlert(title: "日志读取失败", message: Binding(
+                get: { coordinator.logError },
+                set: { if $0 == nil { coordinator.dismissLogError() } }
+            ))
             .navigationTitle("安装日志")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -501,7 +521,7 @@ private struct InstallHostLogSheet: View {
 }
 
 @MainActor
-private final class InstallHostCoordinator: ObservableObject {
+private final class InstallAdaptorCoordinator: ObservableObject {
     enum Phase: Equatable {
         case idle
         case running
@@ -519,7 +539,7 @@ private final class InstallHostCoordinator: ObservableObject {
     @Published private(set) var failureCount = 0
     @Published private(set) var transitionNotes: [String] = []
     @Published private(set) var postInstallWarning: String?
-    @Published private(set) var resolvedRelease: HostReleaseResolution?
+    @Published private(set) var resolvedRelease: AdaptorReleaseResolution?
     /// 仅在回退内置版本时非空，展示固定原因。
     @Published private(set) var releaseNotice: String?
     @Published private(set) var logText: String?
@@ -562,6 +582,14 @@ private final class InstallHostCoordinator: ObservableObject {
         return failureDetail ?? "安装器返回了未知错误。"
     }
 
+    func dismissFailure() {
+        failureDetail = nil
+    }
+
+    func dismissLogError() {
+        logError = nil
+    }
+
     func start(
         host: HostRecord,
         port: Int,
@@ -589,16 +617,16 @@ private final class InstallHostCoordinator: ObservableObject {
             do {
                 if let sudoCredential {
                     guard !sudoCredential.isEmpty else {
-                        throw HostInstallError.emptySudoPassword
+                        throw AdaptorInstallError.emptySudoPassword
                     }
                     self.activity = "正在通过 SSH stdin 授权 loginctl enable-linger。"
-                    try await connection.authorizeHostInstall(
+                    try await connection.authorizeAdaptorInstall(
                         record: host,
                         sudoPassword: sudoCredential
                     )
                     guard self.runID == generation else { return }
                 }
-                let outcome = try await connection.installHost(
+                let outcome = try await connection.installAdaptor(
                     record: host,
                     port: port,
                     force: forceReinstall,
@@ -665,7 +693,7 @@ private final class InstallHostCoordinator: ObservableObject {
     }
 
     private func finish(
-        outcome: HostInstallRunOutcome,
+        outcome: AdaptorInstallRunOutcome,
         host: HostRecord,
         model: AppModel,
         connection: ConnectionModel
@@ -673,7 +701,7 @@ private final class InstallHostCoordinator: ObservableObject {
         switch outcome.result {
         case .succeeded(let success):
             state = success.state
-            let persisted = model.completeHostInstallation(
+            let persisted = model.completeAdaptorInstallation(
                 id: host.id,
                 expectedHost: host.host,
                 expectedPort: host.port,
@@ -751,7 +779,7 @@ private final class InstallHostCoordinator: ObservableObject {
         if failure.callbackFailure == .pairing {
             details.append("客户端配对回调失败；令牌已失效时请重试以重新启动 --pair。")
         } else if failure.callbackFailure == .verification {
-            details.append("运行身份或版本验证失败；安装器不会把旧 Host 或错误版本当作成功。")
+            details.append("运行身份或版本验证失败；安装器不会把旧 PI-adaptor 或错误版本当作成功。")
         }
         if let detail = failure.detail, !detail.isEmpty {
             details.append(detail)

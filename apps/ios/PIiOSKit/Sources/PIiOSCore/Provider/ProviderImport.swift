@@ -5,9 +5,9 @@ import Foundation
 
 /// JavaScript `String.prototype.trim()` 的等价实现。
 ///
-/// Host 使用 JS `trim()` 校验文本字段；Foundation 的
+/// PI-adaptor 使用 JS `trim()` 校验文本字段；Foundation 的
 /// `whitespacesAndNewlines` 不含 U+FEFF，却会去掉 JS 不处理的 U+200B/U+0085。
-/// 两端必须使用同一字符集合，否则会出现客户端预检通过、Host 返回
+/// 两端必须使用同一字符集合，否则会出现客户端预检通过、PI-adaptor 返回
 /// `INVALID_REQUEST` 的不可见差异。
 public enum ECMAScriptString {
     public static func trim(_ value: String) -> String {
@@ -628,7 +628,7 @@ public enum ProviderImportValidation {
         return issues
     }
 
-    /// 契约 §4.1：整份 stdin 载荷 ≤ 1 MiB，超限给字段级错误（不等到 Host 返回 `PAYLOAD_TOO_LARGE`）。
+    /// 契约 §4.1：整份 stdin 载荷 ≤ 1 MiB，超限给字段级错误（不等到 PI-adaptor 返回 `PAYLOAD_TOO_LARGE`）。
     static func payloadSizeIssues(_ payload: ProviderImportPayload) -> [ProviderImportIssue] {
         let limit = ProviderVendorSchema.maxPayloadBytes
         guard let encoded = try? ProviderImportEncoder.encode(payload), encoded.count > limit else { return [] }

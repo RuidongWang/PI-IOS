@@ -11,7 +11,7 @@ public struct BootstrapScriptConfiguration: Equatable, Sendable {
     public static let defaultStopTimeoutSeconds = 20
     public static let defaultVerifyTimeoutSeconds = 90
 
-    public let release: PiHostRelease
+    public let release: PIAdaptorRelease
     public let attemptId: String
     public let hostPlatform: String
     public let hostArchitecture: String
@@ -28,7 +28,7 @@ public struct BootstrapScriptConfiguration: Equatable, Sendable {
     public let allowLegacyPPT1: Bool
 
     public init(
-        release: PiHostRelease,
+        release: PIAdaptorRelease,
         attemptId: String,
         hostPlatform: String = "linux",
         hostArchitecture: String,
@@ -97,7 +97,7 @@ public enum BootstrapScriptError: Error, Equatable, CustomStringConvertible {
         case .invalidPort:
             return "PI-adaptor 端口必须在 1...65535 之间；不能使用随机端口 0，否则常驻 unit 会与配对端口不一致"
         case .invalidHostIdentity:
-            return "Host 平台或架构包含不安全字符"
+            return "PI-adaptor 运行平台或架构包含不安全字符"
         case .invalidPairingLifetime:
             return "配对令牌有效期必须在 1 到 15 分钟之间"
         case .invalidTimeout:

@@ -5,14 +5,14 @@ import PIiOSCore
 enum SettingsRoute: Hashable {
     case addServer
     case editServer(UUID)
-    case installHost(UUID)
+    case installAdaptor(UUID)
     case models
-    case hostProviders
+    case adaptorProviders
     case skills
 }
 
 /// 触发 systemd 状态刷新的组合键：host 或在线状态任一变化都要重查（DEF-R4-001）。
-private struct HostUnitRefreshTrigger: Equatable {
+private struct AdaptorUnitRefreshTrigger: Equatable {
     let hostID: UUID?
     let isOnline: Bool
 }
@@ -30,10 +30,10 @@ struct SettingsScreen: View {
     @State private var showingAppearanceSheet = false
     @State private var showingCacheLimitSheet = false
     @State private var pendingRevokeHostID: UUID?
-    @State private var hostUnitSnapshot: HostUnitSnapshot?
-    @State private var hostUnitError: String?
-    @State private var isLoadingHostUnit = false
-    @State private var hostUnitRequestID: UUID?
+    @State private var adaptorUnitSnapshot: AdaptorUnitSnapshot?
+    @State private var adaptorUnitError: String?
+    @State private var isLoadingAdaptorUnit = false
+    @State private var adaptorUnitRequestID: UUID?
 
     private var appearance: AppearanceMode {
         appearanceStore.mode
@@ -43,7 +43,6 @@ struct SettingsScreen: View {
         NavigationStack(path: $path) {
             ScrollView {
                 VStack(alignment: .leading, spacing: PISpacing.s24) {
-                    banners
                     serversSection
                     tunnelSection
                     modelsSection
@@ -63,12 +62,12 @@ struct SettingsScreen: View {
                     ServersScreen(hostID: nil) { path.append($0) }
                 case .editServer(let hostID):
                     ServersScreen(hostID: hostID) { path.append($0) }
-                case .installHost(let hostID):
-                    InstallHostScreen(hostID: hostID)
+                case .installAdaptor(let hostID):
+                    InstallAdaptorScreen(hostID: hostID)
                 case .models:
                     ModelsScreen()
-                case .hostProviders:
-                    HostProvidersScreen()
+                case .adaptorProviders:
+                    AdaptorProvidersScreen()
                 case .skills:
                     SkillsScreen()
                 }
@@ -98,10 +97,10 @@ struct SettingsScreen: View {
             }
             // DEF-R4-001：host 切换或隧道回到在线时都重查一次 systemd 状态，
             // 避免停服→恢复后仍展示上一次缓存的 inactive。
-            .task(id: HostUnitRefreshTrigger(hostID: model.currentHost?.id, isOnline: connection.state.isOnline)) {
+            .task(id: AdaptorUnitRefreshTrigger(hostID: model.currentHost?.id, isOnline: connection.state.isOnline)) {
                 // systemd 查询走独立 SSH exec，离线时也能查（SET-05 要求离线可读）；
                 // 触发键仍含在线状态，保证离线→在线后自动重查（DEF-R4-001）。
-                await refreshHostUnitStatus()
+                await refreshAdaptorUnitStatus()
             }
         }
     }
@@ -111,30 +110,6 @@ struct SettingsScreen: View {
             get: { pendingRevokeHostID != nil },
             set: { if !$0 { pendingRevokeHostID = nil } }
         )
-    }
-
-    // MARK: - 状态条
-
-    @ViewBuilder
-    private var banners: some View {
-        if let warning = model.loadWarning {
-            PIStatusBanner(
-                kind: .warning,
-                text: "本机设置读取异常",
-                detail: warning,
-                actionTitle: "知道了",
-                action: { model.dismissLoadWarning() }
-            )
-        }
-        if let error = model.saveError {
-            PIStatusBanner(
-                kind: .danger,
-                text: "本机记录未能写入",
-                detail: error,
-                actionTitle: "知道了",
-                action: { model.dismissSaveError() }
-            )
-        }
     }
 
     // MARK: - 服务器
@@ -147,17 +122,24 @@ struct SettingsScreen: View {
                     title: "还没有服务器",
                     message: "添加服务器后即可安装 PI-adaptor 并配对。",
                     actionTitle: "＋ 添加服务器",
-                    action: { path.append(.addServer) }
+                    action: { path.append(.addServer) },
+                    actionIdentifier: "settings.addServer"
                 )
             } else {
                 PIGroup {
+                    let showsRepair = model.currentHost?.pairedAt == nil
                     ForEach(Array(model.hosts.enumerated()), id: \.element.id) { index, host in
-                        serverRow(host, showsDivider: true)
+                        serverRow(
+                            host,
+                            showsDivider: index < model.hosts.count - 1 || showsRepair
+                        )
                     }
                     if let current = model.currentHost, current.pairedAt == nil {
                         PIListRow(
                             title: "重新配对",
                             subtitle: "打开服务器页完成配对",
+                            icon: "link",
+                            iconTint: PIColor.warning,
                             showsChevron: true,
                             showsDivider: false,
                             action: { path.append(.editServer(current.id)) }
@@ -173,13 +155,15 @@ struct SettingsScreen: View {
         PIListRow(
             title: host.name,
             subtitle: "\(host.address) · \(host.statusText) · \(host.isCurrent ? connection.state.displayText : "未连接")",
+            icon: "server.rack",
+            iconTint: host.isCurrent ? PIColor.accent : PIColor.text2,
             showsChevron: true,
             showsDivider: showsDivider,
             action: { path.append(.editServer(host.id)) }
         ) {
             if host.isCurrent {
                 Text("当前")
-                    .font(PIFont.metaSmall)
+                    .font(PIFont.metaSmall.weight(.semibold))
                     .foregroundStyle(PIColor.accent)
                     .padding(.horizontal, PISpacing.s8)
                     .padding(.vertical, 2)
@@ -192,18 +176,23 @@ struct SettingsScreen: View {
         Button {
             path.append(.addServer)
         } label: {
-            Text("＋ 添加服务器")
-                .font(PIFont.button)
-                .foregroundStyle(PIColor.accent)
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: PIMetrics.minHitTarget)
-                .background(PIColor.surface, in: RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous)
-                        .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
-                )
+            HStack(spacing: PISpacing.s8) {
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .bold))
+                    .accessibilityHidden(true)
+                Text("添加服务器")
+                    .font(PIFont.button)
+            }
+            .foregroundStyle(PIColor.accent)
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: PIMetrics.minHitTarget)
+            .background(PIColor.accentSoft, in: RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous)
+                    .strokeBorder(PIColor.accentBorder, lineWidth: PIMetrics.hairline)
+            )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PIPressableButtonStyle())
         .accessibilityIdentifier("settings.addServer")
     }
 
@@ -218,15 +207,18 @@ struct SettingsScreen: View {
                         title: "连接状态",
                         subtitle: connection.state.detail,
                         value: connection.state.displayText,
+                        icon: "antenna.radiowaves.left.and.right",
+                        iconTint: connection.state.isOnline ? PIColor.success : PIColor.warning,
                         isEnabled: false,
                         showsDivider: true
                     )
                     .accessibilityIdentifier("settings.connectionState")
                     if let info = connection.info {
                         PIListRow(
-                            title: "Host 版本",
+                            title: "PI-adaptor 版本",
                             subtitle: "\(info.serverName) · 协议 \(info.protocolVersion)",
                             value: info.serverVersion,
+                            icon: "shippingbox",
                             isEnabled: false,
                             showsDivider: true
                         )
@@ -234,20 +226,22 @@ struct SettingsScreen: View {
                     }
                     PIListRow(
                         title: "systemd 服务",
-                        subtitle: hostUnitError,
-                        value: isLoadingHostUnit
+                        subtitle: adaptorUnitError,
+                        value: isLoadingAdaptorUnit
                             ? "查询中"
-                            : hostUnitSnapshot?.activeState ?? "未查询",
+                            : adaptorUnitSnapshot?.activeState ?? "未查询",
+                        icon: "gearshape.2",
                         isEnabled: true,
                         showsChevron: true,
                         showsDivider: true,
-                        action: { Task { await refreshHostUnitStatus() } }
+                        action: { Task { await refreshAdaptorUnitStatus() } }
                     )
                     .accessibilityIdentifier("settings.hostUnit")
-                    if hostUnitSnapshot?.isActive != true || !connection.state.isOnline {
+                    if adaptorUnitSnapshot?.isActive != true || !connection.state.isOnline {
                         PIListRow(
                             title: "重启命令",
                             subtitle: "systemctl --user restart pi-adaptor.service",
+                            icon: "terminal",
                             isEnabled: false,
                             showsDivider: true
                         )
@@ -257,6 +251,8 @@ struct SettingsScreen: View {
                         PIListRow(
                             title: "最近一次错误",
                             subtitle: error,
+                            icon: "exclamationmark.triangle",
+                            iconTint: PIColor.danger,
                             isEnabled: false,
                             showsDivider: true
                         )
@@ -264,12 +260,16 @@ struct SettingsScreen: View {
                     if connection.state.isOnline {
                         PIListRow(
                             title: "刷新项目与会话",
+                            icon: "arrow.clockwise",
+                            iconTint: PIColor.accent,
                             showsChevron: true,
                             showsDivider: true,
                             action: { Task { await connection.refreshRemote() } }
                         )
                         PIListRow(
                             title: "断开隧道",
+                            icon: "bolt.slash",
+                            iconTint: PIColor.danger,
                             showsDivider: false,
                             action: { Task { await connection.disconnect() } }
                         )
@@ -277,29 +277,32 @@ struct SettingsScreen: View {
                         PIListRow(
                             title: "连接",
                             subtitle: connectDisabledReason(host),
+                            icon: "bolt",
+                            iconTint: PIColor.accent,
                             isEnabled: connectDisabledReason(host) == nil,
                             showsDivider: true,
                             action: { Task { await model.setCurrentHost(id: host.id) } }
                         )
                         PIListRow(
                             title: "断开隧道",
+                            icon: "bolt.slash",
                             isEnabled: false,
                             showsDivider: false
                         )
                     }
                 }
                 if case .offline(let reason) = connection.state, let reason {
-                    PIStatusBanner(kind: .info, text: "未连接", detail: reason)
+                    PIInlineMessage(kind: .warning, text: "未连接：\(reason)")
                 }
-                if let info = connection.info,
+                if connection.state.isOnline,
+                   let info = connection.info,
                    let expected = model.currentHost?.installReceipt?.version,
                    !expected.isEmpty,
-                   info.serverName != PiHostRelease.runtimeServerName
-                    || !PiHostRelease.versionsMatch(info.serverVersion, expected) {
-                    PIStatusBanner(
+                   info.serverName != PIAdaptorRelease.runtimeServerName
+                    || !PIAdaptorRelease.versionsMatch(info.serverVersion, expected) {
+                    PIInlineMessage(
                         kind: .danger,
-                        text: "运行版本不匹配",
-                        detail: "期望 \(PiHostRelease.runtimeServerName) \(expected)，"
+                        text: "运行版本不匹配：期望 \(PIAdaptorRelease.runtimeServerName) \(expected)，"
                             + "实际 \(info.serverName) \(info.serverVersion)。请重新安装 PI-adaptor。"
                     )
                     .accessibilityIdentifier("settings.runtimeVersionMismatch")
@@ -319,33 +322,33 @@ struct SettingsScreen: View {
         "断开后按 1s/2s/4s/8s 自动重连。"
     }
 
-    private func refreshHostUnitStatus() async {
+    private func refreshAdaptorUnitStatus() async {
         let requestID = UUID()
-        hostUnitRequestID = requestID
+        adaptorUnitRequestID = requestID
         guard let host = model.currentHost, host.pairedAt != nil else {
-            if hostUnitRequestID == requestID {
-                hostUnitSnapshot = nil
-                hostUnitError = nil
-                isLoadingHostUnit = false
+            if adaptorUnitRequestID == requestID {
+                adaptorUnitSnapshot = nil
+                adaptorUnitError = nil
+                isLoadingAdaptorUnit = false
             }
             return
         }
-        isLoadingHostUnit = true
+        isLoadingAdaptorUnit = true
         do {
-            let snapshot = try await connection.hostUnitSnapshot(record: host)
-            guard hostUnitRequestID == requestID,
+            let snapshot = try await connection.adaptorUnitSnapshot(record: host)
+            guard adaptorUnitRequestID == requestID,
                   model.currentHost?.id == host.id
             else { return }
-            hostUnitSnapshot = snapshot
-            hostUnitError = nil
-            isLoadingHostUnit = false
+            adaptorUnitSnapshot = snapshot
+            adaptorUnitError = nil
+            isLoadingAdaptorUnit = false
         } catch {
-            guard hostUnitRequestID == requestID,
+            guard adaptorUnitRequestID == requestID,
                   model.currentHost?.id == host.id
             else { return }
-            hostUnitSnapshot = nil
-            hostUnitError = ConnectionErrorText.describe(error)
-            isLoadingHostUnit = false
+            adaptorUnitSnapshot = nil
+            adaptorUnitError = ConnectionErrorText.describe(error)
+            isLoadingAdaptorUnit = false
         }
     }
 
@@ -373,19 +376,23 @@ struct SettingsScreen: View {
                 subtitle: model.currentModelProviders.isEmpty
                     ? "尚未导入；进入后可从服务端自动发现模型"
                     : "\(model.currentModelProviders.count) 个服务 · \(model.currentModelProviders.reduce(0) { $0 + $1.models.count }) 个模型",
+                icon: "cpu",
+                iconTint: PIColor.accent,
                 showsChevron: true,
                 showsDivider: true,
                 action: { path.append(.models) }
             )
             PIListRow(
-                title: "Host v2 Provider",
+                title: "PI-adaptor v2 Provider",
+                icon: "server.rack",
                 showsChevron: true,
                 showsDivider: true,
-                action: { path.append(.hostProviders) }
+                action: { path.append(.adaptorProviders) }
             )
             PIListRow(
                 title: "默认模型",
                 value: model.defaultModelLabel,
+                icon: "star",
                 isEnabled: false,
                 showsDivider: false
             )
@@ -396,7 +403,9 @@ struct SettingsScreen: View {
         PIGroup("Skill") {
             PIListRow(
                 title: "全局 Skill",
-                subtitle: connection.state.isOnline ? "安装、更新、删除服务器 Skill" : "连接 Host 后可管理",
+                subtitle: connection.state.isOnline ? "安装、更新、删除服务器 Skill" : "连接 PI-adaptor 后可管理",
+                icon: "sparkles",
+                iconTint: PIColor.accent,
                 showsChevron: true,
                 showsDivider: false,
                 action: { path.append(.skills) }
@@ -411,6 +420,7 @@ struct SettingsScreen: View {
             PIListRow(
                 title: "外观",
                 subtitle: appearance.title,
+                icon: "circle.lefthalf.filled",
                 showsChevron: true,
                 showsDivider: true,
                 action: { showingAppearanceSheet = true }
@@ -419,6 +429,7 @@ struct SettingsScreen: View {
                 title: "离线缓存上限",
                 subtitle: "每会话 \(connection.cacheItemLimit) 条 · 最多 \(PersistedState.maxCachedConversations) 个会话",
                 value: "\(model.offlineCacheLimit) 条",
+                icon: "internaldrive",
                 showsChevron: true,
                 showsDivider: true,
                 action: { showingCacheLimitSheet = true }
@@ -467,7 +478,7 @@ private struct AppearanceSheet: View {
         VStack(alignment: .leading, spacing: PISpacing.s16) {
             VStack(alignment: .leading, spacing: PISpacing.s4) {
                 Text("外观")
-                    .font(PIFont.navTitle)
+                    .font(PIFont.display)
                     .foregroundStyle(PIColor.text)
                 Text("选择立即作用于全部页面与浮层。")
                     .font(PIFont.caption)
@@ -492,7 +503,7 @@ private struct AppearanceSheet: View {
         .padding(.top, PISpacing.s24)
         .padding(.bottom, PIMetrics.safeBottom)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(PIColor.bg)
+        .piPageBackground()
         // 浮层自身也跟随选择切换（DEF-R4-002）：只靠根视图的 preferredColorScheme
         // 在部分系统版本下不会立即传到已呈现的 sheet。
         .preferredColorScheme(appearanceStore.mode.colorScheme)
@@ -518,7 +529,7 @@ private struct CacheLimitSheet: View {
         VStack(alignment: .leading, spacing: PISpacing.s16) {
             VStack(alignment: .leading, spacing: PISpacing.s4) {
                 Text("离线缓存上限")
-                    .font(PIFont.navTitle)
+                    .font(PIFont.display)
                     .foregroundStyle(PIColor.text)
                 Text("每个会话最多缓存的条数，默认 \(PersistedState.defaultOfflineCacheLimit) 条；本机最多缓存 \(PersistedState.maxCachedConversations) 个会话。")
                     .font(PIFont.caption)
@@ -544,7 +555,7 @@ private struct CacheLimitSheet: View {
         .padding(.top, PISpacing.s24)
         .padding(.bottom, PIMetrics.safeBottom)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(PIColor.bg)
+        .piPageBackground()
         .presentationDetents([.height(430)])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(PIRadius.sheet)

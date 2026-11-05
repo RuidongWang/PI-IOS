@@ -18,25 +18,25 @@ final class OnlineTwoHostsUITests: XCTestCase {
     func testProjectSessionAndProviderContextFollowEachHost() {
         assertHost("B")
         app.buttons["sidebar.session.B-session"].tap()
-        XCTAssertTrue(app.navigationBars["Host B Session"].waitForExistence(timeout: 5))
-        assertModelGroup("Host B Models", absent: "Host A Models")
+        XCTAssertTrue(app.navigationBars["PI-adaptor B Session"].waitForExistence(timeout: 5))
+        assertModelGroup("PI-adaptor B Models", absent: "PI-adaptor A Models")
 
         openSidebar()
         switchHost(to: "A")
         assertHost("A")
         app.buttons["sidebar.session.A-session"].tap()
-        XCTAssertTrue(app.navigationBars["Host A Session"].waitForExistence(timeout: 5))
-        assertModelGroup("Host A Models", absent: "Host B Models")
+        XCTAssertTrue(app.navigationBars["PI-adaptor A Session"].waitForExistence(timeout: 5))
+        assertModelGroup("PI-adaptor A Models", absent: "PI-adaptor B Models")
 
         openSidebar()
         switchHost(to: "B")
         closeSidebar()
-        XCTAssertTrue(app.navigationBars["Host B Session"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.navigationBars["PI-adaptor B Session"].waitForExistence(timeout: 8))
         XCTAssertFalse(app.buttons["sidebar.session.A-session"].exists)
     }
 
     private func assertHost(_ suffix: String) {
-        XCTAssertTrue(app.staticTexts["Fixture Online Host \(suffix)"].exists)
+        XCTAssertTrue(app.staticTexts["Fixture Online PI-adaptor \(suffix)"].exists)
         let project = app.buttons["sidebar.project.\(suffix)-project"]
         XCTAssertTrue(project.waitForExistence(timeout: 5))
         XCTAssertTrue(project.label.contains("当前项目"))
@@ -64,10 +64,10 @@ final class OnlineTwoHostsUITests: XCTestCase {
 
     private func switchHost(to suffix: String) {
         app.buttons["切换服务器"].tap()
-        let host = app.buttons["Fixture Online Host \(suffix)"]
+        let host = app.buttons["Fixture Online PI-adaptor \(suffix)"]
         XCTAssertTrue(host.waitForExistence(timeout: 5))
         host.tap()
-        XCTAssertTrue(app.staticTexts["Fixture Online Host \(suffix)"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Fixture Online PI-adaptor \(suffix)"].waitForExistence(timeout: 8))
     }
 
     private func closeSidebar() {

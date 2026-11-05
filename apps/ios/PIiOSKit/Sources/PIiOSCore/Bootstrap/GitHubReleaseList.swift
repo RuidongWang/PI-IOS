@@ -60,7 +60,7 @@ public struct GitHubReleaseListEntry: Decodable, Equatable, Sendable {
 // MARK: - 选中结果
 
 /// 一个可以安装的发布坐标：版本、标签、下载根地址与目标架构的资产名。
-public struct HostReleaseCandidate: Equatable, Sendable {
+public struct AdaptorReleaseCandidate: Equatable, Sendable {
     public let version: String
     public let releaseTag: String
     public let baseURL: String
@@ -96,14 +96,14 @@ public struct HostReleaseCandidate: Equatable, Sendable {
 /// 3. 必须同时存在目标架构的 `.tar.gz` 与 `.sha256` 资产。
 ///
 /// 不满足条件的发布会被跳过，继续看下一个；都不满足时返回 `nil`，由调用方回退内置版本。
-public enum HostReleaseSelection {
+public enum AdaptorReleaseSelection {
     public static let tagPrefix = "pi-adaptor-v"
 
     public static func latest(
         from data: Data,
         target: BootstrapArtifactTarget,
-        repository: String = PiHostRelease.releaseRepository
-    ) -> HostReleaseCandidate? {
+        repository: String = PIAdaptorRelease.releaseRepository
+    ) -> AdaptorReleaseCandidate? {
         guard let entries = try? JSONDecoder().decode([GitHubReleaseListEntry].self, from: data) else {
             return nil
         }
@@ -113,13 +113,13 @@ public enum HostReleaseSelection {
     public static func latest(
         from entries: [GitHubReleaseListEntry],
         target: BootstrapArtifactTarget,
-        repository: String = PiHostRelease.releaseRepository
-    ) -> HostReleaseCandidate? {
+        repository: String = PIAdaptorRelease.releaseRepository
+    ) -> AdaptorReleaseCandidate? {
         for entry in entries where !entry.draft && !entry.prerelease {
             guard entry.tagName.hasPrefix(tagPrefix) else { continue }
             let rawVersion = String(entry.tagName.dropFirst(tagPrefix.count))
             guard isStableVersion(rawVersion) else { continue }
-            guard let release = PiHostRelease(
+            guard let release = PIAdaptorRelease(
                 version: rawVersion,
                 target: target,
                 repository: repository
@@ -132,7 +132,7 @@ public enum HostReleaseSelection {
             }
 
             let baseURL = "https://github.com/\(repository)/releases/download/\(release.releaseTag)"
-            return HostReleaseCandidate(
+            return AdaptorReleaseCandidate(
                 version: release.version,
                 releaseTag: release.releaseTag,
                 baseURL: baseURL,
@@ -152,7 +152,7 @@ public enum HostReleaseSelection {
               value.lowercased().hasPrefix("sha256:") else {
             return nil
         }
-        return PiHostRelease.normalizeChecksum(String(value.dropFirst("sha256:".count)))
+        return PIAdaptorRelease.normalizeChecksum(String(value.dropFirst("sha256:".count)))
     }
 
     /// 只接受数字点分版本（`1`、`1.2`、`1.2.3`）。

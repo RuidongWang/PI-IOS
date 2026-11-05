@@ -473,7 +473,7 @@ public struct RACPProjectBrowseParams: Codable, Equatable, Sendable {
 
 public struct RACPProjectBrowseResult: Codable, Equatable, Sendable {
     public var path: String
-    /// Host 在非浏览根目录时返回上级；根目录没有该字段。
+    /// PI-adaptor 在非浏览根目录时返回上级；根目录没有该字段。
     public var parent: String?
     /// 上游 `entries` 的元素形状未在 FROZEN 契约中定义，保留原始 JSON。
     public var entries: [JSONValue]
@@ -497,8 +497,8 @@ public struct RACPSessionSummary: Codable, Equatable, Sendable {
     public var projectId: String?
     public var status: String?
     public var revision: Int?
-    /// `session/get` / `session/attach` expose the Host's currently running turn.
-    /// This is needed to interrupt a turn that was promoted from the Host queue.
+    /// `session/get` / `session/attach` expose the PI-adaptor's currently running turn.
+    /// This is needed to interrupt a turn that was promoted from the PI-adaptor queue.
     public var activeTurnId: String? = nil
     public var mode: RACPSessionMode?
     public var permissionMode: RACPPermissionMode?
@@ -720,7 +720,7 @@ public struct RACPTurnStartResult: Codable, Equatable, Sendable {
     }
 
     // v2 `turn/start` 的冻结响应体只有 `turn`（见 golden），不带 v1 的 `accepted`。
-    // 兼容 v1 旧 Host 的同时容忍新 Host：缺省视为 accepted = true。
+    // 兼容 v1 旧 PI-adaptor 的同时容忍新 PI-adaptor：缺省视为 accepted = true。
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.accepted = try container.decodeIfPresent(Bool.self, forKey: .accepted) ?? true
@@ -773,7 +773,7 @@ public struct RACPApprovalRespondParams: Codable, Equatable, Sendable {
 
     public enum ActionError: Error { case invalidAction, permissionModeRequired }
 
-    /// The same action is hashed for idempotency and encoded for the Host.
+    /// The same action is hashed for idempotency and encoded for the PI-adaptor.
     public init(approvalId: String, action: SessionRequestAction, context: RACPContext) throws {
         switch action {
         case .approval(let decision, let mode):

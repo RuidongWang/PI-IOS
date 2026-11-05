@@ -26,7 +26,7 @@ public struct OfflineSessionCursor: Codable, Equatable, Sendable {
 /// 离线展示用的待审批卡（契约 §6 `approvals`）。
 ///
 /// `revision` 与 `status` 必须单独落列，不能只依赖未冻结的 `payload`：
-/// 恢复在线后 Host 会用快照重新生成卡片，离线缓存里的这张卡永远不能被当作可提交状态。
+/// 恢复在线后 PI-adaptor 会用快照重新生成卡片，离线缓存里的这张卡永远不能被当作可提交状态。
 public struct OfflineSessionApproval: Codable, Equatable, Sendable {
     public var id: String
     public var sessionId: String
@@ -91,7 +91,7 @@ public struct OfflineSessionDraft: Codable, Equatable, Sendable {
     }
 }
 
-/// 单个会话的离线只读视图。Host 未确定时不会返回任何行。
+/// 单个会话的离线只读视图。PI-adaptor 未确定时不会返回任何行。
 public struct OfflineCachedSession: Equatable, Sendable {
     public var entries: [OfflineSessionCacheEntry]
     public var cursor: OfflineSessionCursor?
@@ -146,7 +146,7 @@ public struct OfflineSessionCacheSnapshot: Codable, Equatable, Sendable {
         drafts = try container.decodeIfPresent([OfflineSessionDraft].self, forKey: .drafts) ?? []
     }
 
-    /// 读取某个 Host 的某个会话；`hostID == nil` 时禁止跨 Host 猜取。
+    /// 读取某个 PI-adaptor 的某个会话；`hostID == nil` 时禁止跨 PI-adaptor 猜取。
     public func cachedSession(hostID: UUID?, sessionID: String) -> OfflineCachedSession? {
         guard let hostID else { return nil }
         let matchingEntries = OfflineSessionCachePolicy.cachedEntries(
@@ -191,7 +191,7 @@ public struct OfflineSessionCacheSnapshot: Codable, Equatable, Sendable {
             .max { $0.updatedAt < $1.updatedAt }
     }
 
-    /// 某个 Host 出现过的会话，按最近一次缓存活动排序。
+    /// 某个 PI-adaptor 出现过的会话，按最近一次缓存活动排序。
     public func sessionIDs(hostID: UUID?) -> [String] {
         guard let hostID else { return [] }
         var latestBySession: [String: Date] = [:]
@@ -341,7 +341,7 @@ public enum OfflineSessionCacheFile {
 }
 
 /// 一次缓存写入的租约。App 层在异步读取快照前捕获它，落盘前同时校验
-/// client 身份、连接代次、Host 和会话，防止旧连接或旧 Host 的迟到结果覆盖新状态。
+/// client 身份、连接代次、PI-adaptor 和会话，防止旧连接或旧 PI-adaptor 的迟到结果覆盖新状态。
 public struct OfflineSessionCacheWriteLease: Equatable, Sendable {
     public let clientID: UUID
     public let connectionGeneration: Int
@@ -373,7 +373,7 @@ public struct OfflineSessionCacheWriteLease: Equatable, Sendable {
     }
 
     /// Drafts belong to a session, but must still flush after the UI switches sessions
-    /// as long as the same client/Host connection is current.
+    /// as long as the same client/PI-adaptor connection is current.
     public func isCurrentHost(
         clientID: UUID,
         connectionGeneration: Int,

@@ -79,7 +79,7 @@ public struct ToolCallGroup: Equatable, Sendable {
     }
 }
 
-/// 工具状态的展示映射。Host 返回的是协议字符串（`completed` / `running`…），
+/// 工具状态的展示映射。PI-adaptor 返回的是协议字符串（`completed` / `running`…），
 /// 直接显示会让中文界面里出现英文，这里统一转成用户能读的文案。
 public enum ToolStatusPresentation {
     public static func label(for raw: String?) -> String? {

@@ -3,7 +3,7 @@ import Foundation
 /// Persisted metadata for a device token issued by an incomplete install.
 ///
 /// The active device token is stored under a different account. Recovery can
-/// enumerate this envelope, revoke the Host-side device with its staged token,
+/// enumerate this envelope, revoke the PI-adaptor-side device with its staged token,
 /// and remove the attempt without ever reading or replacing the active token.
 public struct BootstrapStagedCredential: Codable, Equatable, Sendable {
     public static let schemaVersion = 1

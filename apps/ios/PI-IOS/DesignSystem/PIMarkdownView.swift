@@ -31,7 +31,7 @@ struct PIMarkdownView: View {
 
         case .paragraph(let text):
             Text(PIMarkdownInline.attributed(text, role: .body))
-                .lineSpacing(4)
+                .lineSpacing(5)
                 .fixedSize(horizontal: false, vertical: true)
 
         case .list(let items):
@@ -47,7 +47,7 @@ struct PIMarkdownView: View {
         case .quote(let text):
             HStack(alignment: .top, spacing: PISpacing.s8) {
                 RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .fill(PIColor.separator)
+                    .fill(PIColor.accentBorder)
                     .frame(width: 3)
                 Text(PIMarkdownInline.attributed(text, role: .quote))
                     .fixedSize(horizontal: false, vertical: true)
@@ -102,6 +102,7 @@ struct PIMarkdownView: View {
             if let language, !language.isEmpty {
                 Text(language.uppercased())
                     .font(PIFont.metaSmall)
+                    .tracking(0.8)
                     .foregroundStyle(PIColor.text3)
                     .padding(.horizontal, PISpacing.s12)
                     .padding(.top, PISpacing.s8)
@@ -117,7 +118,11 @@ struct PIMarkdownView: View {
             .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
+        .background(PIColor.surface3, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
+        )
     }
 
     /// 表格：横向可滚动，列为按内容量出的固定宽度。
@@ -162,10 +167,10 @@ struct PIMarkdownView: View {
             // 列宽已固定，网格宽度就是各列之和；GridRow 会把同一行的单元格拉成一致高度，
             // 表头底色与分隔线不会因为某格多行而断开。
             .fixedSize(horizontal: true, vertical: false)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(PIColor.separator, lineWidth: 1)
+                RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                    .strokeBorder(PIColor.separatorStrong, lineWidth: PIMetrics.hairline)
             )
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -187,17 +192,26 @@ struct PIMarkdownView: View {
             let width = (plain as NSString).size(withAttributes: [.font: font]).width
             widest = max(widest, width)
         }
-        let horizontalPadding = PISpacing.s8 * 2
+        let horizontalPadding = Self.tableCellHorizontalPadding * 2
         return min(max(widest.rounded(.up) + horizontalPadding, 56), 220)
     }
 
+    /// 单元格内边距：横向留白比正文更宽，纵向留白支撑多行文本的呼吸感。
+    private static let tableCellHorizontalPadding: CGFloat = PISpacing.s12
+    private static let tableCellVerticalPadding: CGFloat = PISpacing.s12
+    /// 单元格内多行文本的行间追加量；13pt 字号下 4pt 能让换行不糊成一片。
+    private static let tableCellLineSpacing: CGFloat = 4
+
     private func tableCell(_ text: String, role: PIMarkdownTextRole, isHeader: Bool) -> some View {
         Text(PIMarkdownInline.attributed(text, role: role))
+            .lineSpacing(Self.tableCellLineSpacing)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, PISpacing.s8)
-            .padding(.vertical, 7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isHeader ? PIColor.surface2 : Color.clear)
+            .padding(.horizontal, Self.tableCellHorizontalPadding)
+            .padding(.vertical, Self.tableCellVerticalPadding)
+            // 撑满整行高度：同一行里短单元格的分隔线才会和最长的齐平，
+            // 否则每格按自己的文本高度画线，分隔线会呈阶梯状错开。
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(isHeader ? PIColor.surface3 : Color.clear)
             .overlay(alignment: .bottom) {
                 Rectangle()
                     .fill(PIColor.separator)
@@ -223,8 +237,8 @@ enum PIMarkdownTextRole {
             return 15
         case .heading(let level):
             switch level {
-            case 1: return 20
-            case 2: return 17
+            case 1: return 21
+            case 2: return 18
             case 3: return 16
             default: return 15
             }

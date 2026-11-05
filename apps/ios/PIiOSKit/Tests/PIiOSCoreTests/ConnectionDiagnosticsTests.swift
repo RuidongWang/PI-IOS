@@ -5,7 +5,7 @@ final class ConnectionDiagnosticsTests: XCTestCase {
     // MARK: - systemd unit 状态
 
     func testParsesActiveUnit() throws {
-        let snapshot = try HostUnitSnapshotParser.parse(
+        let snapshot = try AdaptorUnitSnapshotParser.parse(
             """
             LoadState=loaded
             ActiveState=active
@@ -20,7 +20,7 @@ final class ConnectionDiagnosticsTests: XCTestCase {
     }
 
     func testParsesInactiveUnit() throws {
-        let snapshot = try HostUnitSnapshotParser.parse(
+        let snapshot = try AdaptorUnitSnapshotParser.parse(
             "LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled"
         )
 
@@ -30,7 +30,7 @@ final class ConnectionDiagnosticsTests: XCTestCase {
     }
 
     func testParsesFailedUnit() throws {
-        let snapshot = try HostUnitSnapshotParser.parse(
+        let snapshot = try AdaptorUnitSnapshotParser.parse(
             "LoadState=loaded\nActiveState=failed\nUnitFileState=enabled"
         )
 
@@ -39,7 +39,7 @@ final class ConnectionDiagnosticsTests: XCTestCase {
     }
 
     func testParsesFieldsInAnyOrderAndIgnoresExtraLines() throws {
-        let snapshot = try HostUnitSnapshotParser.parse(
+        let snapshot = try AdaptorUnitSnapshotParser.parse(
             """
             WantedBy=default.target
             ActiveState=active
@@ -56,7 +56,7 @@ final class ConnectionDiagnosticsTests: XCTestCase {
     }
 
     func testHandlesCRLFAndWhitespace() throws {
-        let snapshot = try HostUnitSnapshotParser.parse(
+        let snapshot = try AdaptorUnitSnapshotParser.parse(
             " LoadState = loaded \r\n ActiveState = active \r\n UnitFileState = enabled \r\n"
         )
 
@@ -67,12 +67,12 @@ final class ConnectionDiagnosticsTests: XCTestCase {
 
     func testMissingFieldThrows() {
         XCTAssertThrowsError(
-            try HostUnitSnapshotParser.parse(
+            try AdaptorUnitSnapshotParser.parse(
                 "LoadState=loaded\nActiveState=active"
             )
         ) { error in
             XCTAssertEqual(
-                error as? HostUnitParseError,
+                error as? AdaptorUnitParseError,
                 .missingField("UnitFileState")
             )
         }
@@ -80,12 +80,12 @@ final class ConnectionDiagnosticsTests: XCTestCase {
 
     func testEmptyFieldIsTreatedAsMissing() {
         XCTAssertThrowsError(
-            try HostUnitSnapshotParser.parse(
+            try AdaptorUnitSnapshotParser.parse(
                 "LoadState=loaded\nActiveState=\nUnitFileState=enabled"
             )
         ) { error in
             XCTAssertEqual(
-                error as? HostUnitParseError,
+                error as? AdaptorUnitParseError,
                 .missingField("ActiveState")
             )
         }
@@ -212,7 +212,7 @@ final class ConnectionDiagnosticsTests: XCTestCase {
             (.invalidArgument, "参数不合法"),
             (.notFound, "对象不存在，列表已刷新"),
             (.methodNotFound, "这台服务器不支持该操作"),
-            (.agentBusy, "Host 正忙"),
+            (.agentBusy, "PI-adaptor 正忙"),
             (.conflict, "状态已变化，重新拉取后再试"),
             (.idempotencyConflict, "同一幂等键对应了不同内容，需要人工确认"),
             (.cursorExpired, "事件游标已过期，已按快照重建"),
@@ -221,7 +221,7 @@ final class ConnectionDiagnosticsTests: XCTestCase {
             (.approvalStale, "审批已失效"),
             (.payloadTooLarge, "内容超过上限，请压缩后重试"),
             (.pairingFailed, "配对失败"),
-            (.pairingTokenExpired, "配对令牌已过期，需要重启 Host 取新令牌"),
+            (.pairingTokenExpired, "配对令牌已过期，需要重启 PI-adaptor 取新令牌"),
             (.capabilityUnavailable, "服务器未提供该能力"),
         ]
         for (code, expected) in cases {
@@ -269,7 +269,7 @@ final class ConnectionDiagnosticsTests: XCTestCase {
             try JSONDecoder().decode(RACPErrorBody.self, from: Data(json.utf8))
         }
 
-        // Host 把业务码放在 data.code，JSON-RPC code 只是数字。
+        // PI-adaptor 把业务码放在 data.code，JSON-RPC code 只是数字。
         XCTAssertEqual(
             try decode(#"{"code":-32008,"message":"x","data":{"code":"CURSOR_EXPIRED"}}"#).normalizedCode,
             .cursorExpired

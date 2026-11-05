@@ -145,8 +145,6 @@ struct ServersScreen: View {
                 text: "正在测试连接",
                 detail: "会完成 SSH 握手与认证；首次连接需要你核对主机指纹。"
             )
-        } else if let message = resultMessage {
-            PIStatusBanner(kind: .info, text: "测试结果", detail: message)
         }
     }
 
@@ -334,6 +332,9 @@ struct ServersScreen: View {
                 .font(PIFont.caption)
                 .foregroundStyle(PIColor.text3)
                 .fixedSize(horizontal: false, vertical: true)
+            if let resultMessage {
+                PIInlineMessage(kind: .info, text: "测试结果：\(resultMessage)")
+            }
         }
     }
 
@@ -354,12 +355,15 @@ struct ServersScreen: View {
                 PIListRow(
                     title: "已固定",
                     subtitle: pinned.fingerprint,
+                    icon: "checkmark.shield",
+                    iconTint: PIColor.success,
                     isEnabled: false,
                     showsDivider: true
                 )
                 PIListRow(
                     title: "移除旧指纹后重新核对",
                     subtitle: "下次连接仍需确认新指纹",
+                    icon: "arrow.counterclockwise",
                     showsChevron: true,
                     showsDivider: false,
                     action: {
@@ -379,6 +383,8 @@ struct ServersScreen: View {
                 PIListRow(
                     title: "尚未固定",
                     subtitle: "首次连接需确认 SHA256 指纹",
+                    icon: "shield.slash",
+                    iconTint: PIColor.warning,
                     isEnabled: false,
                     showsDivider: false
                 )
@@ -396,21 +402,27 @@ struct ServersScreen: View {
         ) {
             PIListRow(
                 title: "安装或修复 PI-adaptor",
+                icon: "shippingbox",
+                iconTint: PIColor.accent,
                 isEnabled: !isSaving && !isPairing && !isDeleting,
                 showsChevron: true,
                 showsDivider: true,
-                action: { push(.installHost(host.id)) }
+                action: { push(.installAdaptor(host.id)) }
             )
             if hasDeviceToken {
                 PIListRow(
                     title: "已保存设备令牌",
                     subtitle: connection.state.displayText,
+                    icon: "key",
+                    iconTint: PIColor.success,
                     isEnabled: false,
                     showsDivider: true
                 )
                 PIListRow(
                     title: "连接 PI-adaptor",
                     subtitle: "通过 SSH 隧道连接 127.0.0.1:\(host.hostPort.map(String.init) ?? "未设置")",
+                    icon: "bolt",
+                    iconTint: PIColor.accent,
                     isEnabled: !isSaving && !isPairing && !isDeleting,
                     showsChevron: true,
                     showsDivider: false,
@@ -508,8 +520,9 @@ struct ServersScreen: View {
     private var noteCard: some View {
         PICard {
             Text("本机写了什么")
-                .font(PIFont.captionStrong)
-                .foregroundStyle(PIColor.text2)
+                .font(PIFont.metaSmall)
+                .tracking(1.1)
+                .foregroundStyle(PIColor.text3)
             Text("地址、端口与名称保存在本机；密码/私钥、设备令牌与主机指纹只进 Keychain。")
                 .font(PIFont.caption)
                 .foregroundStyle(PIColor.text3)
@@ -584,16 +597,19 @@ struct ServersScreen: View {
                 } header: {
                     Text("私钥全文（以 -----BEGIN 开头）")
                 } footer: {
-                    Text("粘贴的文本只保存在 Keychain，不写入本机文件、日志或剪贴板。")
-                }
-                if let message = pasteKeyError {
-                    Section {
-                        Text(message)
-                            .font(PIFont.caption)
-                            .foregroundStyle(PIColor.danger)
+                    VStack(alignment: .leading, spacing: PISpacing.s8) {
+                        if let message = pasteKeyError {
+                            Text(message)
+                                .font(PIFont.caption)
+                                .foregroundStyle(PIColor.danger)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Text("粘贴的文本只保存在 Keychain，不写入本机文件、日志或剪贴板。")
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .piPageBackground()
             .navigationTitle("粘贴私钥")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -813,7 +829,7 @@ struct HostKeyConfirmSheet: View {
         .padding(.top, PISpacing.s24)
         .padding(.bottom, PIMetrics.safeBottom)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(PIColor.bg)
+        .piPageBackground()
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(PIRadius.sheet)

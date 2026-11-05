@@ -438,6 +438,64 @@ final class SessionViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.activeItems.isEmpty, "Active items must be cleared when turn settles")
     }
 
+    func testSnapshotAtOrAfterCompletionDoesNotReviveSettledTurn() {
+        let viewModel = SessionViewModel()
+        viewModel.applySnapshot(
+            RACPSnapshot(
+                cursor: RACPCursor(epoch: "ep_turn", sequence: 10),
+                revision: 1,
+                activeTurn: RACPTurnRef(id: "turn_fast", status: "running")
+            ),
+            replayComplete: true
+        )
+        viewModel.applyEvents([
+            RACPEvent(sequence: 11, epoch: "ep_turn", payload: .object([
+                "kind": .string("turn.completed"),
+                "turnId": .string("turn_fast"),
+            ]))
+        ])
+
+        viewModel.applySnapshot(
+            RACPSnapshot(
+                cursor: RACPCursor(epoch: "ep_turn", sequence: 12),
+                revision: 1,
+                activeTurn: RACPTurnRef(id: "turn_fast", status: "running")
+            ),
+            replayComplete: true
+        )
+
+        XCTAssertNil(viewModel.activeTurnId, "快照游标已经越过终态，不得用陈旧的 activeTurn 复活轮次")
+    }
+
+    func testCompletedTurnDoesNotReviveAcrossStaleEpochRebuild() {
+        let viewModel = SessionViewModel()
+        viewModel.applySnapshot(
+            RACPSnapshot(
+                cursor: RACPCursor(epoch: "ep_before", sequence: 10),
+                revision: 1,
+                activeTurn: RACPTurnRef(id: "turn_fast", status: "running")
+            ),
+            replayComplete: true
+        )
+        viewModel.applyEvents([
+            RACPEvent(sequence: 11, epoch: "ep_before", payload: .object([
+                "kind": .string("turn.completed"),
+                "turnId": .string("turn_fast"),
+            ]))
+        ])
+
+        viewModel.applySnapshot(
+            RACPSnapshot(
+                cursor: RACPCursor(epoch: "ep_rebuilt", sequence: 0),
+                revision: 1,
+                activeTurn: RACPTurnRef(id: "turn_fast", status: "running")
+            ),
+            replayComplete: true
+        )
+
+        XCTAssertNil(viewModel.activeTurnId, "跨 epoch 重建不得复活本会话已经完成的轮次")
+    }
+
     func testInitialItemDeltaAppliesDeltaTextEvenWhenItemNotYetInIndex() throws {
         let viewModel = SessionViewModel()
         viewModel.applySnapshot(

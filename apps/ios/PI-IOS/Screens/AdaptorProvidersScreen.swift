@@ -1,7 +1,7 @@
 import SwiftUI
 import PIiOSCore
 
-struct HostProvidersScreen: View {
+struct AdaptorProvidersScreen: View {
     @EnvironmentObject private var connection: ConnectionModel
     @EnvironmentObject private var model: AppModel
 
@@ -23,13 +23,7 @@ struct HostProvidersScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: PISpacing.s16) {
-                if !connection.state.isOnline {
-                    PIStatusBanner(kind: .warning, text: "Host 未连接", detail: "连接后可管理服务器 provider。")
-                }
-                if let error {
-                    PIStatusBanner(kind: .danger, text: "Provider 操作失败", detail: error)
-                }
-                PIGroup("服务器 provider", footer: "API Key 只写入 Host；本机不保存明文。") {
+                PIGroup("服务器 provider", footer: "API Key 只写入 PI-adaptor；本机不保存明文。") {
                     if isLoading {
                         PIListRow(title: "正在读取…", isEnabled: false, showsDivider: false)
                     } else if providers.isEmpty {
@@ -42,44 +36,96 @@ struct HostProvidersScreen: View {
                                 showsDivider: index < providers.count - 1
                             ) {
                                 HStack(spacing: PISpacing.s8) {
-                                    Button("编辑") { startEditing(provider) }
-                                        .font(PIFont.captionStrong)
-                                    Button("删除", role: .destructive) { pendingDelete = provider }
-                                        .font(PIFont.captionStrong)
+                                    Button {
+                                        startEditing(provider)
+                                    } label: {
+                                        Text("编辑")
+                                            .font(PIFont.captionStrong)
+                                            .foregroundStyle(PIColor.accent)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 5)
+                                            .background(PIColor.accentSoft, in: Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                    Button(role: .destructive) {
+                                        pendingDelete = provider
+                                    } label: {
+                                        Text("删除")
+                                            .font(PIFont.captionStrong)
+                                            .foregroundStyle(PIColor.danger)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 5)
+                                            .background(PIColor.dangerSoft, in: Capsule())
+                                    }
+                                    .buttonStyle(.plain)
                                 }
                             }
                         }
                     }
                 }
                 PIGroup("新增 provider") {
-                    PIFormField(label: "名称") {
-                        TextField("DeepSeek", text: $name)
+                    PIFormRow {
+                        PIFormField(label: "名称") {
+                            TextField("DeepSeek", text: $name)
+                        }
                     }
-                    PIFormField(label: "Base URL") {
-                        TextField("https://api.example.com/v1", text: $baseURL)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
+                    PIFormRow {
+                        PIFormField(label: "Base URL") {
+                            TextField("https://api.example.com/v1", text: $baseURL)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
                     }
-                    PIFormField(label: "API Key") {
-                        SecureField("sk-…", text: $apiKey)
+                    PIFormRow {
+                        PIFormField(label: "API Key") {
+                            SecureField("sk-…", text: $apiKey)
+                        }
                     }
-                    PIFormField(label: "模型 ID") {
-                        TextField("deepseek-chat", text: $modelID)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
+                    PIFormRow {
+                        PIFormField(label: "模型 ID") {
+                            TextField("deepseek-chat", text: $modelID)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
                     }
-                    Button("保存到 Host") { Task { await create() } }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isCreating || !connection.state.isOnline || name.isEmpty || baseURL.isEmpty || apiKey.isEmpty || modelID.isEmpty)
+                    PIFormRow(showsDivider: false) {
+                        PIPrimaryButton(
+                            title: isCreating ? "正在保存…" : "保存到 PI-adaptor",
+                            isEnabled: !isCreating
+                                && connection.state.isOnline
+                                && !name.isEmpty
+                                && !baseURL.isEmpty
+                                && !apiKey.isEmpty
+                                && !modelID.isEmpty
+                        ) {
+                            Task { await create() }
+                        }
+                    }
+                    if !connection.state.isOnline {
+                        PIInlineMessage(
+                            kind: .warning,
+                            text: "PI-adaptor 未连接，连接后可管理 Provider。"
+                        )
+                        .padding(.horizontal, PISpacing.s16)
+                        .padding(.bottom, PISpacing.s12)
+                    }
                 }
             }
             .padding(.horizontal, PIMetrics.pageMargin)
             .padding(.vertical, PISpacing.s16)
         }
         .piPageBackground()
-        .navigationTitle("Host Provider")
+        .navigationTitle("PI-adaptor Provider")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await reload() }
+        .task(id: connection.state.isOnline) {
+            guard connection.state.isOnline else {
+                providers = []
+                error = nil
+                isLoading = false
+                return
+            }
+            await reload()
+        }
         .refreshable { await reload() }
         .onChange(of: model.currentHost?.id) { _ in
             Task { await reload() }
@@ -94,8 +140,12 @@ struct HostProvidersScreen: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("将从 Host 清除该 provider 与密钥；不会自动把默认项切到其他 provider。")
+            Text("将从 PI-adaptor 清除该 provider 与密钥；不会自动把默认项切到其他 provider。")
         }
+        .piMessageAlert(title: "Provider 操作失败", message: Binding(
+            get: { editingProvider == nil ? error : nil },
+            set: { if $0 == nil { error = nil } }
+        ))
         .sheet(item: $editingProvider) { provider in
             NavigationStack {
                 Form {
@@ -110,6 +160,8 @@ struct HostProvidersScreen: View {
                             .autocorrectionDisabled()
                     }
                 }
+                .scrollContentBackground(.hidden)
+                .piPageBackground()
                 .navigationTitle("编辑 Provider")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
@@ -134,17 +186,17 @@ struct HostProvidersScreen: View {
     }
 
     private func saveEdit(id: String) async {
-        // Bind the request to the Host it was started on: the network call goes
+        // Bind the request to the PI-adaptor it was started on: the network call goes
         // through the live tunnel, so a switch mid-flight must not be recorded as
-        // if it happened on the new Host.
+        // if it happened on the new PI-adaptor.
         guard let host = model.currentHost,
               let context = model.providerOperationContext(for: host)
         else {
-            self.error = "当前 Host 不可用或已切换：请在当前 Host 上重试。"
+            self.error = "当前 PI-adaptor 不可用或已切换：请在当前 PI-adaptor 上重试。"
             return
         }
         do {
-            let provider = try await connection.updateHostProvider(
+            let provider = try await connection.updateAdaptorProvider(
                 id: id,
                 name: editName,
                 baseURL: editBaseURL,
@@ -152,7 +204,7 @@ struct HostProvidersScreen: View {
                 modelID: editModelID
             )
             guard model.canApplyProviderOperation(context) else {
-                self.error = "Host 在保存过程中已切换：本次修改可能已写入原 Host，请到该 Host 上核对。"
+                self.error = "PI-adaptor 在保存过程中已切换：本次修改可能已写入原 PI-adaptor，请到该 PI-adaptor 上核对。"
                 return
             }
             recordLocalBinding(provider)
@@ -176,7 +228,7 @@ struct HostProvidersScreen: View {
         isLoading = true
         defer { isLoading = false }
         do {
-            let fetched = try await connection.listHostProviders()
+            let fetched = try await connection.listAdaptorProviders()
             guard model.canApplyProviderOperation(context) else { return }
             providers = fetched
             error = nil
@@ -191,20 +243,20 @@ struct HostProvidersScreen: View {
         guard let host = model.currentHost,
               let context = model.providerOperationContext(for: host)
         else {
-            self.error = "当前 Host 不可用或已切换：请在当前 Host 上重试。"
+            self.error = "当前 PI-adaptor 不可用或已切换：请在当前 PI-adaptor 上重试。"
             return
         }
         isCreating = true
         defer { isCreating = false }
         do {
-            let provider = try await connection.createHostProvider(
+            let provider = try await connection.createAdaptorProvider(
                 name: name,
                 baseURL: baseURL,
                 apiKey: apiKey,
                 modelID: modelID
             )
             guard model.canApplyProviderOperation(context) else {
-                self.error = "Host 在创建过程中已切换：该 provider 可能已写入原 Host，请到该 Host 上核对。"
+                self.error = "PI-adaptor 在创建过程中已切换：该 provider 可能已写入原 PI-adaptor，请到该 PI-adaptor 上核对。"
                 return
             }
             recordLocalBinding(provider)
@@ -219,7 +271,7 @@ struct HostProvidersScreen: View {
         }
     }
 
-    /// Host v2 stores the provider server-side; sessions still bind through the
+    /// PI-adaptor v2 stores the provider server-side; sessions still bind through the
     /// local model catalog, so mirror the created/updated provider into it.
     private func recordLocalBinding(_ provider: RACPV2Provider) {
         guard let host = model.currentHost,
@@ -262,16 +314,16 @@ struct HostProvidersScreen: View {
         guard let host = model.currentHost,
               let context = model.providerOperationContext(for: host)
         else {
-            self.error = "当前 Host 不可用或已切换：请在当前 Host 上重试删除。"
+            self.error = "当前 PI-adaptor 不可用或已切换：请在当前 PI-adaptor 上重试删除。"
             return
         }
         // Capture the legacy mapping before removing the local record.
         let existing = model.storedProvider(hostID: host.id, providerId: provider.id)
         do {
             do {
-                try await connection.deleteHostProvider(id: provider.id)
+                try await connection.deleteAdaptorProvider(id: provider.id)
             } catch let error as RACPV2Error {
-                // 幂等删除：Host 上已经查不到这条记录时继续清理本机镜像。
+                // 幂等删除：PI-adaptor 上已经查不到这条记录时继续清理本机镜像。
                 guard case .server(let code, _) = error, code == "NOT_FOUND" else { throw error }
             }
             guard model.canApplyProviderOperation(context) else { return }

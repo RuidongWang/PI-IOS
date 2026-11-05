@@ -3,13 +3,13 @@ import PIiOSCore
 
 // MARK: - HTTP 边界
 
-/// 解析发布所需的最小 HTTP 能力。测试注入桩实现，生产用 `URLSessionHostReleaseHTTP`。
-public protocol HostReleaseHTTP: Sendable {
-    /// 返回响应体与状态码。网络错误、超时等以 `HostReleaseHTTPError` 抛出。
+/// 解析发布所需的最小 HTTP 能力。测试注入桩实现，生产用 `URLSessionAdaptorReleaseHTTP`。
+public protocol AdaptorReleaseHTTP: Sendable {
+    /// 返回响应体与状态码。网络错误、超时等以 `AdaptorReleaseHTTPError` 抛出。
     func data(for url: URL) async throws -> (Data, Int)
 }
 
-public enum HostReleaseHTTPError: Error, Equatable, Sendable {
+public enum AdaptorReleaseHTTPError: Error, Equatable, Sendable {
     case timedOut
     case cancelled
     case network
@@ -17,7 +17,7 @@ public enum HostReleaseHTTPError: Error, Equatable, Sendable {
 }
 
 /// 只读 GitHub 发布列表与校验文件的短连接会话。
-public struct URLSessionHostReleaseHTTP: HostReleaseHTTP {
+public struct URLSessionAdaptorReleaseHTTP: AdaptorReleaseHTTP {
     private let session: URLSession
     private let timeout: TimeInterval
 
@@ -43,14 +43,14 @@ public struct URLSessionHostReleaseHTTP: HostReleaseHTTP {
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
-                throw HostReleaseHTTPError.invalidResponse
+                throw AdaptorReleaseHTTPError.invalidResponse
             }
             return (data, http.statusCode)
         } catch let error as URLError {
             switch error.code {
-            case .timedOut: throw HostReleaseHTTPError.timedOut
-            case .cancelled: throw HostReleaseHTTPError.cancelled
-            default: throw HostReleaseHTTPError.network
+            case .timedOut: throw AdaptorReleaseHTTPError.timedOut
+            case .cancelled: throw AdaptorReleaseHTTPError.cancelled
+            default: throw AdaptorReleaseHTTPError.network
             }
         }
     }
@@ -58,7 +58,7 @@ public struct URLSessionHostReleaseHTTP: HostReleaseHTTP {
 
 // MARK: - 解析结果
 
-public enum HostReleaseResolutionSource: Equatable, Sendable {
+public enum AdaptorReleaseResolutionSource: Equatable, Sendable {
     /// GitHub 上的最新稳定发布。
     case latest
     /// 内置版本；附带固定短语说明原因，可直接展示给用户。
@@ -85,11 +85,11 @@ public enum HostReleaseResolutionSource: Equatable, Sendable {
     }
 }
 
-public struct HostReleaseResolution: Equatable, Sendable {
-    public let release: PiHostRelease
-    public let source: HostReleaseResolutionSource
+public struct AdaptorReleaseResolution: Equatable, Sendable {
+    public let release: PIAdaptorRelease
+    public let source: AdaptorReleaseResolutionSource
 
-    public init(release: PiHostRelease, source: HostReleaseResolutionSource) {
+    public init(release: PIAdaptorRelease, source: AdaptorReleaseResolutionSource) {
         self.release = release
         self.source = source
     }
@@ -106,11 +106,11 @@ public struct HostReleaseResolution: Equatable, Sendable {
 }
 
 /// 供 `ConnectionModel` 注入的解析能力。
-public protocol HostReleaseResolving: Sendable {
+public protocol AdaptorReleaseResolving: Sendable {
     func resolve(
         target: BootstrapArtifactTarget,
         fallbackBaseURL: String
-    ) async -> HostReleaseResolution?
+    ) async -> AdaptorReleaseResolution?
 }
 
 // MARK: - 发布目录
@@ -123,8 +123,8 @@ public protocol HostReleaseResolving: Sendable {
 ///
 /// 任何一步失败都回退到内置发布并附固定原因，绝不把远端文本拼进提示，
 /// 也绝不因为解析失败而阻止安装。
-public actor HostReleaseCatalog: HostReleaseResolving {
-    public static let defaultRepository = PiHostRelease.releaseRepository
+public actor AdaptorReleaseCatalog: AdaptorReleaseResolving {
+    public static let defaultRepository = PIAdaptorRelease.releaseRepository
     public static let releasesPageSize = 20
     public static let listCacheLifetime: TimeInterval = 600
     public static let maximumListBytes = 512 * 1_024
@@ -135,7 +135,7 @@ public actor HostReleaseCatalog: HostReleaseResolving {
         let storedAt: Date
     }
 
-    private let http: any HostReleaseHTTP
+    private let http: any AdaptorReleaseHTTP
     private let repository: String
     private let listCacheLifetime: TimeInterval
     private let now: @Sendable () -> Date
@@ -147,9 +147,9 @@ public actor HostReleaseCatalog: HostReleaseResolving {
     }
 
     public init(
-        http: any HostReleaseHTTP = URLSessionHostReleaseHTTP(),
-        repository: String = HostReleaseCatalog.defaultRepository,
-        listCacheLifetime: TimeInterval = HostReleaseCatalog.listCacheLifetime,
+        http: any AdaptorReleaseHTTP = URLSessionAdaptorReleaseHTTP(),
+        repository: String = AdaptorReleaseCatalog.defaultRepository,
+        listCacheLifetime: TimeInterval = AdaptorReleaseCatalog.listCacheLifetime,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.http = http
@@ -160,8 +160,8 @@ public actor HostReleaseCatalog: HostReleaseResolving {
 
     public func resolve(
         target: BootstrapArtifactTarget,
-        fallbackBaseURL: String = PiHostRelease.defaultPatchedBaseURL
-    ) async -> HostReleaseResolution? {
+        fallbackBaseURL: String = PIAdaptorRelease.defaultPatchedBaseURL
+    ) async -> AdaptorReleaseResolution? {
         do {
             return try await resolveLatest(target: target, fallbackBaseURL: fallbackBaseURL)
         } catch let HTTPStatusError.status(code) {
@@ -180,9 +180,9 @@ public actor HostReleaseCatalog: HostReleaseResolving {
     private func resolveLatest(
         target: BootstrapArtifactTarget,
         fallbackBaseURL: String
-    ) async throws -> HostReleaseResolution? {
+    ) async throws -> AdaptorReleaseResolution? {
         let listData = try await releasesList()
-        guard let candidate = HostReleaseSelection.latest(
+        guard let candidate = AdaptorReleaseSelection.latest(
             from: listData,
             target: target,
             repository: repository
@@ -215,13 +215,13 @@ public actor HostReleaseCatalog: HostReleaseResolving {
                 return fallback(target: target, baseURL: fallbackBaseURL, reason: "校验摘要无效")
             }
             let text = String(decoding: checksumData, as: UTF8.self)
-            guard let parsed = PiHostRelease.parseChecksumFile(text, artifactName: candidate.artifactName) else {
+            guard let parsed = PIAdaptorRelease.parseChecksumFile(text, artifactName: candidate.artifactName) else {
                 return fallback(target: target, baseURL: fallbackBaseURL, reason: "校验摘要无效")
             }
             digest = parsed
         }
 
-        guard let release = PiHostRelease(
+        guard let release = PIAdaptorRelease(
             version: candidate.version,
             target: target,
             baseURL: candidate.baseURL,
@@ -229,7 +229,7 @@ public actor HostReleaseCatalog: HostReleaseResolving {
         ) else {
             return fallback(target: target, baseURL: fallbackBaseURL, reason: "校验摘要无效")
         }
-        return HostReleaseResolution(release: release, source: .latest)
+        return AdaptorReleaseResolution(release: release, source: .latest)
     }
 
     private func releasesList() async throws -> Data {
@@ -241,14 +241,14 @@ public actor HostReleaseCatalog: HostReleaseResolving {
         guard let url = URL(
             string: "https://api.github.com/repos/\(repository)/releases?per_page=\(Self.releasesPageSize)"
         ) else {
-            throw HostReleaseHTTPError.invalidResponse
+            throw AdaptorReleaseHTTPError.invalidResponse
         }
         let (data, status) = try await http.data(for: url)
         guard status == 200 else {
             throw HTTPStatusError.status(status)
         }
         guard data.count <= Self.maximumListBytes else {
-            throw HostReleaseHTTPError.invalidResponse
+            throw AdaptorReleaseHTTPError.invalidResponse
         }
         listCache[repository] = ListCacheEntry(data: data, storedAt: now())
         return data
@@ -260,17 +260,17 @@ public actor HostReleaseCatalog: HostReleaseResolving {
         target: BootstrapArtifactTarget,
         baseURL: String,
         reason: String
-    ) -> HostReleaseResolution? {
-        guard let release = PiHostRelease.patched(target: target, baseURL: baseURL) else {
+    ) -> AdaptorReleaseResolution? {
+        guard let release = PIAdaptorRelease.patched(target: target, baseURL: baseURL) else {
             return nil
         }
-        return HostReleaseResolution(release: release, source: .fallback(reason: reason))
+        return AdaptorReleaseResolution(release: release, source: .fallback(reason: reason))
     }
 
     // MARK: 固定原因文案
 
     private static func reason(for error: Error) -> String {
-        guard let error = error as? HostReleaseHTTPError else {
+        guard let error = error as? AdaptorReleaseHTTPError else {
             return "无法连接 GitHub"
         }
         switch error {
@@ -306,11 +306,11 @@ public actor HostReleaseCatalog: HostReleaseResolving {
         var sawStableTag = false
         var sawArtifact = false
         for entry in entries where !entry.draft && !entry.prerelease {
-            guard entry.tagName.hasPrefix(HostReleaseSelection.tagPrefix) else { continue }
-            let rawVersion = String(entry.tagName.dropFirst(HostReleaseSelection.tagPrefix.count))
-            guard HostReleaseSelection.isStableVersion(rawVersion) else { continue }
+            guard entry.tagName.hasPrefix(AdaptorReleaseSelection.tagPrefix) else { continue }
+            let rawVersion = String(entry.tagName.dropFirst(AdaptorReleaseSelection.tagPrefix.count))
+            guard AdaptorReleaseSelection.isStableVersion(rawVersion) else { continue }
             sawStableTag = true
-            guard let release = PiHostRelease(
+            guard let release = PIAdaptorRelease(
                 version: rawVersion,
                 target: target,
                 repository: repository

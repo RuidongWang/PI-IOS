@@ -13,7 +13,7 @@ final class RealTwoHostKeychainUITests: XCTestCase {
         let environment = ProcessInfo.processInfo.environment
         let token = environment["PI_IOS_HOST_B_PAIRING_TOKEN"] ?? ""
         let hostAName = environment["PI_IOS_HOST_A_NAME"] ?? "嗷嗷"
-        let hostBName = environment["PI_IOS_HOST_B_NAME"] ?? "QA Host B"
+        let hostBName = environment["PI_IOS_HOST_B_NAME"] ?? "QA PI-adaptor B"
 
         showRoot("设置")
         let hostBRow = app.buttons
@@ -24,7 +24,7 @@ final class RealTwoHostKeychainUITests: XCTestCase {
             .firstMatch
         guard hostBRow.waitForExistence(timeout: 10), hostARow.exists else {
             throw XCTSkip(
-                "Configure both real Host records and set PI_IOS_HOST_B_PAIRING_TOKEN for the two-Host keychain run."
+                "Configure both real PI-adaptor records and set PI_IOS_HOST_B_PAIRING_TOKEN for the two-PI-adaptor keychain run."
             )
         }
         openHost(hostBName)
@@ -32,7 +32,7 @@ final class RealTwoHostKeychainUITests: XCTestCase {
         let field = app.secureTextFields["ppt1.…"]
         if field.waitForExistence(timeout: 8) {
             guard !token.isEmpty else {
-                throw XCTSkip("Provide PI_IOS_HOST_B_PAIRING_TOKEN for the first real two-Host pairing run.")
+                throw XCTSkip("Provide PI_IOS_HOST_B_PAIRING_TOKEN for the first real two-PI-adaptor pairing run.")
             }
             UIPasteboard.general.string = token
             addTeardownBlock { UIPasteboard.general.string = nil }
@@ -51,18 +51,18 @@ final class RealTwoHostKeychainUITests: XCTestCase {
             pair.tap()
             XCTAssertTrue(
                 app.staticTexts["配对成功；设备令牌已保存"].waitForExistence(timeout: 40),
-                "Host B must pair and persist its scoped device token."
+                "PI-adaptor B must pair and persist its scoped device token."
             )
         } else {
             XCTAssertTrue(
                 app.staticTexts["已保存设备令牌"].waitForExistence(timeout: 10),
-                "An already-paired Host B must expose its persisted token."
+                "An already-paired PI-adaptor B must expose its persisted token."
             )
         }
         XCTAssertTrue(app.staticTexts["已保存设备令牌"].waitForExistence(timeout: 10))
         XCTAssertTrue(
             app.staticTexts["在线"].waitForExistence(timeout: 30),
-            "Host B must reconnect with its newly persisted token."
+            "PI-adaptor B must reconnect with its newly persisted token."
         )
 
         backToServerList()
@@ -71,7 +71,7 @@ final class RealTwoHostKeychainUITests: XCTestCase {
         connectPiHost()
         XCTAssertTrue(
             app.staticTexts["在线"].waitForExistence(timeout: 30),
-            "Host A must keep its own token and reconnect independently."
+            "PI-adaptor A must keep its own token and reconnect independently."
         )
 
         backToServerList()
@@ -80,7 +80,7 @@ final class RealTwoHostKeychainUITests: XCTestCase {
         connectPiHost()
         XCTAssertTrue(
             app.staticTexts["在线"].waitForExistence(timeout: 30),
-            "Host B must reconnect again without borrowing Host A's token."
+            "PI-adaptor B must reconnect again without borrowing PI-adaptor A's token."
         )
     }
 

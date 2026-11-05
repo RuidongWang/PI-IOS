@@ -7,7 +7,7 @@ final class GitHubReleaseListTests: XCTestCase {
 
     func testSelectsNewestStableReleaseForTargetArchitecture() throws {
         let candidate = try XCTUnwrap(
-            HostReleaseSelection.latest(from: Data(Self.json.utf8), target: .linuxArm64)
+            AdaptorReleaseSelection.latest(from: Data(Self.json.utf8), target: .linuxArm64)
         )
         XCTAssertEqual(candidate.version, "1.4.2")
         XCTAssertEqual(candidate.releaseTag, "pi-adaptor-v1.4.2")
@@ -22,7 +22,7 @@ final class GitHubReleaseListTests: XCTestCase {
         )
 
         let x64 = try XCTUnwrap(
-            HostReleaseSelection.latest(from: Data(Self.json.utf8), target: .linuxX64)
+            AdaptorReleaseSelection.latest(from: Data(Self.json.utf8), target: .linuxX64)
         )
         XCTAssertEqual(x64.version, "1.4.2")
         XCTAssertEqual(x64.artifactName, "pi-adaptor-1.4.2-linux-x64.tar.gz")
@@ -30,7 +30,7 @@ final class GitHubReleaseListTests: XCTestCase {
 
     func testRepositoryAppearsInDownloadURLs() throws {
         let candidate = try XCTUnwrap(
-            HostReleaseSelection.latest(
+            AdaptorReleaseSelection.latest(
                 from: Data(Self.json.utf8),
                 target: .linuxX64,
                 repository: "Example/Other"
@@ -42,7 +42,7 @@ final class GitHubReleaseListTests: XCTestCase {
         )
     }
 
-    // MARK: - 跳过不稳定与非 Host 发布
+    // MARK: - 跳过不稳定与非 PI-adaptor 发布
 
     func testSkipsDraftPrereleaseAndForeignTags() {
         let entries = [
@@ -52,7 +52,7 @@ final class GitHubReleaseListTests: XCTestCase {
             Self.entry(tag: "pi-adaptor-v6.6.6-beta.1", assets: ["pi-adaptor-6.6.6-beta.1-linux-arm64.tar.gz"]),
             Self.entry(tag: "pi-adaptor-v5.5.5+build", assets: ["pi-adaptor-5.5.5+build-linux-arm64.tar.gz"]),
         ]
-        XCTAssertNil(HostReleaseSelection.latest(from: entries, target: .linuxArm64))
+        XCTAssertNil(AdaptorReleaseSelection.latest(from: entries, target: .linuxArm64))
     }
 
     func testSkipsReleaseMissingTargetArtifactOrChecksum() {
@@ -66,9 +66,9 @@ final class GitHubReleaseListTests: XCTestCase {
                 assets: ["pi-adaptor-2.0.0-linux-x64.tar.gz", "pi-adaptor-2.0.0-linux-x64.tar.gz.sha256"]
             ),
         ]
-        XCTAssertNil(HostReleaseSelection.latest(from: entries, target: .linuxArm64))
+        XCTAssertNil(AdaptorReleaseSelection.latest(from: entries, target: .linuxArm64))
         XCTAssertEqual(
-            HostReleaseSelection.latest(from: entries, target: .linuxX64)?.version,
+            AdaptorReleaseSelection.latest(from: entries, target: .linuxX64)?.version,
             "2.0.0",
             "缺 .sha256 的发布要跳过，继续找可用的旧发布"
         )
@@ -87,16 +87,16 @@ final class GitHubReleaseListTests: XCTestCase {
                 ]
             ),
         ]
-        XCTAssertEqual(HostReleaseSelection.latest(from: entries, target: .linuxArm64)?.version, "1.9.0")
-        XCTAssertEqual(HostReleaseSelection.latest(from: entries, target: .linuxX64)?.version, "2.0.0")
+        XCTAssertEqual(AdaptorReleaseSelection.latest(from: entries, target: .linuxArm64)?.version, "1.9.0")
+        XCTAssertEqual(AdaptorReleaseSelection.latest(from: entries, target: .linuxX64)?.version, "2.0.0")
     }
 
     // MARK: - 解析容错
 
     func testMalformedPayloadReturnsNil() {
-        XCTAssertNil(HostReleaseSelection.latest(from: Data("not json".utf8), target: .linuxArm64))
-        XCTAssertNil(HostReleaseSelection.latest(from: Data("{}".utf8), target: .linuxArm64))
-        XCTAssertNil(HostReleaseSelection.latest(from: Data("[]".utf8), target: .linuxArm64))
+        XCTAssertNil(AdaptorReleaseSelection.latest(from: Data("not json".utf8), target: .linuxArm64))
+        XCTAssertNil(AdaptorReleaseSelection.latest(from: Data("{}".utf8), target: .linuxArm64))
+        XCTAssertNil(AdaptorReleaseSelection.latest(from: Data("[]".utf8), target: .linuxArm64))
     }
 
     func testUnknownFieldsAreIgnored() throws {
@@ -114,7 +114,7 @@ final class GitHubReleaseListTests: XCTestCase {
         }]
         """
         let candidate = try XCTUnwrap(
-            HostReleaseSelection.latest(from: Data(json.utf8), target: .linuxArm64)
+            AdaptorReleaseSelection.latest(from: Data(json.utf8), target: .linuxArm64)
         )
         XCTAssertEqual(candidate.version, "1.0.0")
     }
@@ -135,7 +135,7 @@ final class GitHubReleaseListTests: XCTestCase {
         }]
         """
         let candidate = try XCTUnwrap(
-            HostReleaseSelection.latest(from: Data(json.utf8), target: .linuxArm64)
+            AdaptorReleaseSelection.latest(from: Data(json.utf8), target: .linuxArm64)
         )
         XCTAssertEqual(candidate.pinnedChecksum, digest, "应规范化成裸小写摘要")
     }
@@ -154,7 +154,7 @@ final class GitHubReleaseListTests: XCTestCase {
             }]
             """
             let candidate = try XCTUnwrap(
-                HostReleaseSelection.latest(from: Data(json.utf8), target: .linuxArm64)
+                AdaptorReleaseSelection.latest(from: Data(json.utf8), target: .linuxArm64)
             )
             XCTAssertNil(candidate.pinnedChecksum, digest)
         }
@@ -164,10 +164,10 @@ final class GitHubReleaseListTests: XCTestCase {
 
     func testStableVersionRequiresNumericDotComponents() {
         for value in ["1", "1.2", "1.2.3", "10.20.30"] {
-            XCTAssertTrue(HostReleaseSelection.isStableVersion(value), value)
+            XCTAssertTrue(AdaptorReleaseSelection.isStableVersion(value), value)
         }
         for value in ["", ".", ".1", "1.", "1..2", "1.2.3-beta.1", "1.2.3+build", "v1.2.3", "1.2.3/evil", "１.２"] {
-            XCTAssertFalse(HostReleaseSelection.isStableVersion(value), value)
+            XCTAssertFalse(AdaptorReleaseSelection.isStableVersion(value), value)
         }
     }
 

@@ -4,7 +4,7 @@ import Foundation
 ///
 /// The app version selects the bundle, checksum, install root and systemd unit.
 /// Production callers use `patched`/`production`, which always pin a checksum.
-public struct PiHostRelease: Equatable, Sendable {
+public struct PIAdaptorRelease: Equatable, Sendable {
     public static let defaultRepository = "RuidongWang/PI-adaptor"
     public static let releaseRepository = "RuidongWang/PI-adaptor"
     public static let releaseVersion = "0.0.1"
@@ -45,7 +45,7 @@ public struct PiHostRelease: Equatable, Sendable {
     public init?(
         version: String,
         target: BootstrapArtifactTarget,
-        repository: String = PiHostRelease.defaultRepository
+        repository: String = PIAdaptorRelease.defaultRepository
     ) {
         let repository = repository.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let version = Self.canonicalVersion(version),
@@ -102,9 +102,9 @@ public struct PiHostRelease: Equatable, Sendable {
     public static func patched(
         target: BootstrapArtifactTarget,
         baseURL: String = defaultPatchedBaseURL
-    ) -> PiHostRelease? {
+    ) -> PIAdaptorRelease? {
         guard let checksum = patchedChecksums[target] else { return nil }
-        return PiHostRelease(
+        return PIAdaptorRelease(
             version: patchedReleaseVersion,
             target: target,
             baseURL: baseURL,
@@ -115,7 +115,7 @@ public struct PiHostRelease: Equatable, Sendable {
     public static func production(
         target: BootstrapArtifactTarget,
         baseURL: String = defaultPatchedBaseURL
-    ) -> PiHostRelease? {
+    ) -> PIAdaptorRelease? {
         patched(target: target, baseURL: baseURL)
     }
 

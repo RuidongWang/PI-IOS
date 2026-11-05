@@ -66,7 +66,7 @@ final class RACPInboundAckTests: XCTestCase {
         pump.cancel()
     }
 
-    /// v2 Host 把事件包在 `params.event` 里（见冻结 golden 的 `events/event`）。
+    /// v2 PI-adaptor 把事件包在 `params.event` 里（见冻结 golden 的 `events/event`）。
     /// 客户端必须解包后再归约并按 durable sequence ACK，否则实时流会被静默丢弃。
     func testV2WrappedEventEnvelopeIsDecodedAndAcknowledged() async throws {
         let socket = AckingSocket()

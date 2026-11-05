@@ -11,7 +11,7 @@ public protocol RACPV2Requesting: Sendable {
 
 extension RACPClient: RACPV2Requesting {}
 
-/// Host operations for RACP v2 provider management plus the SSH-isolated
+/// PI-adaptor operations for RACP v2 provider management plus the SSH-isolated
 /// `/models` discovery probe. Provider writes never invoke a provider CLI.
 public enum RemoteProviderOperations {
     public static let userVisibleTimeout: TimeInterval = 10

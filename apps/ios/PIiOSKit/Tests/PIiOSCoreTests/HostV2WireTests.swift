@@ -40,7 +40,7 @@ final class HostV2WireTests: XCTestCase {
         XCTAssertEqual(result.turn.status, "running")
     }
 
-    /// v1 旧 Host 仍会带 `accepted`，显式值必须被尊重。
+    /// v1 旧 PI-adaptor 仍会带 `accepted`，显式值必须被尊重。
     func testTurnStartResultHonoursExplicitAcceptedField() throws {
         let json = """
         {"accepted":false,"turn":{"id":"t2"}}

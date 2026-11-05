@@ -4,7 +4,7 @@ import XCTest
 
 @testable import PIiOSNet
 
-final class HostReleaseCatalogTests: XCTestCase {
+final class AdaptorReleaseCatalogTests: XCTestCase {
     private let digest = String(repeating: "0123456789abcdef", count: 4)
     private let listURL = "https://api.github.com/repos/RuidongWang/PI-adaptor/releases?per_page=20"
     private let arm64ChecksumURL =
@@ -17,7 +17,7 @@ final class HostReleaseCatalogTests: XCTestCase {
             listURL: .ok(Data(Self.listJSON.utf8), 200),
             arm64ChecksumURL: .ok(Data("\(digest)  pi-adaptor-1.4.2-linux-arm64.tar.gz\n".utf8), 200),
         ])
-        let catalog = HostReleaseCatalog(http: http)
+        let catalog = AdaptorReleaseCatalog(http: http)
 
         let resolved = await catalog.resolve(target: .linuxArm64, fallbackBaseURL: "https://example.test/fallback")
         let resolution = try XCTUnwrap(resolved)
@@ -39,7 +39,7 @@ final class HostReleaseCatalogTests: XCTestCase {
         let http = StubReleaseHTTP(replies: [
             listURL: .ok(Data(Self.listJSONWithDigest.utf8), 200),
         ])
-        let catalog = HostReleaseCatalog(http: http)
+        let catalog = AdaptorReleaseCatalog(http: http)
 
         let resolved = await catalog.resolve(target: .linuxArm64, fallbackBaseURL: "https://example.test/fallback")
         let resolution = try XCTUnwrap(resolved)
@@ -136,7 +136,7 @@ final class HostReleaseCatalogTests: XCTestCase {
     func testOversizedChecksumResponseFallsBack() async throws {
         let http = StubReleaseHTTP(replies: [
             listURL: .ok(Data(Self.listJSON.utf8), 200),
-            arm64ChecksumURL: .ok(Data(repeating: 0x61, count: HostReleaseCatalog.maximumChecksumBytes + 1), 200),
+            arm64ChecksumURL: .ok(Data(repeating: 0x61, count: AdaptorReleaseCatalog.maximumChecksumBytes + 1), 200),
         ])
         let resolution = try await resolve(http: http)
         try assertFallback(resolution, reason: "校验摘要无效")
@@ -149,7 +149,7 @@ final class HostReleaseCatalogTests: XCTestCase {
             listURL: .ok(Data(Self.listJSON.utf8), 200),
             arm64ChecksumURL: .ok(Data("\(digest)  pi-adaptor-1.4.2-linux-arm64.tar.gz\n".utf8), 200),
         ])
-        let catalog = HostReleaseCatalog(http: http)
+        let catalog = AdaptorReleaseCatalog(http: http)
 
         _ = await catalog.resolve(target: .linuxArm64)
         _ = await catalog.resolve(target: .linuxArm64)
@@ -161,30 +161,30 @@ final class HostReleaseCatalogTests: XCTestCase {
 
     // MARK: - 工具
 
-    private func resolve(http: StubReleaseHTTP) async throws -> HostReleaseResolution {
-        let catalog = HostReleaseCatalog(http: http)
+    private func resolve(http: StubReleaseHTTP) async throws -> AdaptorReleaseResolution {
+        let catalog = AdaptorReleaseCatalog(http: http)
         let resolved = await catalog.resolve(target: .linuxArm64, fallbackBaseURL: "https://example.test/fallback")
         return try XCTUnwrap(resolved)
     }
 
     private func assertFallback(
-        _ resolution: HostReleaseResolution,
+        _ resolution: AdaptorReleaseResolution,
         reason: String,
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws {
         XCTAssertTrue(resolution.usedFallback, file: file, line: line)
         XCTAssertEqual(resolution.source, .fallback(reason: reason), file: file, line: line)
-        XCTAssertEqual(resolution.release.version, PiHostRelease.releaseVersion, file: file, line: line)
+        XCTAssertEqual(resolution.release.version, PIAdaptorRelease.releaseVersion, file: file, line: line)
         XCTAssertEqual(
             resolution.release.pinnedChecksum,
-            PiHostRelease.patchedChecksums[.linuxArm64],
+            PIAdaptorRelease.patchedChecksums[.linuxArm64],
             file: file,
             line: line
         )
         XCTAssertEqual(
             resolution.release.artifactURL,
-            "https://example.test/fallback/pi-adaptor-\(PiHostRelease.releaseVersion)-linux-arm64.tar.gz",
+            "https://example.test/fallback/pi-adaptor-\(PIAdaptorRelease.releaseVersion)-linux-arm64.tar.gz",
             file: file,
             line: line
         )
@@ -235,10 +235,10 @@ final class HostReleaseCatalogTests: XCTestCase {
 
 // MARK: - 桩
 
-private actor StubReleaseHTTP: HostReleaseHTTP {
+private actor StubReleaseHTTP: AdaptorReleaseHTTP {
     enum Reply {
         case ok(Data, Int)
-        case failure(HostReleaseHTTPError)
+        case failure(AdaptorReleaseHTTPError)
     }
 
     private let replies: [String: Reply]
@@ -251,7 +251,7 @@ private actor StubReleaseHTTP: HostReleaseHTTP {
     func data(for url: URL) async throws -> (Data, Int) {
         requestedURLs.append(url)
         guard let reply = replies[url.absoluteString] else {
-            throw HostReleaseHTTPError.network
+            throw AdaptorReleaseHTTPError.network
         }
         switch reply {
         case let .ok(data, status):
