@@ -66,6 +66,9 @@ struct ServersScreen: View {
             VStack(alignment: .leading, spacing: PISpacing.s24) {
                 statusBanner
                 connectionGroup
+                if let host = existingHost {
+                    directSection(for: host)
+                }
                 authGroup
                 saveButton
                 if let host = existingHost {
@@ -392,6 +395,65 @@ struct ServersScreen: View {
         }
     }
 
+    private func directPin(for host: HostRecord) -> DirectTLSTrustPin? {
+        UITestFixture.current?.directTrustPin ?? KeychainStore.loadDirectTLSTrustPin(hostID: host.id)
+    }
+
+    private func directStatus(for host: HostRecord) -> ConnectionStatus {
+        connection.currentCatalogHostID == host.id ? connection.connectionStatus : ConnectionStatus()
+    }
+
+    private func canRetryDirect(_ host: HostRecord) -> Bool {
+        directStatus(for: host).activeRoute == .ssh
+            && connection.state.isOnline
+            && directPin(for: host) != nil
+            && host.adaptorHostId != nil
+            && HostValidator.canonicalDirectEndpoint(host.directEndpoint ?? "") != nil
+    }
+
+    private func directSection(for host: HostRecord) -> some View {
+        DirectConnectionSection(
+            endpoint: $draft.directEndpoint,
+            preference: draft.connectionPreference,
+            status: directStatus(for: host),
+            adaptorHostId: host.adaptorHostId,
+            trustPin: directPin(for: host),
+            isTrustAuthorized: directPin(for: host) != nil,
+            endpointError: errors.directEndpoint,
+            isBusy: isSaving || isPairing,
+            canAuthorize: host.pairedAt != nil,
+            authorizationDisabledReason: host.pairedAt == nil ? "请先完成可信 SSH 配对" : nil,
+            canRetryDirect: canRetryDirect(host),
+            retryDisabledReason: "仅当 SSH 在线且 endpoint、pin、hostId 已验证时可重试",
+            onPreferenceChange: changeDirectPreference,
+            onAuthorize: { push(.installAdaptor(host.id)) },
+            onRetryDirect: {
+                Task { await connection.retryDirect(record: host) }
+            }
+        )
+    }
+
+    private func changeDirectPreference(_ preference: ConnectionPreference) {
+        guard let host = existingHost else { return }
+        switch preference {
+        case .sshOnly:
+            draft.connectionPreference = .sshOnly
+            model.setConnectionPreference(id: host.id, preference: .sshOnly)
+            Task { await model.setCurrentHost(id: host.id) }
+        case .directPreferred:
+            if directStatus(for: host).activeRoute == .direct {
+                draft.connectionPreference = .directPreferred
+                return
+            }
+            guard canRetryDirect(host) else {
+                pairingMessage = "请先保存合法 endpoint，并经可信 SSH 授权 pin 与 hostId"
+                return
+            }
+            draft.connectionPreference = .directPreferred
+            Task { await connection.retryDirect(record: host) }
+        }
+    }
+
     // MARK: - PI-adaptor 连接与危险区
 
     private func pairingSection(for host: HostRecord) -> some View {
@@ -603,6 +665,9 @@ struct ServersScreen: View {
                                 .font(PIFont.caption)
                                 .foregroundStyle(PIColor.danger)
                                 .fixedSize(horizontal: false, vertical: true)
+                                // 独立标识：弹层固定有「私钥全文…」标题，按“含私钥”查文本
+                                // 会把标题当成错误提示，导致导入完全不生效也能通过。
+                                .accessibilityIdentifier("servers.pasteKey.error")
                         }
                         Text("粘贴的文本只保存在 Keychain，不写入本机文件、日志或剪贴板。")
                     }
@@ -752,6 +817,7 @@ struct ServersScreen: View {
             || existing.username != draft.username.piTrimmed
             || existing.authKind != draft.authKind
             || existing.hostPort != Int(draft.hostPort.piTrimmed)
+            || HostValidator.directConfigurationChanged(existing, draft)
     }
 
     private func validateDraft() -> HostDraftErrors {

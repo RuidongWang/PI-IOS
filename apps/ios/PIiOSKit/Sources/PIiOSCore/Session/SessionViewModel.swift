@@ -404,6 +404,23 @@ public final class SessionViewModel {
 
     public init() {}
 
+    /// C1 export for candidate promotion. The reducer itself is never shared
+    /// between generations; this value is applied as one staging snapshot.
+    public var recoverySnapshot: RACPSnapshot? {
+        guard let cursor else { return nil }
+        return RACPSnapshot(
+            cursor: cursor,
+            revision: revision,
+            items: items,
+            activeItems: activeItems,
+            activeTurn: activeTurnId.map { RACPTurnRef(id: $0) },
+            queuedTurns: queuedTurns,
+            pendingApprovals: pendingApprovals,
+            pendingInputs: pendingInputs,
+            hasMoreHistory: hasMoreHistory
+        )
+    }
+
     /// 切换会话前清空所有归约状态；新会话的快照不能继承旧会话的游标、
     /// 运行中 turn、审批失效集合或草稿。
     public func resetForSession() {

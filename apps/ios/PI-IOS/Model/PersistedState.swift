@@ -1,4 +1,5 @@
 import Foundation
+import PIiOSNet
 
 /// 认证方式：密码或 OpenSSH 私钥（spec E6）。
 enum AuthKind: String, Codable, CaseIterable, Identifiable {
@@ -56,6 +57,12 @@ struct HostRecord: Codable, Identifiable, Hashable {
     var keyFileName: String?
     /// 最近一次 bootstrap 成功回执（不含配对令牌或设备令牌）。
     var installReceipt: AdaptorInstallReceipt? = nil
+    /// 缺省 sshOnly；只有完整 direct 验证后才能由 ConnectionModel 切到 directPreferred。
+    var connectionPreference: ConnectionPreference = .sshOnly
+    /// 手工配置的 canonical wss URL，不从 initialize 或重定向自动填充。
+    var directEndpoint: String? = nil
+    /// 可信 SSH 上认证 ping 取得的 adaptor 身份，与本机 HostRecord.id 不同。
+    var adaptorHostId: String? = nil
 
     var address: String { "\(username)@\(host):\(port)" }
 
@@ -64,6 +71,37 @@ struct HostRecord: Codable, Identifiable, Hashable {
 
     /// 连接状态由 `ConnectionModel` 实时给出，这里不缓存「在线」，避免离线时看起来是连着的。
     var statusText: String { pairingText }
+}
+
+extension HostRecord {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, host, port, username, authKind, createdAt, isCurrent
+        case pairedAt, tunnelUpAt, hostPort, keyFileName, installReceipt
+        case connectionPreference, directEndpoint, adaptorHostId
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        host = try container.decode(String.self, forKey: .host)
+        port = try container.decode(Int.self, forKey: .port)
+        username = try container.decode(String.self, forKey: .username)
+        authKind = try container.decode(AuthKind.self, forKey: .authKind)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        isCurrent = try container.decode(Bool.self, forKey: .isCurrent)
+        pairedAt = try container.decodeIfPresent(Date.self, forKey: .pairedAt)
+        tunnelUpAt = try container.decodeIfPresent(Date.self, forKey: .tunnelUpAt)
+        hostPort = try container.decodeIfPresent(Int.self, forKey: .hostPort)
+        keyFileName = try container.decodeIfPresent(String.self, forKey: .keyFileName)
+        installReceipt = try container.decodeIfPresent(AdaptorInstallReceipt.self, forKey: .installReceipt)
+        connectionPreference = try container.decodeIfPresent(
+            ConnectionPreference.self,
+            forKey: .connectionPreference
+        ) ?? .sshOnly
+        directEndpoint = try container.decodeIfPresent(String.self, forKey: .directEndpoint)
+        adaptorHostId = try container.decodeIfPresent(String.self, forKey: .adaptorHostId)
+    }
 }
 
 /// 单个会话的阅读位置。条目用 RACP item id 记录，避免消息数变化后落到错误位置。

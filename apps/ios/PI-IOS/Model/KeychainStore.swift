@@ -16,6 +16,7 @@ enum KeychainStore {
         static let deviceToken = "dev.piios.devicetoken"
         static let hostKey = "dev.piios.hostkey"
         static let providerKey = "dev.piios.providerkey"
+        static let directTLS = "dev.piios.directtls"
     }
 
     /// 存储键：未配对时用 `ssh://user@host:port` 的 SHA256（契约 §2.4 `hostKey` 规则）。
@@ -386,6 +387,38 @@ enum KeychainStore {
     @discardableResult
     static func deleteHostKey(account: String) -> Bool {
         delete(service: Service.hostKey, account: account)
+    }
+
+    // MARK: - Direct TLS 证书 pin（独立 service，不改变 device/SSH account）
+
+    static func directTLSAccount(hostID: UUID) -> String {
+        "host-direct-tls:\(hostID.uuidString.lowercased())"
+    }
+
+    private static func isValidDirectPin(_ pin: DirectTLSTrustPin) -> Bool {
+        !pin.hostId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && pin.certificateSHA256.count == 64
+            && pin.certificateSHA256 == pin.certificateSHA256.lowercased()
+            && pin.certificateSHA256.allSatisfy(\.isHexDigit)
+    }
+
+    @discardableResult
+    static func saveDirectTLSTrustPin(_ pin: DirectTLSTrustPin, hostID: UUID) -> Bool {
+        guard isValidDirectPin(pin), let data = try? JSONEncoder().encode(pin) else { return false }
+        return set(data, service: Service.directTLS, account: directTLSAccount(hostID: hostID))
+    }
+
+    static func loadDirectTLSTrustPin(hostID: UUID) -> DirectTLSTrustPin? {
+        guard let data = get(service: Service.directTLS, account: directTLSAccount(hostID: hostID)),
+              let pin = try? JSONDecoder().decode(DirectTLSTrustPin.self, from: data),
+              isValidDirectPin(pin)
+        else { return nil }
+        return pin
+    }
+
+    @discardableResult
+    static func deleteDirectTLSTrustPin(hostID: UUID) -> Bool {
+        delete(service: Service.directTLS, account: directTLSAccount(hostID: hostID))
     }
 
     // MARK: - Provider API keys（模型服务密钥）

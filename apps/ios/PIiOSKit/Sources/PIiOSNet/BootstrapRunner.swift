@@ -242,17 +242,18 @@ public final class BootstrapRunner {
 
     public func run(
         configuration scriptConfiguration: BootstrapScriptConfiguration,
-        deviceLabel: String? = nil
+        deviceLabel: String? = nil,
+        keepTransportOpen: Bool = false
     ) async throws -> BootstrapRunResult {
         do {
             let result = try await runOwned(
                 configuration: scriptConfiguration,
                 deviceLabel: deviceLabel
             )
-            await transport.close()
+            if !keepTransportOpen { await transport.close() }
             return result
         } catch {
-            await transport.close()
+            if !keepTransportOpen { await transport.close() }
             throw error
         }
     }

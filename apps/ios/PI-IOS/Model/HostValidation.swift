@@ -21,6 +21,9 @@ struct HostDraft: Equatable {
     var hostPort: String = ""
     /// 用户选择的私钥文件名（只用于回显；内容在 `secret` 里，随凭证进 Keychain）。
     var keyFileName: String?
+    var connectionPreference: ConnectionPreference = .sshOnly
+    /// 手工 wss endpoint；保存它本身不会启用 directPreferred。
+    var directEndpoint: String = ""
 
     init() {}
 
@@ -34,6 +37,8 @@ struct HostDraft: Equatable {
         passphrase = ""
         hostPort = record.hostPort.map(String.init) ?? ""
         keyFileName = record.keyFileName
+        connectionPreference = record.connectionPreference
+        directEndpoint = record.directEndpoint ?? ""
     }
 }
 
@@ -46,12 +51,13 @@ struct HostDraftErrors: Equatable {
     /// 私钥口令缺失（私钥带口令但没填）。
     var passphrase: String?
     var hostPort: String?
+    var directEndpoint: String?
 
     static let none = HostDraftErrors()
 
     var isValid: Bool {
         name == nil && host == nil && port == nil && username == nil && secret == nil
-            && passphrase == nil && hostPort == nil
+            && passphrase == nil && hostPort == nil && directEndpoint == nil
     }
 }
 
@@ -73,7 +79,8 @@ enum HostValidator {
                 requiresSecret: requiresSecret
             ),
             passphrase: passphraseError(draft),
-            hostPort: hostPortError(draft.hostPort)
+            hostPort: hostPortError(draft.hostPort),
+            directEndpoint: directEndpointError(draft)
         )
     }
 
@@ -86,6 +93,30 @@ enum HostValidator {
         guard let info = try? SSHPrivateKeyParser.info(openSSHPrivateKey: keyText) else { return nil }
         if info.isEncrypted, draft.passphrase.isEmpty {
             return "这把私钥带口令保护（\(info.cipherName)），请填写私钥口令"
+        }
+        return nil
+    }
+
+    static func canonicalDirectEndpoint(_ raw: String) -> String? {
+        let text = raw.piTrimmed
+        guard !text.isEmpty, let url = URL(string: text),
+              let validated = try? DirectRACPWebSocket.validatedEndpoint(url)
+        else { return nil }
+        return validated.absoluteString
+    }
+
+    static func directConfigurationChanged(_ record: HostRecord, _ draft: HostDraft) -> Bool {
+        record.directEndpoint != canonicalDirectEndpoint(draft.directEndpoint)
+            || record.connectionPreference != draft.connectionPreference
+    }
+
+    static func directEndpointError(_ draft: HostDraft) -> String? {
+        let text = draft.directEndpoint.piTrimmed
+        if text.isEmpty {
+            return draft.connectionPreference == .directPreferred ? "启用直连前请填写 WSS 地址" : nil
+        }
+        guard canonicalDirectEndpoint(text) != nil else {
+            return "直连地址必须是 wss://主机[:端口]/v1/racp/ws，且不能包含账号、query、fragment 或末尾斜杠"
         }
         return nil
     }

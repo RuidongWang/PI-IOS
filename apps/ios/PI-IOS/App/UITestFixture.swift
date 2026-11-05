@@ -27,6 +27,8 @@ struct UITestFixture {
     var supportsFixtureRevoke = false
     /// 仅用于模型更新 UI 的内存 Provider；不代表真实 PI-adaptor 已响应。
     var updatableProviders: [RACPV2Provider] = []
+    var directTrustPin: DirectTLSTrustPin? = nil
+    var connectionStatus: ConnectionStatus? = nil
 
     static var current: Self? {
 #if DEBUG
@@ -51,6 +53,8 @@ struct UITestFixture {
         case "online-host-unit-active": return onlineHostUnitActive()
         case "online-host-unit-stopped": return onlineHostUnitStopped()
         case "online-two-hosts": return onlineTwoHosts()
+        case "online-direct-ssh": return onlineDirectSSH()
+        case "online-direct-active": return onlineDirectActive()
         default: return nil
         }
 #else
@@ -649,6 +653,46 @@ struct UITestFixture {
         )
         fixture.connectionState = .offline(reason: "pi-adaptor systemd unit inactive")
         return fixture
+    }
+
+    private static func onlineDirectSSH() -> Self {
+        directFixture(route: .ssh)
+    }
+
+    private static func onlineDirectActive() -> Self {
+        directFixture(route: .direct)
+    }
+
+    private static func directFixture(route: ConnectionRoute) -> Self {
+        var fixture = onlineProjectLifecycle()
+        var state = fixture.state
+        var host = state.hosts[0]
+        host.directEndpoint = "wss://host.example:9443/v1/racp/ws"
+        host.adaptorHostId = "host_fixture_direct"
+        host.connectionPreference = .directPreferred
+        state.hosts = [host]
+        var configured = Self(
+            state: state,
+            cache: fixture.cache,
+            catalog: fixture.catalog,
+            catalogs: fixture.catalogs,
+            sessionSnapshots: fixture.sessionSnapshots,
+            providerBindingStatuses: fixture.providerBindingStatuses,
+            adaptorUnitSnapshot: fixture.adaptorUnitSnapshot,
+            connectionState: .online,
+            updatableProviders: fixture.updatableProviders,
+            directTrustPin: DirectTLSTrustPin(
+                hostId: "host_fixture_direct",
+                certificateSHA256: String(repeating: "a", count: 64),
+                authorizedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            ),
+            connectionStatus: ConnectionStatus(
+                phase: .online(route),
+                activeRoute: route
+            )
+        )
+        configured.connectionState = .online
+        return configured
     }
 
     private static func onlineTwoHosts() -> Self {

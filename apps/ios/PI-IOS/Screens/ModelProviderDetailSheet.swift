@@ -416,7 +416,7 @@ struct ModelProviderDetailSheet: View {
                         ? "服务器上已不存在该记录；本机残留记录已清理。"
                         : "已清理本机记录。"))
             resultMessage = detail
-            // Hand the outcome to the parent: it owns the post-dismiss banner, so a
+            // Hand the outcome to the parent: it owns the post-dismiss alert, so a
             // partial result cannot be hidden behind a generic success message.
             onDeleted(
                 needsAttention

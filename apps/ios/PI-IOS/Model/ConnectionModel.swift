@@ -67,12 +67,61 @@ enum AdaptorInstallError: LocalizedError {
     }
 }
 
+struct BootstrapPairingCommit: Sendable {
+    let hostID: UUID
+    let adaptorHostId: String
+    let port: Int
+    let version: String
+    let attemptId: String
+    let releaseSource: AdaptorReleaseResolutionSource?
+}
+
 struct AdaptorInstallRunOutcome: Sendable {
     let result: BootstrapRunResult
     let releaseVersion: String
     let attemptId: String
-    /// 本次安装使用的版本来源；`nil` 表示未走到版本解析（例如平台不支持）。
     let releaseSource: AdaptorReleaseResolutionSource?
+    let adaptorHostId: String?
+    let directEndpoint: String?
+    let directVerified: Bool
+    let directError: String?
+    let requiresSSHOnlyConfirmation: Bool
+
+    init(
+        result: BootstrapRunResult,
+        releaseVersion: String,
+        attemptId: String,
+        releaseSource: AdaptorReleaseResolutionSource?,
+        adaptorHostId: String? = nil,
+        directEndpoint: String? = nil,
+        directVerified: Bool = false,
+        directError: String? = nil,
+        requiresSSHOnlyConfirmation: Bool = false
+    ) {
+        self.result = result
+        self.releaseVersion = releaseVersion
+        self.attemptId = attemptId
+        self.releaseSource = releaseSource
+        self.adaptorHostId = adaptorHostId
+        self.directEndpoint = directEndpoint
+        self.directVerified = directVerified
+        self.directError = directError
+        self.requiresSSHOnlyConfirmation = requiresSSHOnlyConfirmation
+    }
+}
+
+private final class BootstrapDirectAttemptState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hostId: String?
+    private var trust: BootstrapDirectTrust?
+    private var trustError: String?
+
+    func setHostId(_ value: String) { lock.withLock { hostId = value } }
+    func setTrust(_ value: BootstrapDirectTrust?) { lock.withLock { trust = value } }
+    func setTrustError(_ value: String) { lock.withLock { trustError = value } }
+    var current: (hostId: String?, trust: BootstrapDirectTrust?, error: String?) {
+        lock.withLock { (hostId, trust, trustError) }
+    }
 }
 
 /// 测试夹具里不访问网络：直接回退内置版本，并给出可展示的原因。
@@ -110,6 +159,7 @@ final class ConnectionModel: ObservableObject {
     nonisolated static let defaultAdaptorInstallReleaseBaseURL = PIAdaptorRelease.defaultPatchedBaseURL
 
     @Published private(set) var state: RACPTunnelState = .offline(reason: nil)
+    @Published private(set) var connectionStatus = ConnectionStatus()
     @Published private(set) var projects: [RACPProjectSummary] = []
     @Published private(set) var sessions: [RACPSessionSummary] = []
     @Published private(set) var info: RACPServerInfo?
@@ -117,6 +167,8 @@ final class ConnectionModel: ObservableObject {
     /// Invoked when the loopback PI-adaptor port is discovered over SSH so the owner
     /// (AppModel) can persist it onto the host record.
     var onResolvedHostPort: ((UUID, Int) -> Void)?
+    var onDirectVerified: ((UUID, String, String) -> Void)?
+    var onBootstrapPairingCommit: ((BootstrapPairingCommit) async -> Bool)?
     @Published private(set) var hasLoadedCatalog = false
     @Published private(set) var isRefreshingCatalog = false
     @Published private(set) var catalogError: String?
@@ -128,6 +180,9 @@ final class ConnectionModel: ObservableObject {
     private var client: RACPClient?
     var activeClient: RACPClient? { client }
     private var updateTask: Task<Void, Never>?
+    private var statusTask: Task<Void, Never>?
+    private var candidateClient: RACPClient?
+    private var candidateTask: Task<Void, Never>?
     private var hostCatalogRefreshTask: Task<Void, Never>?
     private var hostCatalogRefreshToken: UUID?
     private var hostCatalogRefreshPending = false
@@ -166,6 +221,207 @@ final class ConnectionModel: ObservableObject {
     private var fixtureSupportsRevoke = false
     /// 安装时解析最新稳定版；UI 测试夹具不访问网络。
     private let releaseCatalog: any AdaptorReleaseResolving
+    private var installOutcomes: [UUID: AdaptorInstallRunOutcome] = [:]
+    private var pendingBootstrapTransports: [UUID: (
+        attemptId: String,
+        transport: SSHTransport?,
+        trust: BootstrapDirectTrust?
+    )] = [:]
+
+    func installOutcome(hostID: UUID, attemptId: String) -> AdaptorInstallRunOutcome? {
+        guard let outcome = installOutcomes[hostID], outcome.attemptId == attemptId else { return nil }
+        return outcome
+    }
+
+    /// Explicit user choice after a direct failure. Only now may bootstrap SSH close.
+    func completeInstallSSHOnly(hostID: UUID, attemptId: String) async {
+        guard let pending = pendingBootstrapTransports[hostID], pending.attemptId == attemptId else { return }
+        pendingBootstrapTransports.removeValue(forKey: hostID)
+#if DEBUG
+        if let clearDirectTrustExecutorForTesting {
+            await clearDirectTrustExecutorForTesting(attemptId)
+        } else if let transport = pending.transport {
+            _ = try? await transport.exec(
+                BootstrapRemoteCommand.clearDirectTrust(attemptId: attemptId),
+                stdin: nil,
+                timeout: 15
+            )
+            await transport.close()
+        }
+        if pending.transport == nil {
+            await transportCloseExecutorForTesting?()
+        }
+#else
+        if let transport = pending.transport {
+            _ = try? await transport.exec(
+                BootstrapRemoteCommand.clearDirectTrust(attemptId: attemptId),
+                stdin: nil,
+                timeout: 15
+            )
+            await transport.close()
+        }
+#endif
+        if let old = installOutcomes[hostID], old.attemptId == attemptId {
+            installOutcomes[hostID] = AdaptorInstallRunOutcome(
+                result: old.result,
+                releaseVersion: old.releaseVersion,
+                attemptId: old.attemptId,
+                releaseSource: old.releaseSource,
+                adaptorHostId: old.adaptorHostId,
+                directEndpoint: old.directEndpoint,
+                directVerified: false,
+                directError: old.directError,
+                requiresSSHOnlyConfirmation: false
+            )
+        }
+    }
+
+    /// Retries only the direct socket validation, never install/pair/revoke/staging.
+    func retryBootstrapDirect(
+        record: HostRecord,
+        attemptId: String
+    ) async -> AdaptorInstallRunOutcome? {
+        guard let pending = pendingBootstrapTransports[record.id], pending.attemptId == attemptId,
+              let old = installOutcomes[record.id], old.attemptId == attemptId,
+              let endpoint = old.directEndpoint,
+              let adaptorHostId = old.adaptorHostId
+        else { return nil }
+        let verification: (verified: Bool, error: String?)
+#if DEBUG
+        if let retryBootstrapDirectHandlerForTesting {
+            verification = await retryBootstrapDirectHandlerForTesting(record, pending.trust, adaptorHostId)
+        } else {
+            verification = await attemptBootstrapDirect(
+                record: record,
+                endpoint: endpoint,
+                trust: pending.trust,
+                expectedHostId: adaptorHostId
+            )
+        }
+#else
+        verification = await attemptBootstrapDirect(
+            record: record,
+            endpoint: endpoint,
+            trust: pending.trust,
+            expectedHostId: adaptorHostId
+        )
+#endif
+        let requiresConfirmation = !verification.verified && verification.error != nil
+        let outcome = AdaptorInstallRunOutcome(
+            result: old.result,
+            releaseVersion: old.releaseVersion,
+            attemptId: old.attemptId,
+            releaseSource: old.releaseSource,
+            adaptorHostId: old.adaptorHostId,
+            directEndpoint: old.directEndpoint,
+            directVerified: verification.verified,
+            directError: verification.error,
+            requiresSSHOnlyConfirmation: requiresConfirmation
+        )
+        installOutcomes[record.id] = outcome
+        if verification.verified {
+            pendingBootstrapTransports.removeValue(forKey: record.id)
+#if DEBUG
+            if let clearDirectTrustExecutorForTesting {
+                await clearDirectTrustExecutorForTesting(attemptId)
+            } else if let transport = pending.transport {
+                _ = try? await transport.exec(
+                    BootstrapRemoteCommand.clearDirectTrust(attemptId: attemptId),
+                    stdin: nil,
+                    timeout: 15
+                )
+                await transport.close()
+            }
+            if pending.transport == nil {
+                await transportCloseExecutorForTesting?()
+            }
+#else
+            if let transport = pending.transport {
+                _ = try? await transport.exec(
+                    BootstrapRemoteCommand.clearDirectTrust(attemptId: attemptId),
+                    stdin: nil,
+                    timeout: 15
+                )
+                await transport.close()
+            }
+#endif
+            onDirectVerified?(record.id, endpoint, adaptorHostId)
+        } else {
+            pendingBootstrapTransports[record.id] = (attemptId, pending.transport, pending.trust)
+        }
+        return outcome
+    }
+
+#if DEBUG
+    var retryBootstrapDirectHandlerForTesting: (
+        (HostRecord, BootstrapDirectTrust?, String) async -> (verified: Bool, error: String?)
+    )?
+    var installAdaptorCallCountForTesting = 0
+    var clearDirectTrustExecutorForTesting: ((String) async -> Void)?
+    var transportCloseExecutorForTesting: (() async -> Void)?
+    var bootstrapDirectValidationHandlerForTesting: (() async -> (verified: Bool, error: String?))?
+
+    func attemptBootstrapDirectForTesting(
+        record: HostRecord,
+        endpoint: String,
+        trust: BootstrapDirectTrust?,
+        expectedHostId: String?
+    ) async -> (verified: Bool, error: String?) {
+        await attemptBootstrapDirect(
+            record: record,
+            endpoint: endpoint,
+            trust: trust,
+            expectedHostId: expectedHostId
+        )
+    }
+
+    func installBootstrapRetryOutcomeForTesting(
+        hostID: UUID,
+        outcome: AdaptorInstallRunOutcome,
+        trust: BootstrapDirectTrust?
+    ) {
+        installOutcomes[hostID] = outcome
+        pendingBootstrapTransports[hostID] = (outcome.attemptId, nil, trust)
+    }
+#endif
+
+#if DEBUG
+    var disconnectFlushDelayForTesting: TimeInterval = 0
+    var candidatePostPromotionDelayForTesting: TimeInterval = 0
+    var beforeOldStatusCheckForTesting: (() async -> Void)?
+    var skipCandidateRestoreForTesting = false
+    var connectionGenerationForTesting: Int { connectionGeneration }
+    var candidateClientForTesting: RACPClient? { candidateClient }
+
+    func installConnectionPiecesForTesting(
+        oldClient: RACPClient,
+        candidate: RACPClient,
+        hostID: UUID
+    ) {
+        client = oldClient
+        candidateClient = candidate
+        cacheHostID = hostID
+        state = .online
+        connectionStatus = ConnectionStatus(phase: .online(.ssh), activeRoute: .ssh)
+    }
+
+    func runDirectCandidateForTesting(
+        candidate: RACPClient,
+        stream: AsyncStream<RACPClientUpdate>,
+        record: HostRecord
+    ) async {
+        await runDirectCandidate(
+            candidate,
+            stream: stream,
+            record: record,
+            endpoint: record.directEndpoint ?? "",
+            adaptorHostId: record.adaptorHostId ?? "",
+            brokerID: UUID(),
+            intent: connectionIntentGeneration,
+            expectedGeneration: connectionGeneration
+        )
+    }
+#endif
 
     init(fixture: UITestFixture? = nil, releaseCatalog: (any AdaptorReleaseResolving)? = nil) {
         self.releaseCatalog = releaseCatalog
@@ -196,6 +452,7 @@ final class ConnectionModel: ObservableObject {
             if let fixtureConnectionState {
                 state = fixtureConnectionState
             }
+            connectionStatus = fixture.connectionStatus ?? ConnectionStatus()
         } else {
             cacheStore = SessionCacheStore(offlineCacheLimit: PersistedState.defaultOfflineCacheLimit)
             session = SessionController()
@@ -339,12 +596,22 @@ final class ConnectionModel: ObservableObject {
         releaseVersion: String? = nil,
         /// 强制重装：忽略 PI-adaptor install receipt，重新下载、校验并激活。
         force: Bool = false,
+        direct: BootstrapDirectConfiguration? = nil,
+        directEndpoint: String? = nil,
+        authorizeDirectPin: Bool = false,
+        directTrustAuthorizer: (@Sendable (BootstrapDirectTrust) async -> Bool)? = nil,
         /// 版本解析完成时回调，用于在安装页显示本次目标版本与回退原因。
         onReleaseResolved: ((AdaptorReleaseResolution) -> Void)? = nil,
         eventHandler: BootstrapRunner.EventHandler? = nil
     ) async throws -> AdaptorInstallRunOutcome {
+#if DEBUG
+        installAdaptorCallCountForTesting += 1
+#endif
         guard (1...65_535).contains(port) else {
             throw BootstrapScriptError.invalidPort
+        }
+        if let previous = pendingBootstrapTransports.removeValue(forKey: record.id) {
+            await previous.transport?.close()
         }
         await recoverStagedPairings(record: record)
         let account = KeychainStore.account(
@@ -362,7 +629,13 @@ final class ConnectionModel: ObservableObject {
             account: account
         )
         let transport = connection.transport
-        defer { releaseHostKeyBroker(connection.operationID) }
+        var preserveBootstrapTransport = false
+        defer {
+            releaseHostKeyBroker(connection.operationID)
+            if !preserveBootstrapTransport {
+                Task { await transport.close() }
+            }
+        }
 
         let probe: SSHExecResult
         do {
@@ -433,7 +706,8 @@ final class ConnectionModel: ObservableObject {
             attemptId: attemptId,
             hostArchitecture: identity.architecture,
             port: port,
-            force: force
+            force: force,
+            direct: direct
         )
         // Keep the newly issued token in memory until runtime identity and
         // version have been proven. A failed reinstall therefore cannot
@@ -451,18 +725,60 @@ final class ConnectionModel: ObservableObject {
                 }
             }
         )
-        let verificationAdapter = BootstrapInstallVerificationAdapter()
+        let attemptState = BootstrapDirectAttemptState()
+        let verificationAdapter = BootstrapInstallVerificationAdapter(
+            verify: { commandTransport, hostPort, device in
+                guard let ssh = commandTransport as? SSHTransport else {
+                    throw BootstrapInstallAdapterError.requiresSSHTransport
+                }
+                let identity = try await RACPClient.verifyDeviceIdentity(
+                    using: ssh,
+                    hostPort: hostPort,
+                    deviceToken: device.deviceToken
+                )
+                attemptState.setHostId(identity.adaptorHostId)
+                return identity.serverInfo
+            }
+        )
         let runner = BootstrapRunner(
             transport: transport,
             pairing: pairingAdapter,
             verifier: verificationAdapter,
-            eventHandler: eventHandler
+            eventHandler: { event in
+                await eventHandler?(event)
+                if case .verificationCompleted = event {
+                    do {
+                        let response = try await transport.exec(
+                            BootstrapRemoteCommand.readDirectTrust(attemptId: attemptId),
+                            stdin: nil,
+                            timeout: 20
+                        )
+                        guard response.exitStatus == 0 else {
+                            attemptState.setTrustError("DIRECT_TRUST_INVALID")
+                            return
+                        }
+                        let text = response.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if text.isEmpty {
+                            attemptState.setTrust(nil)
+                        } else {
+                            let trust = try BootstrapDirectTrust.parse(
+                                data: Data(text.utf8),
+                                expectedAttemptId: attemptId
+                            )
+                            attemptState.setTrust(trust)
+                        }
+                    } catch {
+                        attemptState.setTrustError("DIRECT_TRUST_INVALID")
+                    }
+                }
+            }
         )
         let result: BootstrapRunResult
         do {
             result = try await runner.run(
                 configuration: scriptConfiguration,
-                deviceLabel: UIDevice.current.name
+                deviceLabel: UIDevice.current.name,
+                keepTransportOpen: true
             )
         } catch {
             await revokeStagedPairingBestEffort(
@@ -494,12 +810,156 @@ final class ConnectionModel: ObservableObject {
             )
             KeychainStore.clearStagedPairing(hostID: record.id, attemptId: attemptId)
         }
-        return AdaptorInstallRunOutcome(
+        let identityState = attemptState.current
+        var directVerified = false
+        var directError = identityState.error
+        var pairingCommitFailed = false
+        if case .succeeded = result,
+           let adaptorHostId = identityState.hostId,
+           let onBootstrapPairingCommit {
+            let committed = await onBootstrapPairingCommit(
+                BootstrapPairingCommit(
+                    hostID: record.id,
+                    adaptorHostId: adaptorHostId,
+                    port: port,
+                    version: release.version,
+                    attemptId: attemptId,
+                    releaseSource: resolution.source
+                )
+            )
+            if !committed {
+                pairingCommitFailed = true
+                directError = "配对记录与 hostId 未能写入本机，已阻止 direct 首验"
+            }
+        }
+        let canonicalEndpoint = directEndpoint.flatMap { HostValidator.canonicalDirectEndpoint($0) }
+        if directEndpoint != nil && canonicalEndpoint == nil {
+            directError = "direct endpoint 不合法"
+        }
+        var didRejectDirect = false
+        let wantsDirect = !pairingCommitFailed && canonicalEndpoint != nil
+            && (authorizeDirectPin || directTrustAuthorizer != nil)
+        var directAuthorized = authorizeDirectPin
+        if wantsDirect, let trust = identityState.trust, let directTrustAuthorizer {
+            directAuthorized = await directTrustAuthorizer(trust)
+            didRejectDirect = !directAuthorized
+            if didRejectDirect { directError = nil }
+        }
+        if wantsDirect, identityState.trust == nil, !didRejectDirect {
+            directError = "DIRECT_TRUST_INVALID"
+        }
+        let shouldAttemptDirect = wantsDirect && directAuthorized && identityState.trust != nil
+        if case .succeeded = result, shouldAttemptDirect, let canonicalEndpoint {
+            let verification = await attemptBootstrapDirect(
+                record: record,
+                endpoint: canonicalEndpoint,
+                trust: identityState.trust,
+                expectedHostId: identityState.hostId
+            )
+            directVerified = verification.verified
+            directError = verification.error
+        }
+        if !shouldAttemptDirect || directVerified {
+            _ = try? await transport.exec(
+                BootstrapRemoteCommand.clearDirectTrust(attemptId: attemptId),
+                stdin: nil,
+                timeout: 15
+            )
+        }
+        var installSucceeded = false
+        if case .succeeded = result { installSucceeded = true }
+        let requiresConfirmation = wantsDirect && installSucceeded && !didRejectDirect && directError != nil
+        if requiresConfirmation {
+            pendingBootstrapTransports[record.id] = (attemptId, transport, identityState.trust)
+            preserveBootstrapTransport = true
+        }
+        let outcome = AdaptorInstallRunOutcome(
             result: result,
             releaseVersion: release.version,
             attemptId: attemptId,
-            releaseSource: resolution.source
+            releaseSource: resolution.source,
+            adaptorHostId: identityState.hostId,
+            directEndpoint: canonicalEndpoint,
+            directVerified: directVerified,
+            directError: directError,
+            requiresSSHOnlyConfirmation: requiresConfirmation
         )
+        installOutcomes[record.id] = outcome
+        return outcome
+    }
+
+    private func attemptBootstrapDirect(
+        record: HostRecord,
+        endpoint: String,
+        trust: BootstrapDirectTrust?,
+        expectedHostId: String?
+    ) async -> (verified: Bool, error: String?) {
+        guard let trust else { return (false, "DIRECT_TRUST_INVALID") }
+        guard let expectedHostId, trust.hostId == expectedHostId else {
+            return (false, "direct trust hostId 与认证 ping 不一致")
+        }
+        let now = Date()
+        guard trust.notBefore <= now, trust.notAfter >= now else {
+            return (false, "direct 证书不在有效期内")
+        }
+        guard let token = KeychainStore.loadDeviceToken(hostID: record.id),
+              token.hasPrefix("pdt2.") else {
+            return (false, "缺少已提升的 pdt2")
+        }
+        let pin = DirectTLSTrustPin(
+            hostId: expectedHostId,
+            certificateSHA256: trust.certificateSHA256,
+            authorizedAt: now
+        )
+#if DEBUG
+        if let bootstrapDirectValidationHandlerForTesting {
+            let result = await bootstrapDirectValidationHandlerForTesting()
+            if result.verified {
+                guard KeychainStore.saveDirectTLSTrustPin(pin, hostID: record.id) else {
+                    return (false, "direct pin 未能写入 Keychain")
+                }
+            }
+            return result
+        }
+#endif
+        let account = KeychainStore.account(username: record.username, host: record.host, port: record.port)
+        let (operationID, promptBroker) = makeHostKeyBroker(account: account, address: record.address)
+        defer { releaseHostKeyBroker(operationID) }
+        guard let url = URL(string: endpoint) else { return (false, "direct endpoint 不合法") }
+        let client = RACPClient(
+            configuration: RACPConfiguration(
+                ssh: nil,
+                hostPort: nil,
+                deviceToken: token,
+                connectionPreference: .directPreferred,
+                direct: DirectRACPConfiguration(
+                    endpoint: url,
+                    certificateSHA256: trust.certificateSHA256,
+                    adaptorHostId: expectedHostId
+                )
+            ),
+            confirmer: promptBroker
+        )
+        do {
+            let updates = await client.start()
+            for await update in updates {
+                if case .state(.online) = update {
+                    guard KeychainStore.saveDirectTLSTrustPin(pin, hostID: record.id) else {
+                        await client.stop()
+                        return (false, "direct pin 未能写入 Keychain")
+                    }
+                    await client.stop()
+                    return (true, nil)
+                }
+                if case .state(.offline(let reason)) = update {
+                    throw RACPClientError.protocolMismatch(reason ?? "direct 首验失败")
+                }
+            }
+            throw RACPClientError.notConnected
+        } catch {
+            await client.stop()
+            return (false, error.localizedDescription)
+        }
     }
 
     /// Best-effort cleanup for a failed install. The active PI-adaptor token is never
@@ -686,40 +1146,28 @@ final class ConnectionModel: ObservableObject {
 
     // MARK: - 模型服务
 
-    /// Probe the provider's `/models` endpoint from the SSH host. The API key is
-    /// sent over SSH stdin and never enters a command line, URL, or log.
+    /// Ad-hoc discovery uses only the active host-bound RACP client. The temporary
+    /// API key is confined to that request payload and never enters SSH argv/logs.
     func discoverModels(
         record: HostRecord,
         baseURL: String,
         apiKey: String
     ) async throws -> [DiscoveredModel] {
-        let deadline = Date().addingTimeInterval(RemoteProviderOperations.userVisibleTimeout)
-        let account = KeychainStore.account(username: record.username, host: record.host, port: record.port)
-        guard let credential = KeychainStore.loadCredential(account: account) else {
-            throw ConnectionPairingError.missingCredential
+        guard cacheHostID == record.id, state.isOnline, let client else {
+            throw RACPV2Error.notConnected
         }
-        let url = try ModelListParser.modelsURL(baseURL: baseURL)
-        let connection = try await connectSSH(
-            record: record,
-            credential: credential,
-            account: account,
-            timeout: remainingProviderBudget(deadline)
-        )
-        let transport = connection.transport
-        defer { releaseHostKeyBroker(connection.operationID) }
-        do {
-            let models = try await RemoteProviderOperations.discoverModels(
-                transport: transport,
-                requestURL: url,
-                apiKey: apiKey,
-                timeout: remainingProviderBudget(deadline)
+        guard info?.capabilities?.value(at: ["providerDiscovery"])?.boolValue == true else {
+            throw RACPV2Error.server(
+                code: RACPErrorCode.capabilityUnavailable.rawValue,
+                message: "PI-adaptor 未声明 providerDiscovery 能力"
             )
-            await transport.close()
-            return models
-        } catch {
-            await transport.close()
-            throw error
         }
+        return try await RemoteProviderOperations.discoverModels(
+            client: client,
+            requestURL: baseURL,
+            apiKey: apiKey,
+            timeout: RemoteProviderOperations.userVisibleTimeout
+        )
     }
 
     func importProvider(
@@ -1348,27 +1796,53 @@ final class ConnectionModel: ObservableObject {
             return
         }
         let account = KeychainStore.account(username: record.username, host: record.host, port: record.port)
-        guard let credential = KeychainStore.loadCredential(account: account) else {
-            state = .offline(reason: "本机没有保存这台服务器的凭证：请先在服务器页「保存并测试连接」")
-            return
-        }
         guard let token = KeychainStore.loadDeviceToken(hostID: record.id) else {
             state = .offline(reason: "本机没有设备令牌：请到服务器页用一次性令牌完成配对")
             return
         }
-        let pinned = KeychainStore.loadHostKey(account: account)
-        guard let hostPort = await resolveHostPort(
-            record: record,
-            credential: credential,
-            account: account,
-            pinned: pinned
-        ) else {
-            state = .offline(reason: "无法确定 PI-adaptor 端口：SSH 探测失败且未记录端口")
+        let preference = record.connectionPreference
+        var directConfiguration: DirectRACPConfiguration?
+        if preference == .directPreferred {
+            guard let endpointText = record.directEndpoint,
+                  let endpoint = URL(string: endpointText),
+                  let adaptorHostId = record.adaptorHostId,
+                  let pin = KeychainStore.loadDirectTLSTrustPin(hostID: record.id),
+                  pin.hostId == adaptorHostId,
+                  token.hasPrefix("pdt2.")
+            else {
+                state = .offline(reason: "direct 配置缺少已授权 pin、endpoint、hostId 或 pdt2，不能直连")
+                return
+            }
+            directConfiguration = DirectRACPConfiguration(
+                endpoint: endpoint,
+                certificateSHA256: pin.certificateSHA256,
+                adaptorHostId: adaptorHostId
+            )
+        }
+
+        let credential = KeychainStore.loadCredential(account: account)
+        if preference == .sshOnly, credential == nil {
+            state = .offline(reason: "本机没有保存这台服务器的凭证：请先在服务器页「保存并测试连接」")
             return
         }
-        // `resolveHostPort` 是一次跨 await 的端口探测：期间用户可能已切到另一台
-        // PI-adaptor。安装 client 前必须重新核对连接意图与 PI-adaptor 身份，否则 A 的迟到结果
-        // 会取代 B，使界面上的当前 PI-adaptor 与实际连接错位。
+        let pinned = KeychainStore.loadHostKey(account: account)
+        var hostPort = record.hostPort
+        if preference == .sshOnly {
+            guard let credential else {
+                state = .offline(reason: "本机没有保存这台服务器的凭证")
+                return
+            }
+            hostPort = await resolveHostPort(
+                record: record,
+                credential: credential,
+                account: account,
+                pinned: pinned
+            )
+            guard hostPort != nil else {
+                state = .offline(reason: "无法确定 PI-adaptor 端口：SSH 探测失败且未记录端口")
+                return
+            }
+        }
         guard intent == connectionIntentGeneration, cacheHostID == record.id else { return }
         let (operationID, promptBroker) = makeHostKeyBroker(
             account: account,
@@ -1376,16 +1850,21 @@ final class ConnectionModel: ObservableObject {
         )
         connectionBrokerID = operationID
         connectedAccount = account
-        let configuration = RACPConfiguration(
-            ssh: SSHConnectionRequest(
+        let sshRequest = credential.map {
+            SSHConnectionRequest(
                 host: record.host,
                 port: record.port,
                 username: record.username,
-                credential: credential,
+                credential: $0,
                 pinnedHostKey: pinned
-            ),
+            )
+        }
+        let configuration = RACPConfiguration(
+            ssh: sshRequest,
             hostPort: hostPort,
-            deviceToken: token
+            deviceToken: token,
+            connectionPreference: preference,
+            direct: directConfiguration
         )
         let newClient = RACPClient(configuration: configuration, confirmer: promptBroker)
         client = newClient
@@ -1404,6 +1883,236 @@ final class ConnectionModel: ObservableObject {
             for await update in stream {
                 await self?.apply(update, client: newClient, generation: generation)
             }
+        }
+        let statusStream = await newClient.statusStream()
+        statusTask = Task { [weak self] in
+            for await next in statusStream {
+                guard let self, self.client === newClient, self.connectionGeneration == generation else {
+                    return
+                }
+                self.connectionStatus = next
+            }
+        }
+    }
+
+    /// Starts a direct candidate while the old SSH client remains active and readable.
+    /// Only a successful final C1 replay can atomically replace the active generation.
+    func retryDirect(record: HostRecord) async {
+        guard client != nil, state.isOnline, connectionStatus.activeRoute == .ssh,
+              candidateClient == nil, cacheHostID == record.id,
+              let token = KeychainStore.loadDeviceToken(hostID: record.id), token.hasPrefix("pdt2."),
+              let endpointText = record.directEndpoint,
+              let endpoint = URL(string: endpointText),
+              let adaptorHostId = record.adaptorHostId,
+              let pin = KeychainStore.loadDirectTLSTrustPin(hostID: record.id),
+              pin.hostId == adaptorHostId
+        else {
+            lastError = "direct candidate 缺少已验证 endpoint、pin、hostId 或活动 SSH 连接"
+            return
+        }
+        let (operationID, promptBroker) = makeHostKeyBroker(
+            account: KeychainStore.account(username: record.username, host: record.host, port: record.port),
+            address: record.address
+        )
+        let candidate = RACPClient(
+            configuration: RACPConfiguration(
+                ssh: nil,
+                hostPort: nil,
+                deviceToken: token,
+                connectionPreference: .directPreferred,
+                direct: DirectRACPConfiguration(
+                    endpoint: endpoint,
+                    certificateSHA256: pin.certificateSHA256,
+                    adaptorHostId: adaptorHostId
+                )
+            ),
+            confirmer: promptBroker
+        )
+        let candidateIntent = connectionIntentGeneration
+        let expectedGeneration = connectionGeneration
+        candidateClient = candidate
+        let stream = await candidate.start()
+        guard connectionIntentGeneration == candidateIntent,
+              connectionGeneration == expectedGeneration,
+              candidateClient === candidate
+        else {
+            await candidate.stop()
+            releaseHostKeyBroker(operationID)
+            return
+        }
+        candidateTask = Task { [weak self] in
+            await self?.runDirectCandidate(
+                candidate,
+                stream: stream,
+                record: record,
+                endpoint: endpointText,
+                adaptorHostId: adaptorHostId,
+                brokerID: operationID,
+                intent: candidateIntent,
+                expectedGeneration: expectedGeneration
+            )
+        }
+    }
+
+    private func runDirectCandidate(
+        _ candidate: RACPClient,
+        stream: AsyncStream<RACPClientUpdate>,
+        record: HostRecord,
+        endpoint: String,
+        adaptorHostId: String,
+        brokerID: UUID,
+        intent: Int,
+        expectedGeneration: Int
+    ) async {
+        guard let oldClient = client else {
+            await candidate.stop()
+            releaseHostKeyBroker(brokerID)
+            return
+        }
+        let oldGeneration = expectedGeneration
+        let oldActiveGeneration = await oldClient.connectionStatus().activeGeneration
+        var didInstallCandidate = false
+        do {
+            var reachedInitialOnline = false
+            for await update in stream {
+                if case .state(.online) = update {
+                    reachedInitialOnline = true
+                    break
+                }
+                if case .state(.offline(let reason)) = update {
+                    throw RACPClientError.protocolMismatch(reason ?? "direct candidate 未能上线")
+                }
+            }
+            guard reachedInitialOnline,
+                  !Task.isCancelled,
+                  client === oldClient,
+                  candidateClient === candidate,
+                  connectionGeneration == oldGeneration,
+                  connectionIntentGeneration == intent,
+                  cacheHostID == record.id
+            else { throw ConnectionLifecycleError.connectionChanged }
+
+            await oldClient.setPromotionFenced(true)
+            let context = await oldClient.recoveryContext()
+#if DEBUG
+            if !skipCandidateRestoreForTesting {
+                _ = try await candidate.restoreRecoveryContext(context)
+            }
+#else
+            _ = try await candidate.restoreRecoveryContext(context)
+#endif
+            guard !Task.isCancelled,
+                  client === oldClient,
+                  candidateClient === candidate,
+                  connectionGeneration == oldGeneration,
+                  connectionIntentGeneration == intent,
+                  cacheHostID == record.id
+            else { throw ConnectionLifecycleError.connectionChanged }
+
+            func assertCandidateContext() throws {
+                guard !Task.isCancelled,
+                      client === oldClient,
+                      candidateClient === candidate,
+                      connectionGeneration == oldGeneration,
+                      connectionIntentGeneration == intent,
+                      cacheHostID == record.id
+                else { throw ConnectionLifecycleError.connectionChanged }
+            }
+            let candidateStatus = await candidate.connectionStatus()
+            try assertCandidateContext()
+            let candidateInfo = await candidate.info()
+            try assertCandidateContext()
+            let candidateStatusStream = await candidate.statusStream()
+            try assertCandidateContext()
+#if DEBUG
+            await beforeOldStatusCheckForTesting?()
+#endif
+            let oldStatus = await oldClient.connectionStatus()
+            try assertCandidateContext()
+            guard oldStatus.activeGeneration == oldActiveGeneration,
+                  oldStatus.activeRoute == .ssh,
+                  oldStatus.phase == .online(.ssh)
+            else { throw ConnectionLifecycleError.connectionChanged }
+
+            // Atomic pointer exchange: no old-view mutation happened above.
+            connectionGeneration &+= 1
+            let generation = connectionGeneration
+            updateTask?.cancel()
+            statusTask?.cancel()
+            cacheClientID = UUID()
+            client = candidate
+            candidateClient = nil
+            didInstallCandidate = true
+            session.bind(client: candidate, online: true)
+            connectionStatus = candidateStatus
+            info = candidateInfo
+            state = .online
+            connectionBrokerID = brokerID
+#if DEBUG
+            if candidatePostPromotionDelayForTesting > 0 {
+                try? await Task.sleep(for: .milliseconds(Int(candidatePostPromotionDelayForTesting * 1000)))
+            }
+#endif
+            guard !Task.isCancelled,
+                  client === candidate,
+                  connectionGeneration == generation,
+                  connectionIntentGeneration == intent
+            else { throw ConnectionLifecycleError.connectionChanged }
+            await oldClient.stop()
+            guard !Task.isCancelled,
+                  client === candidate,
+                  connectionGeneration == generation,
+                  connectionIntentGeneration == intent
+            else { throw ConnectionLifecycleError.connectionChanged }
+            onDirectVerified?(record.id, endpoint, adaptorHostId)
+            updateTask = Task { [weak self] in
+                for await update in stream {
+                    await self?.apply(update, client: candidate, generation: generation)
+                }
+            }
+            statusTask = Task { [weak self] in
+                for await next in candidateStatusStream {
+                    guard let self, self.client === candidate, self.connectionGeneration == generation else {
+                        return
+                    }
+                    self.connectionStatus = next
+                }
+            }
+            candidateTask = nil
+        } catch {
+            await oldClient.setPromotionFenced(false)
+            if !didInstallCandidate {
+                let previousStatus = await oldClient.connectionStatus()
+                if client === oldClient,
+                   connectionGeneration == oldGeneration,
+                   connectionIntentGeneration == intent {
+                    connectionStatus = previousStatus
+                    switch previousStatus.phase {
+                    case .online:
+                        state = .online
+                        session.bind(client: oldClient, online: true)
+                    case .reconnecting(_, let attempt, let delay):
+                        state = .reconnecting(
+                            attempt: attempt,
+                            delay: delay,
+                            reason: error.localizedDescription
+                        )
+                        session.bind(client: oldClient, online: false)
+                    default:
+                        state = .offline(reason: error.localizedDescription)
+                        session.bind(client: oldClient, online: false)
+                    }
+                    lastError = error.localizedDescription
+                }
+            } else {
+                await oldClient.stop()
+            }
+            await candidate.stop()
+            if candidateClient === candidate {
+                candidateClient = nil
+                candidateTask = nil
+            }
+            releaseHostKeyBroker(brokerID)
         }
     }
 
@@ -1428,22 +2137,29 @@ final class ConnectionModel: ObservableObject {
         expectedHostID: UUID? = nil
     ) async {
         let generation = connectionGeneration
-        await flushPendingCacheWrites()
         guard expectedIntent == connectionIntentGeneration,
               connectionGeneration == generation,
               expectedHostID == nil || cacheHostID == expectedHostID
         else { return }
+
+        // Invalidate synchronously before any await: a delayed cache flush can never
+        // leave a candidate promoted into an already disconnected UI generation.
         connectionGeneration &+= 1
+        let invalidatedGeneration = connectionGeneration
         cacheClientID = UUID()
         invalidateCatalogLoads()
         cancelHostCatalogRefresh()
         updateTask?.cancel()
         updateTask = nil
+        statusTask?.cancel()
+        statusTask = nil
+        candidateTask?.cancel()
+        candidateTask = nil
+        let oldCandidate = candidateClient
+        candidateClient = nil
         let oldClient = client
         client = nil
-        for broker in brokers.values {
-            broker.cancel()
-        }
+        for broker in brokers.values { broker.cancel() }
         hostKeyPrompt = nil
         if let connectionBrokerID {
             brokers.removeValue(forKey: connectionBrokerID)
@@ -1451,15 +2167,27 @@ final class ConnectionModel: ObservableObject {
         connectionBrokerID = nil
         session.bind(client: nil, online: false)
         connectedAccount = nil
-        projects = []
-        sessions = []
-        info = nil
-        hasLoadedCatalog = false
-        catalogError = nil
+        connectionStatus = ConnectionStatus()
         state = .offline(reason: nil)
-        if let oldClient {
-            await oldClient.stop()
+        let candidateStop = Task { await oldCandidate?.stop() }
+        let activeStop = Task { await oldClient?.stop() }
+
+#if DEBUG
+        if disconnectFlushDelayForTesting > 0 {
+            try? await Task.sleep(for: .milliseconds(Int(disconnectFlushDelayForTesting * 1000)))
         }
+#endif
+        await flushPendingCacheWrites()
+        if expectedIntent == connectionIntentGeneration,
+           connectionGeneration == invalidatedGeneration {
+            projects = []
+            sessions = []
+            info = nil
+            hasLoadedCatalog = false
+            catalogError = nil
+        }
+        _ = await candidateStop.value
+        _ = await activeStop.value
     }
 
     func waitUntilOnline(timeout: TimeInterval = 30) async -> Bool {
@@ -1636,6 +2364,12 @@ final class ConnectionModel: ObservableObject {
             }
         case .ready(let serverInfo):
             info = serverInfo
+        case .hostSnapshot(let remoteProjects, let remoteSessions):
+            projects = remoteProjects
+            sessions = remoteSessions
+            hasLoadedCatalog = true
+            catalogError = nil
+            reconcileOfflineCache(with: remoteSessions)
         case .hostChanged:
             scheduleHostCatalogRefresh(client: client, generation: generation)
         case .sessionChanged:

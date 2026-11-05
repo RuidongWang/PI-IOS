@@ -24,10 +24,17 @@ extension View {
             title,
             isPresented: Binding(
                 get: { message.wrappedValue != nil },
-                set: { if !$0 { message.wrappedValue = nil } }
+                set: { presented in
+                    guard !presented, message.wrappedValue != nil else { return }
+                    // SwiftUI performs the dismissal inside a view update. Clearing
+                    // @Published/@State through this binding must happen afterwards.
+                    DispatchQueue.main.async {
+                        if message.wrappedValue != nil { message.wrappedValue = nil }
+                    }
+                }
             )
         ) {
-            Button("知道了") { message.wrappedValue = nil }
+            Button("知道了") {}
         } message: {
             Text(message.wrappedValue ?? "")
         }

@@ -101,6 +101,29 @@ final class AppModel: ObservableObject {
         connection.onResolvedHostPort = { [weak self] hostID, port in
             self?.applyDiscoveredHostPort(hostID: hostID, port: port)
         }
+        connection.onDirectVerified = { [weak self] hostID, endpoint, adaptorHostId in
+            _ = self?.markDirectVerified(
+                id: hostID,
+                endpoint: endpoint,
+                adaptorHostId: adaptorHostId
+            )
+        }
+        connection.onBootstrapPairingCommit = { [weak self] commit in
+            guard let self, let host = self.hosts.first(where: { $0.id == commit.hostID }) else {
+                return false
+            }
+            return self.completeAdaptorInstallation(
+                id: host.id,
+                expectedHost: host.host,
+                expectedPort: host.port,
+                expectedUsername: host.username,
+                port: commit.port,
+                version: commit.version,
+                attemptId: commit.attemptId,
+                releaseSource: commit.releaseSource.map { $0.isFallback ? .fallback : .latest },
+                adaptorHostId: commit.adaptorHostId
+            )
+        }
         observeTunnelState()
         observeRemoteMetadata()
         if usesUITestFixture {
@@ -801,7 +824,10 @@ final class AppModel: ObservableObject {
             pairedAt: nil,
             tunnelUpAt: nil,
             hostPort: Int(draft.hostPort.piTrimmed),
-            keyFileName: draft.keyFileName
+            keyFileName: draft.keyFileName,
+            connectionPreference: .sshOnly,
+            directEndpoint: HostValidator.canonicalDirectEndpoint(draft.directEndpoint),
+            adaptorHostId: nil
         )
         hosts.append(record)
         persist()
@@ -819,6 +845,7 @@ final class AppModel: ObservableObject {
         let previousPort = hosts[index].port
         let previousUsername = hosts[index].username
         let previousHostPort = hosts[index].hostPort
+        let previousDirectEndpoint = hosts[index].directEndpoint
         let previousAuthKind = hosts[index].authKind
         let wasCurrent = hosts[index].isCurrent
         let previousAccount = KeychainStore.account(
@@ -837,6 +864,20 @@ final class AppModel: ObservableObject {
         hosts[index].authKind = draft.authKind
         hosts[index].hostPort = Int(draft.hostPort.piTrimmed)
         hosts[index].keyFileName = draft.keyFileName
+        let newDirectEndpoint = HostValidator.canonicalDirectEndpoint(draft.directEndpoint)
+        hosts[index].directEndpoint = newDirectEndpoint
+        if previousDirectEndpoint != newDirectEndpoint {
+            // 配置可保存，但新 endpoint 必须重新完整验证；旧 pin/hostId 不被覆盖。
+            hosts[index].connectionPreference = .sshOnly
+        } else if draft.connectionPreference == .directPreferred,
+                  hosts[index].connectionPreference == .directPreferred,
+                  let hostId = hosts[index].adaptorHostId,
+                  KeychainStore.loadDirectTLSTrustPin(hostID: id)?.hostId == hostId {
+            hosts[index].connectionPreference = .directPreferred
+        } else {
+            // 表单不能直接制造“已验证”状态；启用只能由 markDirectVerified 完成。
+            hosts[index].connectionPreference = .sshOnly
+        }
         if (serverIdentityChanged || previousHostPort != hosts[index].hostPort
             || previousAuthKind != hosts[index].authKind),
            wasCurrent || pendingHostID == id {
@@ -844,6 +885,7 @@ final class AppModel: ObservableObject {
             if wasCurrent { foregroundResumeTracker.capture(nil) }
         }
         if previousHostPort != hosts[index].hostPort {
+            hosts[index].connectionPreference = .sshOnly
             hosts[index].pairedAt = nil
             hosts[index].tunnelUpAt = nil
             hosts[index].installReceipt = nil
@@ -858,6 +900,7 @@ final class AppModel: ObservableObject {
             )
         }
         if serverIdentityChanged {
+            hosts[index].connectionPreference = .sshOnly
             hosts[index].pairedAt = nil
             hosts[index].tunnelUpAt = nil
             hosts[index].installReceipt = nil
@@ -923,6 +966,7 @@ final class AppModel: ObservableObject {
             legacyAccount: account,
             deleteLegacy: !anotherHostUsesAccount
         )
+        KeychainStore.deleteDirectTLSTrustPin(hostID: id)
         clearHostDerivedData(id, detachSession: wasCurrent)
         hosts.removeAll { $0.id == id }
         if wasCurrent, !hosts.isEmpty {
@@ -995,10 +1039,33 @@ final class AppModel: ObservableObject {
     }
 
     /// 配对成功后更新本机记录；设备令牌本身只存 Keychain。
-    func markHostPaired(id: UUID) {
+    func markHostPaired(id: UUID, adaptorHostId: String? = nil) {
         guard let index = hosts.firstIndex(where: { $0.id == id }) else { return }
         hosts[index].pairedAt = Date()
+        if let adaptorHostId, !adaptorHostId.isEmpty {
+            hosts[index].adaptorHostId = adaptorHostId
+        }
         persist()
+    }
+
+    func setConnectionPreference(id: UUID, preference: ConnectionPreference) {
+        guard let index = hosts.firstIndex(where: { $0.id == id }) else { return }
+        // 只有 markDirectVerified 可以启用 directPreferred；切回 SSH 不删除任何信任或配对。
+        if preference == .directPreferred { return }
+        hosts[index].connectionPreference = .sshOnly
+        persist()
+    }
+
+    func markDirectVerified(id: UUID, endpoint: String, adaptorHostId: String) -> Bool {
+        guard let index = hosts.firstIndex(where: { $0.id == id }),
+              let canonical = HostValidator.canonicalDirectEndpoint(endpoint),
+              hosts[index].directEndpoint == canonical,
+              hosts[index].adaptorHostId == adaptorHostId,
+              KeychainStore.loadDirectTLSTrustPin(hostID: id)?.hostId == adaptorHostId,
+              KeychainStore.loadDeviceToken(hostID: id)?.hasPrefix("pdt2.") == true
+        else { return false }
+        hosts[index].connectionPreference = .directPreferred
+        return persist()
     }
 
     /// Bootstrap success is persisted only after the runner has paired, saved
@@ -1014,7 +1081,8 @@ final class AppModel: ObservableObject {
         version: String,
         attemptId: String,
         releaseSource: AdaptorInstallReleaseSource? = nil,
-        completedAt: Date = Date()
+        completedAt: Date = Date(),
+        adaptorHostId: String? = nil
     ) -> Bool {
         guard let index = hosts.firstIndex(where: { $0.id == id }) else { return false }
         guard hosts[index].host == expectedHost,
@@ -1023,8 +1091,25 @@ final class AppModel: ObservableObject {
             saveError = "安装完成时服务器身份已变化，未把旧安装结果写回当前记录"
             return false
         }
+        let outcome = connection.installOutcome(hostID: id, attemptId: attemptId)
         hosts[index].hostPort = port
         hosts[index].pairedAt = completedAt
+        let verifiedHostId = adaptorHostId ?? outcome?.adaptorHostId
+        if let verifiedHostId, !verifiedHostId.isEmpty {
+            hosts[index].adaptorHostId = verifiedHostId
+        }
+        if let endpoint = outcome?.directEndpoint {
+            hosts[index].directEndpoint = endpoint
+            hosts[index].connectionPreference = .sshOnly
+        }
+        if outcome?.directVerified == true,
+           let endpoint = outcome?.directEndpoint,
+           let hostId = outcome?.adaptorHostId,
+           hosts[index].adaptorHostId == hostId,
+           KeychainStore.loadDirectTLSTrustPin(hostID: id)?.hostId == hostId {
+            hosts[index].directEndpoint = endpoint
+            hosts[index].connectionPreference = .directPreferred
+        }
         hosts[index].installReceipt = AdaptorInstallReceipt(
             version: version,
             hostPort: port,

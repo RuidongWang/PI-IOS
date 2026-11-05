@@ -27,9 +27,20 @@ public enum RACPWebSocketError: Error, Equatable, CustomStringConvertible {
 /// §2.3：设备令牌放 `Authorization: Bearer <token>` 请求头（不进 URL、不进日志）。
 protocol RACPSocket: AnyObject {
     var inbound: AsyncStream<Data> { get }
+    /// 可等待的单次结构化终态；旧测试 socket 由默认实现兼容。
+    var terminationError: RACPSocketTermination { get async }
     func send(text: String) async throws
     func close() async
     func waitUntilClosed() async
+}
+
+extension RACPSocket {
+    var terminationError: RACPSocketTermination {
+        get async {
+            await waitUntilClosed()
+            return RACPSocketTermination(closeCode: 1006, reason: "")
+        }
+    }
 }
 
 public final class RACPWebSocket: RACPSocket {
@@ -40,6 +51,7 @@ public final class RACPWebSocket: RACPSocket {
     private let channel: Channel
     private let handler: WebSocketClientHandler
     private let continuation: AsyncStream<Data>.Continuation
+    private let terminationState: RACPSocketTerminationState
     /// 入站文本消息（已按帧拼回完整消息）。
     public let inbound: AsyncStream<Data>
 
@@ -62,12 +74,16 @@ public final class RACPWebSocket: RACPSocket {
         let ready = channel.eventLoop.makePromise(of: Void.self)
         var continuation: AsyncStream<Data>.Continuation!
         let stream = AsyncStream<Data> { continuation = $0 }
+        let terminationState = RACPSocketTerminationState()
         let handler = WebSocketClientHandler(
             request: request,
             expectedAccept: expectedAccept,
             expectedSubprotocol: subprotocol,
             onText: { continuation.yield($0) },
-            onClosed: { continuation.finish() },
+            onClosed: { termination in
+                terminationState.finish(termination)
+                continuation.finish()
+            },
             ready: ready
         )
         try await channel.eventLoop.submit {
@@ -79,19 +95,31 @@ public final class RACPWebSocket: RACPSocket {
         continuation.onTermination = { _ in
             channel.eventLoop.execute { _ = channel.close() }
         }
-        return RACPWebSocket(channel: channel, handler: handler, inbound: stream, continuation: continuation)
+        return RACPWebSocket(
+            channel: channel,
+            handler: handler,
+            inbound: stream,
+            continuation: continuation,
+            terminationState: terminationState
+        )
     }
 
     private init(
         channel: Channel,
         handler: WebSocketClientHandler,
         inbound: AsyncStream<Data>,
-        continuation: AsyncStream<Data>.Continuation
+        continuation: AsyncStream<Data>.Continuation,
+        terminationState: RACPSocketTerminationState
     ) {
         self.channel = channel
         self.handler = handler
         self.inbound = inbound
         self.continuation = continuation
+        self.terminationState = terminationState
+    }
+
+    public var terminationError: RACPSocketTermination {
+        get async { await terminationState.wait() }
     }
 
     /// 发送一条文本帧（JSON-RPC 帧）。
@@ -105,6 +133,7 @@ public final class RACPWebSocket: RACPSocket {
 
     /// 主动关闭（先发 close 帧再关通道）。
     public func close() async {
+        terminationState.finish(RACPSocketTermination(closeCode: 1000, reason: ""))
         let frame = WebSocketFrame(opcode: .close, payload: Data())
         if let bytes = try? WebSocketFrameEncoder.encode(frame, maskKey: WebSocketFrameEncoder.randomMaskKey()) {
             var buffer = channel.allocator.buffer(capacity: bytes.count)
@@ -200,19 +229,20 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
     private let expectedAccept: String
     private let expectedSubprotocol: String
     private let onText: @Sendable (Data) -> Void
-    private let onClosed: @Sendable () -> Void
+    private let onClosed: @Sendable (RACPSocketTermination) -> Void
     private let ready: EventLoopPromise<Void>
     private var buffered = Data()
     private var decoder = WebSocketFrameDecoder()
     private var upgraded = false
     private var upgradeFailure: Error?
+    private var closeTermination: RACPSocketTermination?
 
     init(
         request: String,
         expectedAccept: String,
         expectedSubprotocol: String,
         onText: @escaping @Sendable (Data) -> Void,
-        onClosed: @escaping @Sendable () -> Void,
+        onClosed: @escaping @Sendable (RACPSocketTermination) -> Void,
         ready: EventLoopPromise<Void>
     ) {
         self.request = request
@@ -275,12 +305,14 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
                     onText(frame.payload)
                 case .binary:
                     // 契约 §2.1：只接受文本帧，二进制帧以 1003 关闭。
+                    closeTermination = RACPSocketTermination(closeCode: 1003, reason: "text only")
                     var payload = context.channel.allocator.buffer(capacity: 2)
                     payload.writeInteger(UInt16(1003))
                     sendClose(context: context, payload: payload)
                 case .ping:
                     sendPong(context: context, payload: frame.payload)
                 case .close:
+                    closeTermination = RACPSocketTermination(closePayload: frame.payload)
                     context.close(promise: nil)
                 case .pong, .continuation:
                     break
@@ -288,6 +320,11 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
             }
         } catch {
             upgradeFailure = error
+            if case WebSocketFramingError.payloadTooLarge = error {
+                closeTermination = RACPSocketTermination(closeCode: 1009, reason: "payload too large")
+            } else {
+                closeTermination = RACPSocketTermination(closeCode: 1002, reason: "")
+            }
             context.close(promise: nil)
         }
     }
@@ -296,7 +333,7 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
         if !upgraded {
             ready.fail(upgradeFailure ?? RACPWebSocketError.closed)
         }
-        onClosed()
+        onClosed(closeTermination ?? RACPSocketTermination(closeCode: 1006, reason: ""))
         context.fireChannelInactive()
     }
 

@@ -18,6 +18,7 @@ struct AdaptorProvidersScreen: View {
     @State private var editBaseURL = ""
     @State private var editApiKey = ""
     @State private var editModelID = ""
+    @State private var editError: String?
     @State private var isCreating = false
 
     var body: some View {
@@ -142,10 +143,7 @@ struct AdaptorProvidersScreen: View {
         } message: {
             Text("将从 PI-adaptor 清除该 provider 与密钥；不会自动把默认项切到其他 provider。")
         }
-        .piMessageAlert(title: "Provider 操作失败", message: Binding(
-            get: { editingProvider == nil ? error : nil },
-            set: { if $0 == nil { error = nil } }
-        ))
+        .piMessageAlert(title: "Provider 操作失败", message: $error)
         .sheet(item: $editingProvider) { provider in
             NavigationStack {
                 Form {
@@ -164,6 +162,9 @@ struct AdaptorProvidersScreen: View {
                 .piPageBackground()
                 .navigationTitle("编辑 Provider")
                 .navigationBarTitleDisplayMode(.inline)
+                // 保存失败时父页面已被 sheet 覆盖；错误由当前 sheet 独立持有，
+                // 关闭提示后再退出编辑不会在父页面重复弹出旧错误。
+                .piMessageAlert(title: "Provider 操作失败", message: $editError)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("取消") { editingProvider = nil }
@@ -178,6 +179,7 @@ struct AdaptorProvidersScreen: View {
     }
 
     private func startEditing(_ provider: RACPV2Provider) {
+        editError = nil
         editName = provider.name
         editBaseURL = provider.baseUrl
         editApiKey = ""
@@ -192,7 +194,7 @@ struct AdaptorProvidersScreen: View {
         guard let host = model.currentHost,
               let context = model.providerOperationContext(for: host)
         else {
-            self.error = "当前 PI-adaptor 不可用或已切换：请在当前 PI-adaptor 上重试。"
+            self.editError = "当前 PI-adaptor 不可用或已切换：请在当前 PI-adaptor 上重试。"
             return
         }
         do {
@@ -204,7 +206,7 @@ struct AdaptorProvidersScreen: View {
                 modelID: editModelID
             )
             guard model.canApplyProviderOperation(context) else {
-                self.error = "PI-adaptor 在保存过程中已切换：本次修改可能已写入原 PI-adaptor，请到该 PI-adaptor 上核对。"
+                self.editError = "PI-adaptor 在保存过程中已切换：本次修改可能已写入原 PI-adaptor，请到该 PI-adaptor 上核对。"
                 return
             }
             recordLocalBinding(provider)
@@ -212,9 +214,10 @@ struct AdaptorProvidersScreen: View {
                 _ = KeychainStore.saveProviderKey(editApiKey, hostID: host.id, providerId: id)
             }
             editingProvider = nil
+            editError = nil
             await reload()
         } catch {
-            self.error = ConnectionErrorText.describe(error)
+            self.editError = ConnectionErrorText.describe(error)
         }
     }
 

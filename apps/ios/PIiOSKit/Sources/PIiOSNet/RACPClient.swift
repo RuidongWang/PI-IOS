@@ -70,6 +70,38 @@ public struct RACPServerInfo: Equatable, Sendable {
     }
 }
 
+public struct RACPDeviceIdentity: Equatable, Sendable {
+    public var serverInfo: RACPServerInfo
+    public var adaptorHostId: String
+
+    public init(serverInfo: RACPServerInfo, adaptorHostId: String) {
+        self.serverInfo = serverInfo
+        self.adaptorHostId = adaptorHostId
+    }
+}
+
+public struct RACPRecoveryContext: Equatable, Sendable {
+    public var hostCursor: RACPCursor?
+    public var sessionId: String?
+    public var sessionSummary: RACPSessionSummary?
+    public var snapshot: RACPSnapshot?
+    public var replayComplete: Bool
+
+    public init(
+        hostCursor: RACPCursor?,
+        sessionId: String?,
+        sessionSummary: RACPSessionSummary?,
+        snapshot: RACPSnapshot?,
+        replayComplete: Bool
+    ) {
+        self.hostCursor = hostCursor
+        self.sessionId = sessionId
+        self.sessionSummary = sessionSummary
+        self.snapshot = snapshot
+        self.replayComplete = replayComplete
+    }
+}
+
 public enum RACPClientUpdate: Sendable {
     case state(RACPTunnelState)
     case ready(RACPServerInfo)
@@ -77,6 +109,8 @@ public enum RACPClientUpdate: Sendable {
     case sessionChanged
     /// PI-adaptor 级事件表明会话目录或某个会话的 revision 已变化，需要刷新列表。
     case hostChanged(RACPHostChange)
+    /// replayComplete=false 后取得的完整目录；必须先于 online 应用。
+    case hostSnapshot(projects: [RACPProjectSummary], sessions: [RACPSessionSummary])
     /// 收到一条事件（已按契约 §3.2 归约）。
     case event(RACPEvent)
     case error(code: RACPErrorCode, message: String?)
@@ -303,23 +337,29 @@ struct RACPHostSubscriptionTracker: Equatable, Sendable {
 // MARK: - 配置
 
 public struct RACPConfiguration: Sendable {
-    public var ssh: SSHConnectionRequest
-    /// PI-adaptor 在服务器回环上的端口（`direct-tcpip` 目标端口）。
-    public var hostPort: Int
+    public var ssh: SSHConnectionRequest?
+    /// PI-adaptor 在服务器回环上的端口（`direct-tcpip` 目标端口）。direct 不读取它。
+    public var hostPort: Int?
     /// 设备令牌（契约 §2.3，走 `Authorization: Bearer`）。
     public var deviceToken: String?
     public var clientVersion: String
+    public var connectionPreference: ConnectionPreference
+    public var direct: DirectRACPConfiguration?
 
     public init(
-        ssh: SSHConnectionRequest,
-        hostPort: Int,
+        ssh: SSHConnectionRequest?,
+        hostPort: Int?,
         deviceToken: String?,
-        clientVersion: String = "0.0.1"
+        clientVersion: String = "0.0.1",
+        connectionPreference: ConnectionPreference = .sshOnly,
+        direct: DirectRACPConfiguration? = nil
     ) {
         self.ssh = ssh
         self.hostPort = hostPort
         self.deviceToken = deviceToken
         self.clientVersion = clientVersion
+        self.connectionPreference = connectionPreference
+        self.direct = direct
     }
 }
 
@@ -441,17 +481,25 @@ public actor RACPClient {
     private let configuration: RACPConfiguration
     private let confirmer: any HostKeyConfirming
     private let backoff: ReconnectBackoff
+    private let budgets: RACPConnectionBudgets
+    private let connectionFactory: any RACPConnectionFactory
     /// Bootstrap 已经建立并持有 SSH 连接时必须复用它，不能为配对/校验再开第二条连接。
     private let suppliedTransport: SSHTransport?
     private let updates: AsyncStream<RACPClientUpdate>
     private let continuation: AsyncStream<RACPClientUpdate>.Continuation
+    private let statusUpdates: AsyncStream<ConnectionStatus>
+    private let statusContinuation: AsyncStream<ConnectionStatus>.Continuation
     private var runTask: Task<Void, Never>?
     private var subscriptionTerminalReason: String?
 
+    private var connection: RACPConnection?
     private var transport: SSHTransport?
     private var socket: (any RACPSocket)?
     private var serverInfo: RACPServerInfo?
     private var state: RACPTunnelState = .offline(reason: nil)
+    private var status = ConnectionStatus()
+    private var heartbeatFailureGeneration: UUID?
+    private var promotionFenced = false
 
     private var nextRequestId = 1
     private var pending: [RACPIdentifier: PendingRequest] = [:]
@@ -480,15 +528,42 @@ public actor RACPClient {
     public init(
         configuration: RACPConfiguration,
         confirmer: any HostKeyConfirming,
-        backoff: ReconnectBackoff = ReconnectBackoff()
+        backoff: ReconnectBackoff = ReconnectBackoff(),
+        budgets: RACPConnectionBudgets = .default
     ) {
         self.configuration = configuration
         self.confirmer = confirmer
         self.backoff = backoff
+        self.budgets = budgets
+        self.connectionFactory = LiveRACPConnectionFactory()
         self.suppliedTransport = nil
         var sink: AsyncStream<RACPClientUpdate>.Continuation!
         self.updates = AsyncStream<RACPClientUpdate> { sink = $0 }
         self.continuation = sink
+        var statusSink: AsyncStream<ConnectionStatus>.Continuation!
+        self.statusUpdates = AsyncStream<ConnectionStatus> { statusSink = $0 }
+        self.statusContinuation = statusSink
+    }
+
+    /// 可注入连接器属于传输测试/后续 candidate 协调边界；生产仍使用 Live factory。
+    init(
+        configuration: RACPConfiguration,
+        connectionFactory: any RACPConnectionFactory,
+        budgets: RACPConnectionBudgets = .default,
+        backoff: ReconnectBackoff = ReconnectBackoff()
+    ) {
+        self.configuration = configuration
+        self.confirmer = SuppliedTransportHostKeyConfirmer()
+        self.backoff = backoff
+        self.budgets = budgets
+        self.connectionFactory = connectionFactory
+        self.suppliedTransport = nil
+        var sink: AsyncStream<RACPClientUpdate>.Continuation!
+        self.updates = AsyncStream<RACPClientUpdate> { sink = $0 }
+        self.continuation = sink
+        var statusSink: AsyncStream<ConnectionStatus>.Continuation!
+        self.statusUpdates = AsyncStream<ConnectionStatus> { statusSink = $0 }
+        self.statusContinuation = statusSink
     }
 
     private init(
@@ -513,10 +588,15 @@ public actor RACPClient {
         )
         self.confirmer = SuppliedTransportHostKeyConfirmer()
         self.backoff = ReconnectBackoff()
+        self.budgets = .default
+        self.connectionFactory = LiveRACPConnectionFactory()
         self.suppliedTransport = suppliedTransport
         var sink: AsyncStream<RACPClientUpdate>.Continuation!
         self.updates = AsyncStream<RACPClientUpdate> { sink = $0 }
         self.continuation = sink
+        var statusSink: AsyncStream<ConnectionStatus>.Continuation!
+        self.statusUpdates = AsyncStream<ConnectionStatus> { statusSink = $0 }
+        self.statusContinuation = statusSink
     }
 
 #if DEBUG
@@ -538,12 +618,20 @@ public actor RACPClient {
         )
         self.confirmer = SuppliedTransportHostKeyConfirmer()
         self.backoff = ReconnectBackoff()
+        self.budgets = .default
+        self.connectionFactory = LiveRACPConnectionFactory()
         self.suppliedTransport = nil
         var sink: AsyncStream<RACPClientUpdate>.Continuation!
         self.updates = AsyncStream<RACPClientUpdate> { sink = $0 }
         self.continuation = sink
+        var statusSink: AsyncStream<ConnectionStatus>.Continuation!
+        self.statusUpdates = AsyncStream<ConnectionStatus> { statusSink = $0 }
+        self.statusContinuation = statusSink
         self.socket = testingSocket
         self.state = .online
+        self.status.phase = .online(.ssh)
+        self.status.activeRoute = .ssh
+        self.status.activeGeneration = UUID()
         self.subscriptionId = subscriptionId
         self.subscribedSessionId = subscribedSessionId
         self.sessionId = subscribedSessionId
@@ -556,6 +644,35 @@ public actor RACPClient {
 
     func pendingRequestCountForTesting() -> Int {
         pending.count
+    }
+
+    func verifyDeviceIdentityForTesting() async throws -> RACPDeviceIdentity {
+        serverInfo = RACPServerInfo(
+            protocolVersion: "1.0",
+            serverName: "test",
+            serverVersion: "1",
+            hostId: "initialize-untrusted",
+            connectionId: "test",
+            roles: ["owner"]
+        )
+        await emitPhase(.verifyingIdentity(.ssh))
+        return try await authenticatedDeviceIdentity()
+    }
+
+    public func setOnlineForTesting() {
+        state = .online
+        status.phase = .online(.ssh)
+        status.activeRoute = .ssh
+        status.activeGeneration = UUID()
+        statusContinuation.yield(status)
+    }
+
+    public func setOfflineForTesting() {
+        state = .offline(reason: nil)
+        status.phase = .offline
+        status.activeRoute = nil
+        status.activeGeneration = nil
+        statusContinuation.yield(status)
     }
 
     func setSessionSubscriptionForTesting(_ id: String?) {
@@ -590,8 +707,15 @@ public actor RACPClient {
     public func stop() async {
         runTask?.cancel()
         runTask = nil
+        heartbeatFailureGeneration = nil
         await teardown(reason: nil)
+        status.phase = .offline
+        status.activeRoute = nil
+        status.activeGeneration = nil
+        status.candidateGeneration = nil
+        statusContinuation.yield(status)
         continuation.finish()
+        statusContinuation.finish()
     }
 
     /// Bounded cleanup for recovery paths. `teardown` ultimately closes SSH/NIO
@@ -601,20 +725,41 @@ public actor RACPClient {
         runTask?.cancel()
         runTask = nil
         let completed = await boundedAsyncValue(seconds: timeout) { [self] in
-            await teardown(reason: nil)
-            continuation.finish()
+            await self.finishStopBestEffort()
             return true
         }
         if completed != true {
             // Make the update stream terminal even if an underlying close future
             // continues in the background. No caller waits for that orphaned close.
             continuation.finish()
+            statusContinuation.finish()
         }
         return completed == true
     }
 
+    private func finishStopBestEffort() async {
+        await teardown(reason: nil)
+        status.phase = .offline
+        status.activeRoute = nil
+        status.activeGeneration = nil
+        status.candidateGeneration = nil
+        statusContinuation.yield(status)
+        continuation.finish()
+        statusContinuation.finish()
+    }
+
     public func currentState() -> RACPTunnelState { state }
+    public func connectionStatus() -> ConnectionStatus { status }
+    public func statusStream() -> AsyncStream<ConnectionStatus> { statusUpdates }
     public func info() -> RACPServerInfo? { serverInfo }
+
+    /// Pauses only new business writes and heartbeat on the old active route.
+    /// Socket reads, events, ACKs and read-only catalog requests remain live.
+    public func setPromotionFenced(_ fenced: Bool) {
+        promotionFenced = fenced
+        status.promotionFenced = fenced
+        statusContinuation.yield(status)
+    }
 
     /// 使用一次性配对令牌完成单次交换。调用者必须持久化结果，随后用设备令牌重建连接。
     /// 此方法不会重试：超时可能意味着令牌已被消费，不能盲目再次交换。
@@ -686,6 +831,28 @@ public actor RACPClient {
         return try await client.verifyDeviceOnSuppliedTransport()
     }
 
+    /// Bootstrap-only trusted identity proof. Unlike legacy verifyDevice, this
+    /// requires the authenticated ping's pong + hostId; initialize.hostId is only diagnostic.
+    public static func verifyDeviceIdentity(
+        using transport: SSHTransport,
+        hostPort: Int,
+        deviceToken: String,
+        clientVersion: String = "0.0.1"
+    ) async throws -> RACPDeviceIdentity {
+        guard (1...65_535).contains(hostPort),
+              !deviceToken.isEmpty,
+              !deviceToken.contains(where: \.isWhitespace) else {
+            throw RACPClientError.protocolMismatch("需要有效的 PI-adaptor 端口与设备令牌")
+        }
+        let client = RACPClient(
+            suppliedTransport: transport,
+            hostPort: hostPort,
+            deviceToken: deviceToken,
+            clientVersion: clientVersion
+        )
+        return try await client.verifyDeviceIdentityOnSuppliedTransport()
+    }
+
     private func pairOnceOnSuppliedTransport(
         deviceLabel: String?
     ) async throws -> RACPPairResult {
@@ -718,6 +885,8 @@ public actor RACPClient {
         }
         do {
             try await establish()
+            await emitPhase(.authenticating(.ssh))
+            await emitPhase(.verifyingIdentity(.ssh))
             try await ping()
             guard let serverInfo else {
                 throw RACPClientError.malformedFrame("设备校验未取得 PI-adaptor 信息")
@@ -728,6 +897,38 @@ public actor RACPClient {
             await closeWebSocketPreservingTransport()
             throw error
         }
+    }
+
+    private func verifyDeviceIdentityOnSuppliedTransport() async throws -> RACPDeviceIdentity {
+        guard suppliedTransport != nil else {
+            throw RACPClientError.protocolMismatch("设备身份校验需要 bootstrap 提供的 SSH 连接")
+        }
+        do {
+            try await establish()
+            await emitPhase(.authenticating(.ssh))
+            await emitPhase(.verifyingIdentity(.ssh))
+            let identity = try await authenticatedDeviceIdentity()
+            await closeWebSocketPreservingTransport()
+            return identity
+        } catch {
+            await closeWebSocketPreservingTransport()
+            throw error
+        }
+    }
+
+    private func authenticatedDeviceIdentity() async throws -> RACPDeviceIdentity {
+        let result: RACPAuthenticatedPingResult = try await request(
+            .ping,
+            params: RACPEmptyParams(),
+            timeout: 20
+        )
+        guard let serverInfo,
+              result.ok == true,
+              result.pong == true,
+              let hostId = result.hostId,
+              !hostId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { throw RACPConnectionError(category: .hostIdentity) }
+        return RACPDeviceIdentity(serverInfo: serverInfo, adaptorHostId: hostId)
     }
 
     // MARK: 会话
@@ -1009,6 +1210,11 @@ public actor RACPClient {
                             payload: .null
                         )
                     ))
+                    // initialize/订阅建立不等于可用：目录快照必须先成功取得并交付，
+                    // runLoop 才能在下一步发布 online；读取失败会留在 restoring/failed。
+                    let projects = try await listProjects()
+                    let sessions = try await listSessions()
+                    await emit(.hostSnapshot(projects: projects, sessions: sessions))
                 }
                 return
             } catch {
@@ -1382,6 +1588,60 @@ public actor RACPClient {
         )
     }
 
+    /// C1 is a value snapshot, never a shared mutable reducer or ACK lease.
+    public func recoveryContext() -> RACPRecoveryContext {
+        RACPRecoveryContext(
+            hostCursor: hostSubscription.cursor,
+            sessionId: subscribedSessionId ?? sessionId,
+            sessionSummary: attachedSession,
+            snapshot: viewModel.recoverySnapshot,
+            replayComplete: viewModel.lastReplayComplete
+        )
+    }
+
+    /// Applies C1 to this candidate only, then performs final host/session replay.
+    /// The old active client is untouched and can keep reading and serving its UI.
+    public func restoreRecoveryContext(_ context: RACPRecoveryContext) async throws -> RACPSessionView {
+        guard state.isOnline else { throw RACPClientError.notConnected }
+        if let hostCursor = context.hostCursor {
+            hostSubscription.restoreCursor(hostCursor)
+        } else {
+            hostSubscription.resetAfterCursorExpired()
+        }
+        pendingHostAck = nil
+        pendingHostAckDuringSubscribe = nil
+
+        sessionAttachGeneration &+= 1
+        subscriptionId = nil
+        subscribedSessionId = nil
+        pendingSessionAck = nil
+        pendingSessionAckDuringSubscribe = nil
+        pendingSessionSubscriptionAttempt = nil
+        pendingSessionSubscriptionSessionId = nil
+        pendingSessionSubscriptionGeneration = nil
+        viewModel.resetForSession()
+        attachedSession = nil
+        sessionId = nil
+
+        if let sessionId = context.sessionId {
+            if let snapshot = context.snapshot {
+                _ = viewModel.applySnapshot(snapshot, replayComplete: context.replayComplete)
+                attachedSession = context.sessionSummary
+                self.sessionId = sessionId
+                subscribedSessionId = sessionId
+                sessionEventsSuspended = false
+            } else {
+                _ = try await attach(sessionId: sessionId, subscribe: false)
+            }
+        }
+
+        try await subscribeHost()
+        if let sessionId = context.sessionId {
+            try await subscribeSession(sessionId: sessionId, after: viewModel.cursor)
+        }
+        return sessionView()
+    }
+
     /// 请求上下文：`requestId` 每次唯一；幂等键与期望 revision 由调用方给出。
     private func makeContext(idempotencyKey: String? = nil, expectedRevision: Int? = nil) -> RACPContext {
         RACPContext(
@@ -1419,7 +1679,7 @@ public actor RACPClient {
         params: JSONValue,
         timeout: TimeInterval
     ) async throws -> JSONValue {
-        guard let socket, state.isOnline else { throw RACPClientError.notConnected }
+        guard let socket, canSendDuringCurrentPhase(method) else { throw RACPClientError.notConnected }
         let id = RACPIdentifier.number(nextRequestId)
         nextRequestId += 1
         let request = RACPV2RawRequest(id: id, method: method, params: params)
@@ -1427,7 +1687,7 @@ public actor RACPClient {
         guard let text = String(data: data, encoding: .utf8) else {
             throw RACPClientError.malformedFrame("请求编码失败")
         }
-        let box = PendingRequest(recoveryScope: nil)
+        let box = PendingRequest(recoveryScope: nil, method: method)
         pending[id] = box
         do {
             try await socket.send(text: text)
@@ -1436,7 +1696,9 @@ public actor RACPClient {
             return value
         } catch {
             pending.removeValue(forKey: id)
-            let mapped: Error = error is RACPClientError ? error : RACPClientError.notConnected
+            let mapped: Error = error is RACPClientError || error is RACPProviderDiscoveryError
+                ? error
+                : RACPClientError.notConnected
             box.resolve(.failure(mapped))
             throw mapped
         }
@@ -1453,7 +1715,7 @@ public actor RACPClient {
            method != .pair && method != .initialize {
             throw RACPClientError.protocolMismatch("配对连接只允许交换设备令牌")
         }
-        guard let socket, state.isOnline || method == .initialize else { throw RACPClientError.notConnected }
+        guard let socket, canSendDuringCurrentPhase(method) else { throw RACPClientError.notConnected }
         let id = RACPIdentifier.number(nextRequestId)
         nextRequestId += 1
         let request = RACPRequest(id: id, method: method, params: params)
@@ -1462,7 +1724,7 @@ public actor RACPClient {
             throw RACPClientError.malformedFrame("请求编码失败")
         }
         // 先登记再发送：响应可能比登记更快到达，反序会丢响应并等到超时。
-        let box = PendingRequest(recoveryScope: recoveryScope)
+        let box = PendingRequest(recoveryScope: recoveryScope, method: method.rawValue)
         pending[id] = box
         do {
             try await socket.send(text: text)
@@ -1471,7 +1733,7 @@ public actor RACPClient {
             return value
         } catch {
             pending.removeValue(forKey: id)
-            let mappedError: Error = error is RACPClientError
+            let mappedError: Error = error is RACPClientError || error is RACPProviderDiscoveryError
                 ? error
                 : RACPClientError.notConnected
             box.resolve(.failure(mappedError))
@@ -1479,73 +1741,162 @@ public actor RACPClient {
         }
     }
 
+    private func canSendDuringCurrentPhase(_ method: RACPMethod) -> Bool {
+        if promotionFenced {
+            return state.isOnline && Self.restoringMethods.contains(method)
+        }
+        if state.isOnline { return true }
+        let isPairingToken = configuration.deviceToken?.hasPrefix("ppt1.") == true
+            || configuration.deviceToken?.hasPrefix("ppt2.") == true
+        if isPairingToken, method == .pair || method == .initialize {
+            return socket != nil
+        }
+        switch status.phase {
+        case .handshaking:
+            return method == .initialize
+        case .authenticating:
+            return method == .initializedNotification
+        case .verifyingIdentity:
+            return method == .ping
+        case .restoring:
+            return Self.restoringMethods.contains(method)
+        default:
+            return false
+        }
+    }
+
+    private func canSendDuringCurrentPhase(_ method: String) -> Bool {
+        if promotionFenced {
+            return state.isOnline && Self.fenceReadOnlyRawMethods.contains(method)
+        }
+        if state.isOnline { return true }
+        guard case .restoring = status.phase else { return false }
+        return Self.restoringRawMethods.contains(method)
+    }
+
+    private static let restoringMethods: Set<RACPMethod> = [
+        .ping, .eventsSubscribe, .eventsUnsubscribe, .eventsAck,
+        .sessionAttach, .sessionGet, .sessionList, .sessionHistory,
+        .projectList, .projectBrowse, .turnGet,
+    ]
+
+    private static let restoringRawMethods: Set<String> = [
+        "connection/ping", "events/subscribe", "events/unsubscribe", "events/ack",
+        "session/attach", "session/get", "session/list", "session/history",
+        "project/list", "project/browse", "turn/get",
+    ]
+
+    private static let fenceReadOnlyRawMethods: Set<String> = {
+        var methods = restoringRawMethods
+        methods.formUnion([
+            "provider/list", "provider/discover", "skill/list", "skill/get", "attachment/read",
+        ])
+        return methods
+    }()
+
     // MARK: 连接循环
 
     private func runLoop() async {
-        var attempt = 0
+        var sshAttempt = 0
         var connectionStageFailures = 0
+        var route: ConnectionRoute = configuration.connectionPreference == .directPreferred
+            && suppliedTransport == nil ? .direct : .ssh
+        var didStartSSHFallback = false
+
         while !Task.isCancelled {
+            let generation = UUID()
+            let attemptRoute = route
             do {
-                try await establish()
-                attempt = 0
+                let connectBudget = attemptRoute == .direct ? budgets.directConnect : budgets.sshConnect
+                try await withTimeoutValue(seconds: connectBudget, phase: "RACP 建连与身份验证") {
+                    try await self.establish(route: attemptRoute, generation: generation)
+                    try await self.verifyIdentity(route: attemptRoute, generation: generation)
+                }
+                try await withTimeoutValue(seconds: budgets.restore, phase: "RACP 恢复") {
+                    try await self.restore(route: attemptRoute, generation: generation)
+                }
+                guard let socket, status.candidateGeneration == generation else {
+                    throw RACPConnectionError(category: .canceled)
+                }
+                sshAttempt = 0
                 connectionStageFailures = 0
-                guard let socket else { throw RACPClientError.notConnected }
-                await emit(.state(.online))
-                // PI-adaptor 订阅必须先于会话恢复建立；否则重连窗口里新建的会话会完全不可见。
-                try await subscribeHost()
-                // 重连后按游标重新订阅（AC-14.1）。
-                if let sessionId = subscribedSessionId {
-                    try await subscribeSession(sessionId: sessionId, after: viewModel.cursor)
-                }
+                status.activeGeneration = generation
+                status.candidateGeneration = nil
+                heartbeatFailureGeneration = nil
+                await emitPhase(.online(route))
                 let heartbeat = Task { [weak self] in
-                    await self?.heartbeatLoop(expectedSocket: socket)
+                    await self?.heartbeatLoop(expectedSocket: socket, generation: generation)
                 }
-                await socket.waitUntilClosed()
+                let termination = await socket.terminationError
                 heartbeat.cancel()
-                throw RACPClientError.notConnected
+                if heartbeatFailureGeneration == generation {
+                    throw RACPConnectionError(category: .heartbeatFailed)
+                }
+                throw termination
             } catch is CancellationError {
                 await teardown(reason: nil)
                 return
             } catch {
+                if Task.isCancelled {
+                    await teardown(reason: nil)
+                    return
+                }
+                let failedPhase = status.phase
+                let category = Self.connectionCategory(error, route: route)
+                recordFailure(route: route, phase: failedPhase, category: category, error: error)
                 let reason = Self.describe(error)
-                await teardown(reason: reason)
+                await teardown(reason: reason, failing: error)
                 if let terminalReason = subscriptionTerminalReason {
+                    await emitPhase(.failed)
                     await emit(.state(.offline(reason: terminalReason)))
                     continuation.finish()
+                    statusContinuation.finish()
                     return
                 }
-                if isFatal(error) {
-                    // 契约 §7：不可重试的错误不进入退避。
-                    await emit(.state(.offline(reason: reason)))
+
+                if route == .direct,
+                   !didStartSSHFallback,
+                   Self.isTransportFailure(category, error: error) {
+                    // 每 intent 仅进入一次；此后 SSH backoff 永远不再重评 direct。
+                    didStartSSHFallback = true
+                    route = .ssh
+                    await emitPhase(.fallingBack)
+                    continue
+                }
+
+                let terminalCategory = Self.isTerminalConnectionCategory(category)
+                if route == .direct || terminalCategory || isFatal(error) {
+                    await emitPhase(.failed)
                     continuation.finish()
+                    statusContinuation.finish()
                     return
                 }
-                // 握手/认证/转发被服务器拒绝时重试毫无意义，而且会继续冲击 sshd
-                // （可能触发 MaxStartups 或 fail2ban，把用户后续的正常连接也封掉）。
-                // 同一类失败连续 3 次就停止自动重连，交给用户手动重试。
+
                 if Self.isConnectionStageFailure(error) {
                     connectionStageFailures += 1
                     if connectionStageFailures >= Self.maxConnectionStageFailures {
+                        await emitPhase(.failed)
                         await emit(.state(.offline(
                             reason: reason
                                 + "\n连续 \(connectionStageFailures) 次在建立 SSH 通道阶段失败，已停止自动重连。"
                                 + "先修服务器（端口/sshd/限流）再点「连接」。"
                         )))
                         continuation.finish()
+                        statusContinuation.finish()
                         return
                     }
                 } else {
                     connectionStageFailures = 0
                 }
-                attempt += 1
-                let delay = backoff.delay(forAttempt: attempt)
-                await emit(.state(.reconnecting(attempt: attempt, delay: delay, reason: reason)))
+                sshAttempt += 1
+                let delay = backoff.delay(forAttempt: sshAttempt)
+                await emitPhase(.reconnecting(.ssh, attempt: sshAttempt, delay: delay))
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
     }
 
-    private func heartbeatLoop(expectedSocket: any RACPSocket) async {
+    private func heartbeatLoop(expectedSocket: any RACPSocket, generation: UUID) async {
         var consecutiveFailures = 0
         while !Task.isCancelled {
             do {
@@ -1553,7 +1904,11 @@ public actor RACPClient {
             } catch {
                 return
             }
-            guard self.socket === expectedSocket, state.isOnline else { return }
+            guard self.socket === expectedSocket,
+                  status.activeGeneration == generation,
+                  state.isOnline
+            else { return }
+            if promotionFenced { continue }
             do {
                 _ = try await requestJSON(
                     .ping,
@@ -1565,6 +1920,7 @@ public actor RACPClient {
                 guard !Task.isCancelled, self.socket === expectedSocket else { return }
                 consecutiveFailures += 1
                 if consecutiveFailures >= 2 {
+                    heartbeatFailureGeneration = generation
                     await expectedSocket.close()
                     return
                 }
@@ -1586,29 +1942,77 @@ public actor RACPClient {
         }
     }
 
-    private func establish() async throws {
-        await emit(.state(.connecting))
-        let ssh: SSHTransport
-        if let suppliedTransport {
-            ssh = suppliedTransport
-        } else {
-            ssh = try await SSHTransport.connect(configuration.ssh, confirmer: confirmer)
-        }
-        transport = ssh
-        await emit(.state(.authenticating))
-        let channel = try await ssh.directTCPIP(port: configuration.hostPort)
-        await emit(.state(.handshaking))
-        let socket = try await RACPWebSocket.connect(
-            on: channel,
-            bearerToken: configuration.deviceToken
+    private func establish(
+        route: ConnectionRoute = .ssh,
+        generation requestedGeneration: UUID? = nil
+    ) async throws {
+        let generation = requestedGeneration ?? UUID()
+        status.candidateGeneration = generation
+        await emitPhase(.connecting(route))
+        let newConnection = try await connectionFactory.makeConnection(
+            route: route,
+            configuration: configuration,
+            confirmer: confirmer,
+            suppliedTransport: suppliedTransport
         )
+        guard status.candidateGeneration == generation else {
+            await newConnection.close()
+            throw RACPConnectionError(category: .canceled)
+        }
+        connection = newConnection
+        transport = newConnection.transport
+        let socket = newConnection.socket
         self.socket = socket
         Task { [weak self] in
             for await message in socket.inbound {
                 await self?.receive(message, from: socket)
             }
         }
+        await emitPhase(.handshaking(route))
         try await handshake()
+    }
+
+    private func verifyIdentity(route: ConnectionRoute, generation: UUID) async throws {
+        guard status.candidateGeneration == generation else {
+            throw RACPConnectionError(category: .canceled)
+        }
+        if route == .direct,
+           serverInfo?.capabilities?.value(at: ["directTransport"])?.boolValue != true {
+            throw RACPConnectionError(category: .protocol)
+        }
+        await emitPhase(.authenticating(route))
+        await emitPhase(.verifyingIdentity(route))
+        let result: RACPAuthenticatedPingResult = try await request(
+            .ping,
+            params: RACPEmptyParams(),
+            timeout: 20
+        )
+        // 旧 sshOnly adaptor 允许只有 ok/serverTime；direct 与 directPreferred 的 SSH
+        // 回退必须严格检查 pong + 认证 ping.hostId，initialize.hostId 不作信任依据。
+        guard route == .direct || configuration.connectionPreference == .directPreferred else {
+            return
+        }
+        guard let expected = configuration.direct?.adaptorHostId,
+              !expected.isEmpty
+        else { throw RACPConnectionError(category: .configuration) }
+        guard result.ok == true,
+              result.pong == true,
+              let hostId = result.hostId,
+              !hostId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              hostId == expected
+        else { throw RACPConnectionError(category: .hostIdentity) }
+    }
+
+    private func restore(route: ConnectionRoute, generation: UUID) async throws {
+        guard status.candidateGeneration == generation else {
+            throw RACPConnectionError(category: .canceled)
+        }
+        await emitPhase(.restoring(route))
+        // 订阅恢复仍使用原有 cursor、ACK 与快照逻辑，不能另建业务状态。
+        try await subscribeHost()
+        if let sessionId = subscribedSessionId {
+            try await subscribeSession(sessionId: sessionId, after: viewModel.cursor)
+        }
     }
 
     /// 契约 §2.2：10 秒内完成 `connection/initialize` + `notifications/initialized`。
@@ -1630,12 +2034,17 @@ public actor RACPClient {
             throw RACPClientError.malformedFrame("初始化通知编码失败")
         }
         try await socket.send(text: text)
-        state = .online
+        // ready 只表示 initialize 完成；online 必须由认证 ping + host/session 恢复后发布。
         await emit(.ready(info))
     }
 
-    private func teardown(reason: String?) async {
+    private func teardown(reason: String?, failing error: Error? = nil) async {
+        let oldConnection = connection
+        connection = nil
+        let oldSocket = socket
         socket = nil
+        let oldTransport = transport
+        transport = nil
         subscriptionId = nil
         pendingSessionSubscriptionAttempt = nil
         pendingSessionSubscriptionSessionId = nil
@@ -1648,12 +2057,17 @@ public actor RACPClient {
         isDrainingHostAcks = false
         pendingSessionAck = nil
         isDrainingSessionAcks = false
-        if let transport {
-            await transport.close()
+        if let oldConnection {
+            await oldConnection.close()
+        } else {
+            await oldSocket?.close()
+            await oldTransport?.close()
         }
-        transport = nil
         serverInfo = nil
-        failAllPending(with: RACPClientError.notConnected)
+        status.activeRoute = nil
+        status.activeGeneration = nil
+        status.candidateGeneration = nil
+        failAllPending(with: error ?? RACPClientError.notConnected)
         if !state.isOnline || reason != nil {
             await emit(.state(.offline(reason: reason)))
         }
@@ -1663,6 +2077,8 @@ public actor RACPClient {
     /// runner can continue polling and then use the same transport to verify
     /// the device token.
     private func closeWebSocketPreservingTransport() async {
+        let oldConnection = connection
+        connection = nil
         let socket = self.socket
         self.socket = nil
         subscriptionId = nil
@@ -1680,7 +2096,15 @@ public actor RACPClient {
         isDrainingSessionAcks = false
         serverInfo = nil
         state = .offline(reason: nil)
-        await socket?.close()
+        status.phase = .offline
+        status.activeRoute = nil
+        status.activeGeneration = nil
+        status.candidateGeneration = nil
+        if let oldConnection {
+            await oldConnection.closeSocket()
+        } else {
+            await socket?.close()
+        }
         failAllPending(with: RACPClientError.notConnected)
     }
 
@@ -1704,7 +2128,15 @@ public actor RACPClient {
             guard let waiter = pending.removeValue(forKey: id) else { return }
             if let error = envelope.error {
                 let code = error.normalizedCode
-                waiter.resolve(.failure(RACPClientError.server(code: code, message: error.message)))
+                if waiter.method == RACPV2Method.providerDiscover.rawValue {
+                    waiter.resolve(.failure(RACPProviderDiscoveryError(
+                        code: code.rawValue,
+                        upstreamStatus: error.data?.value(at: ["upstreamStatus"])?.intValue,
+                        reason: error.data?.value(at: ["reason"])?.stringValue
+                    )))
+                } else {
+                    waiter.resolve(.failure(RACPClientError.server(code: code, message: error.message)))
+                }
                 await emit(.error(code: code, message: error.message))
             } else {
                 waiter.resolve(.success(envelope.result ?? .null))
@@ -2060,6 +2492,123 @@ public actor RACPClient {
         continuation.yield(update)
     }
 
+    private func emitPhase(_ phase: ConnectionPhase) async {
+        status.phase = phase
+        switch phase {
+        case .offline:
+            await emit(.state(.offline(reason: nil)))
+        case .connecting, .fallingBack:
+            await emit(.state(.connecting))
+        case .handshaking, .restoring:
+            await emit(.state(.handshaking))
+        case .authenticating, .verifyingIdentity:
+            await emit(.state(.authenticating))
+        case .online(let route):
+            status.activeRoute = route
+            await emit(.state(.online))
+        case .reconnecting(_, let attempt, let delay):
+            let reason = status.sshFailure.map { "SSH: \($0.category.rawValue)" }
+            await emit(.state(.reconnecting(attempt: attempt, delay: delay, reason: reason ?? "SSH reconnect")))
+        case .failed:
+            var reasons: [String] = []
+            if let direct = status.directFailure { reasons.append("direct: \(direct.category.rawValue)") }
+            if let ssh = status.sshFailure { reasons.append("SSH: \(ssh.category.rawValue)") }
+            await emit(.state(.offline(reason: reasons.isEmpty ? nil : reasons.joined(separator: "\n"))))
+        }
+        statusContinuation.yield(status)
+    }
+
+    private func recordFailure(
+        route: ConnectionRoute,
+        phase: ConnectionPhase,
+        category: ConnectionFailureCategory,
+        error: Error
+    ) {
+        let failure = RouteFailure(
+            route: route,
+            phase: phase,
+            category: category,
+            retryAfterMs: (error as? RACPConnectionError)?.retryAfterMs
+        )
+        switch route {
+        case .direct: status.directFailure = failure
+        case .ssh: status.sshFailure = failure
+        }
+    }
+
+    private static func isTransportFailure(_ category: ConnectionFailureCategory, error: Error) -> Bool {
+        switch category {
+        case .dns, .tcp, .connectTimeout, .socketInterrupted, .heartbeatFailed:
+            return true
+        case .internal:
+            // 仅 Upgrade 阶段明确 503 属于通路故障；Live direct 将 502/503/504 映射 tcp。
+            return (error as? RACPConnectionError)?.httpStatus == 503
+        default:
+            return false
+        }
+    }
+
+    private static func isTerminalConnectionCategory(_ category: ConnectionFailureCategory) -> Bool {
+        switch category {
+        case .configuration, .offline, .tlsTrust, .authentication, .deviceRevoked,
+             .hostKey, .hostIdentity, .protocol, .endpoint, .permission, .validation,
+             .notFound, .conflict, .canceled:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func connectionCategory(_ error: Error, route: ConnectionRoute) -> ConnectionFailureCategory {
+        if let error = error as? RACPConnectionError { return error.category }
+        if let error = error as? RACPSocketTermination { return error.category }
+        if error is CancellationError { return .canceled }
+        if let error = error as? RACPClientError {
+            switch error {
+            case .notConnected: return .socketInterrupted
+            case .protocolMismatch, .malformedFrame: return .protocol
+            case .timedOut: return .connectTimeout
+            case .server(let code, _):
+                switch code {
+                case .unauthorized: return .authentication
+                case .forbidden: return .permission
+                case .protocolMismatch: return .protocol
+                case .invalidArgument, .payloadTooLarge: return .validation
+                case .notFound, .methodNotFound: return .notFound
+                case .conflict, .idempotencyConflict: return .conflict
+                case .rateLimited: return .rateLimited
+                case .serverInternal: return .internal
+                default: return .business
+                }
+            }
+        }
+        if let error = error as? SSHTransportError {
+            switch error {
+            case .invalidPrivateKey, .authenticationFailed: return .authentication
+            case .hostKeyRejected, .hostKeyAlgorithmUnsupported, .hostKeyUnreadable: return .hostKey
+            case .timedOut: return .connectTimeout
+            case .channelClosed, .closedByPeer: return .socketInterrupted
+            case .tunnelRefused, .networkFailure: return .tcp
+            }
+        }
+        if let error = error as? RACPWebSocketError {
+            switch error {
+            case .upgradeRejected(let status):
+                switch status {
+                case 401, 403: return .authentication
+                case 404, 426: return .endpoint
+                case 400: return .protocol
+                case 429: return .rateLimited
+                case 502, 503, 504: return .tcp
+                default: return .protocol
+                }
+            case .protocolViolation: return .protocol
+            case .closed: return .socketInterrupted
+            }
+        }
+        return .internal
+    }
+
     private func isFatal(_ error: Error) -> Bool {
         switch error {
         case RACPClientError.protocolMismatch:
@@ -2075,6 +2624,8 @@ public actor RACPClient {
 
     private static func describe(_ error: Error) -> String {
         if let error = error as? RACPClientError { return error.description }
+        if let error = error as? RACPConnectionError { return error.description }
+        if let error = error as? RACPSocketTermination { return error.description }
         if let error = error as? SSHTransportError { return error.description }
         if let error = error as? SSHPrivateKeyError { return error.description }
         if let error = error as? RACPWebSocketError { return error.description }
@@ -2207,6 +2758,13 @@ struct RACPJSONObject: Decodable, Sendable {
     var serverTime: String?
 }
 
+struct RACPAuthenticatedPingResult: Decodable, Sendable {
+    var ok: Bool?
+    var serverTime: String?
+    var pong: Bool?
+    var hostId: String?
+}
+
 // MARK: - 辅助
 
 private func withTimeoutValue<T: Sendable>(
@@ -2229,13 +2787,15 @@ private func withTimeoutValue<T: Sendable>(
 /// 一次请求-响应的等待者：按 JSON-RPC `id` 关联，不按到达顺序（契约 §3 请求-响应关联）。
 final class PendingRequest: @unchecked Sendable {
     fileprivate let recoveryScope: RequestRecoveryScope?
+    fileprivate let method: String?
     private let lock = NSLock()
     private var continuation: CheckedContinuation<JSONValue, Error>?
     private var settled: Result<JSONValue, Error>?
     private var timeoutTask: Task<Void, Never>?
 
-    fileprivate init(recoveryScope: RequestRecoveryScope? = nil) {
+    fileprivate init(recoveryScope: RequestRecoveryScope? = nil, method: String? = nil) {
         self.recoveryScope = recoveryScope
+        self.method = method
     }
 
     func resolve(_ result: Result<JSONValue, Error>) {
@@ -2255,23 +2815,27 @@ final class PendingRequest: @unchecked Sendable {
     }
 
     func wait(timeout: TimeInterval, method: String) async throws -> JSONValue {
-        try await withCheckedThrowingContinuation { continuation in
-            lock.lock()
-            if let settled {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if let settled {
+                    lock.unlock()
+                    continuation.resume(with: settled)
+                    return
+                }
+                self.continuation = continuation
                 lock.unlock()
-                continuation.resume(with: settled)
-                return
+                let task = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                    guard !Task.isCancelled else { return }
+                    self?.resolve(.failure(RACPClientError.timedOut(method)))
+                }
+                lock.lock()
+                timeoutTask = task
+                lock.unlock()
             }
-            self.continuation = continuation
-            lock.unlock()
-            let task = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                guard !Task.isCancelled else { return }
-                self?.resolve(.failure(RACPClientError.timedOut(method)))
-            }
-            lock.lock()
-            timeoutTask = task
-            lock.unlock()
+        } onCancel: {
+            self.resolve(.failure(CancellationError()))
         }
     }
 }

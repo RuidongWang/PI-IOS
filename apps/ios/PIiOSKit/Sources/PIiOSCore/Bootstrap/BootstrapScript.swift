@@ -26,6 +26,7 @@ public struct BootstrapScriptConfiguration: Equatable, Sendable {
     /// PI-adaptor installations default to PPT2 only. A separate legacy path may
     /// opt into PPT1; the normal install UI never exposes that override.
     public let allowLegacyPPT1: Bool
+    public let direct: BootstrapDirectConfiguration?
 
     public init(
         release: PIAdaptorRelease,
@@ -39,7 +40,8 @@ public struct BootstrapScriptConfiguration: Equatable, Sendable {
         stopTimeoutSeconds: Int = BootstrapScriptConfiguration.defaultStopTimeoutSeconds,
         verifyTimeoutSeconds: Int = BootstrapScriptConfiguration.defaultVerifyTimeoutSeconds,
         force: Bool = false,
-        allowLegacyPPT1: Bool = false
+        allowLegacyPPT1: Bool = false,
+        direct: BootstrapDirectConfiguration? = nil
     ) throws {
         guard BootstrapScriptValidation.isAttemptId(attemptId) else {
             throw BootstrapScriptError.invalidAttemptId
@@ -80,6 +82,7 @@ public struct BootstrapScriptConfiguration: Equatable, Sendable {
         self.verifyTimeoutSeconds = verifyTimeoutSeconds
         self.force = force
         self.allowLegacyPPT1 = allowLegacyPPT1
+        self.direct = direct
     }
 }
 
@@ -89,6 +92,7 @@ public enum BootstrapScriptError: Error, Equatable, CustomStringConvertible {
     case invalidHostIdentity
     case invalidPairingLifetime
     case invalidTimeout
+    case invalidDirectConfiguration
 
     public var description: String {
         switch self {
@@ -102,6 +106,8 @@ public enum BootstrapScriptError: Error, Equatable, CustomStringConvertible {
             return "配对令牌有效期必须在 1 到 15 分钟之间"
         case .invalidTimeout:
             return "bootstrap 超时必须是 1...3600 秒"
+        case .invalidDirectConfiguration:
+            return "directName 必须是纯 DNS/IP，direct 端口必须在 1...65535 且不同于 loopback 端口"
         }
     }
 }
@@ -158,6 +164,10 @@ public enum BootstrapScriptBuilder {
             shellQuote(configuration.hostArchitecture),
             configuration.force ? "1" : "0",
             configuration.allowLegacyPPT1 ? "1" : "0",
+            configuration.direct == nil ? "0" : "1",
+            shellQuote(configuration.direct?.directName ?? ""),
+            String(configuration.direct?.directPort ?? 0),
+            shellQuote(configuration.direct?.sanExpression ?? ""),
         ]
         let variableNames = [
             "VERSION",
@@ -181,6 +191,10 @@ public enum BootstrapScriptBuilder {
             "HOST_ARCH",
             "FORCE_INSTALL",
             "ALLOW_LEGACY_PPT1",
+            "DIRECT_REQUESTED",
+            "DIRECT_NAME",
+            "DIRECT_PORT",
+            "DIRECT_SAN",
         ]
         let assignmentBlock = zip(variableNames, assignments)
             .map { "\($0)=\($1)" }
@@ -216,6 +230,9 @@ TRANSACTION_ROLLBACK_SCRIPT="$WORK/transaction.rollback-install.sh"
 TRANSACTION_RECEIPT_BACKUP="$WORK/transaction.receipt.previous"
 TRANSACTION_LEGACY="$WORK/transaction.legacy-units"
 ROLLBACK_SCRIPT="$WORK/install.sh"
+DIRECT_ACTIVE=0
+DIRECT_TLS="$BASE/tls"
+DIRECT_TRUST="$WORK/direct-trust.json"
 
 CURRENT_STEP="probe"
 ARTIFACT_BYTES=0
@@ -937,6 +954,45 @@ installed_version=$(node -e '
 ' "$BASE/current/package.json" 2>/dev/null || true)
 [ "$installed_version" = "$VERSION" ] || die "installed-verification-failed"
 
+# Optional direct TLS. Failure leaves the complete loopback/SSH pairing path available.
+if [ "$DIRECT_REQUESTED" = 1 ]; then
+  if mkdir -p "$DIRECT_TLS" && chmod 700 "$DIRECT_TLS"; then
+    previous_name=$(cat "$DIRECT_TLS/direct-name" 2>/dev/null || true)
+    if [ "$previous_name" != "$DIRECT_NAME" ] || [ ! -f "$DIRECT_TLS/direct-cert.pem" ] || [ ! -f "$DIRECT_TLS/direct-key.pem" ]; then
+      tls_staging="$DIRECT_TLS.staging.$$"
+      tls_backup="$DIRECT_TLS.previous.$$"
+      rm -rf "$tls_staging" "$tls_backup"
+      if mkdir -p "$tls_staging" && chmod 700 "$tls_staging" && \
+        openssl req -x509 -newkey rsa:3072 -sha256 -days 825 -nodes \
+          -keyout "$tls_staging/direct-key.pem" \
+          -out "$tls_staging/direct-cert.pem" \
+          -subj "/CN=pi-adaptor" \
+          -addext "basicConstraints=critical,CA:FALSE" \
+          -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+          -addext "extendedKeyUsage=serverAuth" \
+          -addext "subjectAltName=$DIRECT_SAN" \
+          >/dev/null 2>&1 && \
+        openssl pkey -in "$tls_staging/direct-key.pem" -check -noout >/dev/null 2>&1 && \
+        openssl x509 -in "$tls_staging/direct-cert.pem" -noout -checkend 0 -text 2>/dev/null | grep -q 'CA:FALSE' && \
+        chmod 600 "$tls_staging/direct-key.pem" && \
+        printf '%s\n' "$DIRECT_NAME" >"$tls_staging/direct-name" && \
+        chmod 600 "$tls_staging/direct-name"; then
+        [ ! -d "$DIRECT_TLS" ] || mv "$DIRECT_TLS" "$tls_backup"
+        if mv "$tls_staging" "$DIRECT_TLS"; then
+          rm -rf "$tls_backup"
+          DIRECT_ACTIVE=1
+        else
+          [ ! -d "$tls_backup" ] || mv "$tls_backup" "$DIRECT_TLS"
+        fi
+      else
+        rm -rf "$tls_staging"
+      fi
+    elif openssl x509 -in "$DIRECT_TLS/direct-cert.pem" -noout -text 2>/dev/null | grep -q 'CA:FALSE'; then
+      DIRECT_ACTIVE=1
+    fi
+  fi
+fi
+
 # Node 版本已在 probe 阶段前置检查；这里只需要可执行路径写进 unit。
 node=$(command -v node) || die "missing-node"
 
@@ -955,6 +1011,13 @@ unit_tmp="$unit_dir/.$UNIT_NAME.$$"
   printf 'Environment="PI_ADAPTOR_HOME=%s"\n' "$BASE"
   printf 'Environment="PI_ADAPTOR_PORT=%s"\n' "$PORT"
   printf 'Environment="PI_ADAPTOR_HOST_ID=pi-adaptor-%s"\n' "$HOST_ARCH"
+  printf 'Environment="PI_ADAPTOR_DIRECT_ENABLED=%s"\n' "$DIRECT_ACTIVE"
+  if [ "$DIRECT_ACTIVE" = 1 ]; then
+    printf 'Environment="PI_ADAPTOR_DIRECT_HOST=0.0.0.0"\n'
+    printf 'Environment="PI_ADAPTOR_DIRECT_PORT=%s"\n' "$DIRECT_PORT"
+    printf 'Environment="PI_ADAPTOR_DIRECT_CERTIFICATE_FILE=%s"\n' "$DIRECT_TLS/direct-cert.pem"
+    printf 'Environment="PI_ADAPTOR_DIRECT_PRIVATE_KEY_FILE=%s"\n' "$DIRECT_TLS/direct-key.pem"
+  fi
   printf 'ExecStart="%s" "%s/current/dist/main.js" --home "%s" --port %s\n' \
     "$node" "$BASE" "$BASE" "$PORT"
   printf 'WorkingDirectory=%s\n' "$BASE"
@@ -1039,7 +1102,17 @@ chmod 600 "$WORK/pair.fifo" 2>/dev/null || die "bootstrap-permissions"
 chmod 600 "$WORK/pair.err" 2>/dev/null || die "bootstrap-permissions"
 
 # The manual and systemd processes must use the same isolated root.
+rm -f "$DIRECT_TRUST"
+if [ "$DIRECT_ACTIVE" = 1 ]; then
+  PI_ADAPTOR_DIRECT_HOST="0.0.0.0"
+  PI_ADAPTOR_DIRECT_PORT="$DIRECT_PORT"
+  PI_ADAPTOR_DIRECT_CERTIFICATE_FILE="$DIRECT_TLS/direct-cert.pem"
+  PI_ADAPTOR_DIRECT_PRIVATE_KEY_FILE="$DIRECT_TLS/direct-key.pem"
+  export PI_ADAPTOR_DIRECT_HOST PI_ADAPTOR_DIRECT_PORT
+  export PI_ADAPTOR_DIRECT_CERTIFICATE_FILE PI_ADAPTOR_DIRECT_PRIVATE_KEY_FILE
+fi
 PI_ADAPTOR_HOME="$BASE" \
+PI_ADAPTOR_DIRECT_ENABLED="$DIRECT_ACTIVE" \
 "$node" "$BASE/current/dist/main.js" \
   --home "$BASE" \
   --port "$PORT" \
@@ -1065,6 +1138,16 @@ chmod 600 "$WORK/manual.pid" 2>/dev/null || die "bootstrap-permissions"
            [ -n "$candidate_port" ] && [ "$candidate_port" -ge 1 ] && [ "$candidate_port" -le 65535 ]; then
           ready_host=$candidate_host
           ready_port=$candidate_port
+        fi
+        ;;
+      'PI_HOST_DIRECT_TRUST '*)
+        trust_json=${line#PI_HOST_DIRECT_TRUST }
+        trust_attempt=$(printf '%s\n' "$trust_json" | sed -n 's/.*"attemptId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        if [ "$trust_attempt" = "$ATTEMPT_ID" ]; then
+          trust_tmp="$DIRECT_TRUST.tmp.$$"
+          printf '%s\n' "$trust_json" >"$trust_tmp" || exit 1
+          chmod 600 "$trust_tmp" 2>/dev/null || exit 1
+          mv -f "$trust_tmp" "$DIRECT_TRUST" || exit 1
         fi
         ;;
       'PI_HOST_PAIRING_TOKEN '*)

@@ -20,6 +20,9 @@ struct InstallAdaptorScreen: View {
     @State private var sudoCredential = ""
     /// 强制重装：忽略已存在的 PI-adaptor install receipt，重新下载并执行验证。
     @State private var forceReinstall = false
+    @State private var directEndpoint = ""
+    @State private var directName = ""
+    @State private var directPortText = "9443"
     @FocusState private var portFocused: Bool
 
     private var host: HostRecord? {
@@ -34,8 +37,38 @@ struct InstallAdaptorScreen: View {
         return HostValidator.hostPortError(text)
     }
 
+    private var wantsDirect: Bool {
+        !directEndpoint.piTrimmed.isEmpty || !directName.piTrimmed.isEmpty
+    }
+
+    private var canonicalDirectEndpoint: String? {
+        wantsDirect ? HostValidator.canonicalDirectEndpoint(directEndpoint) : nil
+    }
+
+    private var directConfiguration: BootstrapDirectConfiguration? {
+        guard wantsDirect, let port = Int(portText.piTrimmed), let directPort = Int(directPortText.piTrimmed) else {
+            return nil
+        }
+        return try? BootstrapDirectConfiguration(
+            directName: directName.piTrimmed,
+            directPort: directPort,
+            loopbackPort: port
+        )
+    }
+
+    private var directConfigurationError: String? {
+        guard wantsDirect else { return nil }
+        if canonicalDirectEndpoint == nil {
+            return "Direct endpoint 必须是精确的 wss URL，且路径为 /v1/racp/ws"
+        }
+        if directConfiguration == nil {
+            return "请填写纯 DNS/IP directName 与不同于 loopback 的 direct 端口"
+        }
+        return nil
+    }
+
     private var canStart: Bool {
-        host != nil && portError == nil && !coordinator.isRunning
+        host != nil && portError == nil && directConfigurationError == nil && !coordinator.isRunning
     }
 
     var body: some View {
@@ -70,9 +103,49 @@ struct InstallAdaptorScreen: View {
             }
         }
         .piMessageAlert(title: "安装未完成", message: Binding(
-            get: { coordinator.phase == .failed ? coordinator.failureSummary : nil },
+            get: {
+                coordinator.phase == .failed && !coordinator.isFailureAlertDismissed
+                    ? coordinator.failureSummary : nil
+            },
             set: { if $0 == nil { coordinator.dismissFailure() } }
         ))
+        .sheet(
+            isPresented: Binding(
+                get: { coordinator.pendingDirectTrust != nil },
+                set: { if !$0 { coordinator.rejectPendingDirectTrust() } }
+            )
+        ) {
+            if let trust = coordinator.pendingDirectTrust {
+                NavigationStack {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: PISpacing.s16) {
+                            Text("请逐字核对可信 SSH 提供的完整叶证书 SHA-256 与 adaptor hostId。拒绝不会保存 pin，也不会影响已完成配对。")
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(wrappedFingerprint(trust.certificateSHA256))
+                                .font(PIFont.codeMono)
+                                .textSelection(.enabled)
+                                .accessibilityLabel(trust.certificateSHA256)
+                                .accessibilityIdentifier("installHost.directTrustPin")
+                            Text(trust.hostId)
+                                .font(PIFont.codeMono)
+                                .textSelection(.enabled)
+                                .accessibilityIdentifier("installHost.directTrustHostId")
+                            PIPrimaryButton(title: "授权直连") {
+                                coordinator.authorizePendingDirectTrust()
+                            }
+                            .accessibilityIdentifier("installHost.directAuthorize")
+                            PISecondaryButton(title: "仅使用 SSH") {
+                                coordinator.rejectPendingDirectTrust()
+                            }
+                            .accessibilityIdentifier("installHost.directSSHOnly")
+                        }
+                        .padding(PIMetrics.pageMargin)
+                    }
+                    .navigationTitle("确认 Direct 证书与 hostId")
+                    .navigationBarTitleDisplayMode(.inline)
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -105,9 +178,13 @@ struct InstallAdaptorScreen: View {
                 kind: coordinator.postInstallWarning == nil ? .success : .warning,
                 text: coordinator.postInstallWarning == nil
                     ? "安装与设备验证完成"
-                    : "安装完成，但本机记录未写回",
+                    : "安装与设备验证完成，但有提示",
                 detail: coordinator.activity
             )
+            if let directError = coordinator.directError {
+                PIInlineMessage(kind: .warning, text: directError)
+                    .accessibilityIdentifier("installHost.directError")
+            }
             if let notice = coordinator.releaseNotice {
                 PIStatusBanner(
                     kind: .warning,
@@ -116,6 +193,18 @@ struct InstallAdaptorScreen: View {
                 )
                 .accessibilityIdentifier("installHost.fallbackNotice")
             }
+        case .directFailed:
+            PIStatusBanner(
+                kind: .warning,
+                text: "配对已完成，Direct 首验未完成",
+                detail: coordinator.directError ?? "Direct 首验失败"
+            )
+            .accessibilityIdentifier("installHost.directError")
+            Text(coordinator.activity)
+                .font(PIFont.caption)
+                .foregroundStyle(PIColor.text2)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("installHost.directRetryActivity")
         case .failed:
             PIInlineMessage(
                 kind: .danger,
@@ -173,6 +262,14 @@ struct InstallAdaptorScreen: View {
         }
     }
 
+    private func wrappedFingerprint(_ raw: String) -> String {
+        stride(from: 0, to: raw.count, by: 16).map { offset in
+            let start = raw.index(raw.startIndex, offsetBy: offset)
+            let end = raw.index(start, offsetBy: min(16, raw.distance(from: start, to: raw.endIndex)))
+            return String(raw[start..<end])
+        }.joined(separator: "\n")
+    }
+
     private func receiptSourceSuffix(_ receipt: AdaptorInstallReceipt) -> String {
         switch receipt.releaseSource {
         case .latest:
@@ -201,6 +298,28 @@ struct InstallAdaptorScreen: View {
                         .autocorrectionDisabled()
                         .focused($portFocused)
                         .accessibilityIdentifier("installHost.port")
+                }
+                PIFormField(
+                    label: "Direct endpoint（可选）",
+                    hint: "留空表示仅 SSH；手填后才可在可信 trust 到达后请求授权",
+                    error: directConfigurationError
+                ) {
+                    TextField("wss://host:9443/v1/racp/ws", text: $directEndpoint)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("installHost.directEndpoint")
+                }
+                PIFormField(label: "Direct SAN DNS/IP") {
+                    TextField("host.example 或 100.64.0.10", text: $directName)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("installHost.directName")
+                }
+                PIFormField(label: "Direct 监听端口", hint: "独立于 loopback 端口") {
+                    TextField("9443", text: $directPortText)
+                        .keyboardType(.numberPad)
+                        .accessibilityIdentifier("installHost.directPort")
                 }
                 Text("自动安装 GitHub 最新稳定发布；不可用时回退内置版本。")
                     .font(PIFont.caption)
@@ -332,6 +451,8 @@ struct InstallAdaptorScreen: View {
                             host: host,
                             port: port,
                             sudoCredential: sudoCredential,
+                            direct: directConfiguration,
+                            directEndpoint: canonicalDirectEndpoint,
                             model: model,
                             connection: connection
                         )
@@ -348,6 +469,21 @@ struct InstallAdaptorScreen: View {
 
     private var actions: some View {
         VStack(spacing: PISpacing.s12) {
+            if coordinator.phase == .directFailed, let host {
+                PIPrimaryButton(
+                    title: "仅使用 SSH 完成",
+                    isEnabled: true,
+                    identifier: "installHost.completeSSHOnly"
+                ) {
+                    Task {
+                        await coordinator.completeDirectWithSSHOnly(
+                            host: host,
+                            model: model,
+                            connection: connection
+                        )
+                    }
+                }
+            }
             Toggle(isOn: $forceReinstall) {
                 VStack(alignment: .leading, spacing: PISpacing.s4) {
                     Text("强制重装（忽略已装版本）")
@@ -366,14 +502,26 @@ struct InstallAdaptorScreen: View {
                 identifier: "installHost.start"
             ) {
                 portFocused = false
-                guard let host, let port = Int(portText.piTrimmed) else { return }
-                coordinator.start(
-                    host: host,
-                    port: port,
-                    forceReinstall: forceReinstall,
-                    model: model,
-                    connection: connection
-                )
+                if coordinator.phase == .directFailed, let host {
+                    Task {
+                        await coordinator.retryDirectOnly(
+                            host: host,
+                            model: model,
+                            connection: connection
+                        )
+                    }
+                } else {
+                    guard let host, let port = Int(portText.piTrimmed) else { return }
+                    coordinator.start(
+                        host: host,
+                        port: port,
+                        forceReinstall: forceReinstall,
+                        direct: directConfiguration,
+                        directEndpoint: canonicalDirectEndpoint,
+                        model: model,
+                        connection: connection
+                    )
+                }
             }
             HStack(spacing: PISpacing.s12) {
                 PISecondaryButton(
@@ -415,6 +563,8 @@ struct InstallAdaptorScreen: View {
         switch coordinator.phase {
         case .running, .stalled:
             return "正在安装…"
+        case .directFailed:
+            return "重试 Direct"
         case .failed:
             switch coordinator.failureCode {
             case .downloadFailed, .checksumMismatch:
@@ -472,6 +622,11 @@ struct InstallAdaptorScreen: View {
         } else {
             portText = "44271"
         }
+        directEndpoint = host?.directEndpoint ?? ""
+        if let endpoint = host?.directEndpoint.flatMap(URL.init(string:)) {
+            directName = endpoint.host ?? ""
+            directPortText = endpoint.port.map(String.init) ?? "9443"
+        }
     }
 }
 
@@ -527,6 +682,7 @@ private final class InstallAdaptorCoordinator: ObservableObject {
         case running
         case stalled
         case success
+        case directFailed
         case failed
     }
 
@@ -537,6 +693,7 @@ private final class InstallAdaptorCoordinator: ObservableObject {
     @Published private(set) var failureCode: BootstrapFailureCode?
     @Published private(set) var failureDetail: String?
     @Published private(set) var failureCount = 0
+    @Published private(set) var isFailureAlertDismissed = false
     @Published private(set) var transitionNotes: [String] = []
     @Published private(set) var postInstallWarning: String?
     @Published private(set) var resolvedRelease: AdaptorReleaseResolution?
@@ -545,8 +702,12 @@ private final class InstallAdaptorCoordinator: ObservableObject {
     @Published private(set) var logText: String?
     @Published private(set) var logError: String?
     @Published private(set) var isLoadingLog = false
+    @Published private(set) var pendingDirectTrust: BootstrapDirectTrust?
+    @Published private(set) var directError: String?
+    @Published private(set) var directAttemptId: String?
 
     private var runTask: Task<Void, Never>?
+    private var trustContinuation: CheckedContinuation<Bool, Never>?
     private var runID = UUID()
 
 #if DEBUG
@@ -570,6 +731,22 @@ private final class InstallAdaptorCoordinator: ObservableObject {
         default:
             break
         }
+        switch ProcessInfo.processInfo.environment["PI_IOS_INSTALL_FIXTURE_DIRECT"] {
+        case "confirm":
+            let trustJSON = "{\"schemaVersion\":1,\"attemptId\":\"fixture-direct\",\"hostId\":\"host_fixture_direct\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"notBefore\":\"2026-01-01T00:00:00Z\",\"notAfter\":\"2099-01-01T00:00:00Z\"}"
+            let trust = try! BootstrapDirectTrust.parse(
+                data: Data(trustJSON.utf8),
+                expectedAttemptId: "fixture-direct"
+            )
+            Task { @MainActor in self.pendingDirectTrust = trust }
+        case "failed":
+            phase = .directFailed
+            directError = "tlsTrust：UI fixture 的 Direct 首验失败"
+            directAttemptId = "fixture-direct-failed"
+            activity = "配对与 hostId 已保存；Direct 首验失败，等待你明确选择。"
+        default:
+            break
+        }
     }
 #endif
 
@@ -583,11 +760,30 @@ private final class InstallAdaptorCoordinator: ObservableObject {
     }
 
     func dismissFailure() {
-        failureDetail = nil
+        isFailureAlertDismissed = true
     }
 
     func dismissLogError() {
         logError = nil
+    }
+
+    private func requestDirectAuthorization(_ trust: BootstrapDirectTrust) async -> Bool {
+        pendingDirectTrust = trust
+        return await withCheckedContinuation { continuation in
+            trustContinuation = continuation
+        }
+    }
+
+    func authorizePendingDirectTrust() {
+        pendingDirectTrust = nil
+        trustContinuation?.resume(returning: true)
+        trustContinuation = nil
+    }
+
+    func rejectPendingDirectTrust() {
+        pendingDirectTrust = nil
+        trustContinuation?.resume(returning: false)
+        trustContinuation = nil
     }
 
     func start(
@@ -595,11 +791,14 @@ private final class InstallAdaptorCoordinator: ObservableObject {
         port: Int,
         sudoCredential: String? = nil,
         forceReinstall: Bool = false,
+        direct: BootstrapDirectConfiguration? = nil,
+        directEndpoint: String? = nil,
         model: AppModel,
         connection: ConnectionModel
     ) {
         guard !isRunning else { return }
         let generation = UUID()
+        let previousDirectAttempt = directAttemptId
         runID = generation
         phase = .running
         state = nil
@@ -607,13 +806,23 @@ private final class InstallAdaptorCoordinator: ObservableObject {
         stallMessage = nil
         failureCode = nil
         failureDetail = nil
+        isFailureAlertDismissed = false
         transitionNotes = []
         postInstallWarning = nil
         resolvedRelease = nil
         releaseNotice = nil
+        directError = nil
+        directAttemptId = nil
+        rejectPendingDirectTrust()
 
         runTask = Task { [weak self] in
             guard let self else { return }
+            if let previousDirectAttempt {
+                await connection.completeInstallSSHOnly(
+                    hostID: host.id,
+                    attemptId: previousDirectAttempt
+                )
+            }
             do {
                 if let sudoCredential {
                     guard !sudoCredential.isEmpty else {
@@ -630,6 +839,12 @@ private final class InstallAdaptorCoordinator: ObservableObject {
                     record: host,
                     port: port,
                     force: forceReinstall,
+                    direct: direct,
+                    directEndpoint: directEndpoint,
+                    directTrustAuthorizer: { [weak self] trust in
+                        guard let self, direct != nil, directEndpoint != nil else { return false }
+                        return await self.requestDirectAuthorization(trust)
+                    },
                     onReleaseResolved: { resolution in
                         guard self.runID == generation else { return }
                         self.resolvedRelease = resolution
@@ -649,11 +864,13 @@ private final class InstallAdaptorCoordinator: ObservableObject {
             } catch is CancellationError {
                 guard self.runID == generation else { return }
                 self.phase = .failed
+                self.isFailureAlertDismissed = false
                 self.failureCount += 1
                 self.failureDetail = "安装任务已取消；服务器上的后台任务可能仍在继续，可查看日志或重试。"
             } catch {
                 guard self.runID == generation else { return }
                 self.phase = .failed
+                self.isFailureAlertDismissed = false
                 self.failureCount += 1
                 self.failureDetail = ConnectionErrorText.describe(error)
             }
@@ -716,6 +933,23 @@ private final class InstallAdaptorCoordinator: ObservableObject {
                 saveError: model.saveError
             ) {
             case .succeeded:
+                if outcome.requiresSSHOnlyConfirmation {
+                    phase = .directFailed
+                    directError = outcome.directError ?? "Direct 首验失败"
+                    directAttemptId = outcome.attemptId
+                    postInstallWarning = outcome.directError
+                    activity = "配对与 hostId 已保存；Direct 首验失败，等待你明确选择。"
+                    failureCode = nil
+                    failureDetail = nil
+                    return
+                }
+                if let directError = outcome.directError {
+                    phase = .failed
+                    isFailureAlertDismissed = false
+                    failureDetail = directError
+                    failureCount += 1
+                    return
+                }
                 let info = success.serverInfo
                 phase = .success
                 let sourceName = outcome.releaseSource?.displayName ?? "版本来源未知"
@@ -730,6 +964,7 @@ private final class InstallAdaptorCoordinator: ObservableObject {
                 connectAfterInstall(host: host, model: model, connection: connection)
             case .failed(let reason):
                 phase = .failed
+                isFailureAlertDismissed = false
                 failureCode = .receiptFailed
                 failureDetail = "远端安装与运行验证已通过，但无法提交本机服务器记录：\(reason)"
                 postInstallWarning = reason
@@ -738,6 +973,7 @@ private final class InstallAdaptorCoordinator: ObservableObject {
         case .failed(let failure):
             state = failure.state
             phase = .failed
+            isFailureAlertDismissed = false
             failureCode = failure.code
             let meta = failureMeta(failure)
             if let source = outcome.releaseSource,
@@ -752,9 +988,56 @@ private final class InstallAdaptorCoordinator: ObservableObject {
             failureCount += 1
         case .unsupported(let reason):
             phase = .failed
+            isFailureAlertDismissed = false
             failureCode = reason.code
             failureDetail = reason.message
             failureCount += 1
+        }
+    }
+
+    func completeDirectWithSSHOnly(
+        host: HostRecord,
+        model: AppModel,
+        connection: ConnectionModel
+    ) async {
+        guard let directAttemptId else { return }
+        await connection.completeInstallSSHOnly(hostID: host.id, attemptId: directAttemptId)
+        phase = .success
+        activity = "已明确选择仅使用 SSH；配对与 hostId 保持有效，Direct 错误仍保留供诊断。"
+        postInstallWarning = directError
+        self.directAttemptId = nil
+        connectAfterInstall(host: host, model: model, connection: connection)
+    }
+
+    func retryDirectOnly(
+        host: HostRecord,
+        model: AppModel,
+        connection: ConnectionModel
+    ) async {
+        guard let directAttemptId else { return }
+        phase = .running
+        activity = "仅重试 Direct 首验，不重新安装或配对；SSH 保持到结果明确。"
+        guard let outcome = await connection.retryBootstrapDirect(
+            record: host,
+            attemptId: directAttemptId
+        ) else {
+            phase = .directFailed
+            directError = "当前没有可重试的 Direct 首验上下文"
+            activity = "仅重试 Direct 首验，不重新配对。"
+            return
+        }
+        directError = outcome.directError
+        if outcome.directVerified {
+            phase = .success
+            postInstallWarning = nil
+            activity = "Direct 首验成功，未重新执行安装或配对。"
+            self.directAttemptId = nil
+            connectAfterInstall(host: host, model: model, connection: connection)
+        } else {
+            phase = .directFailed
+            self.directAttemptId = outcome.attemptId
+            postInstallWarning = outcome.directError
+            activity = "Direct 首验仍失败；可仅使用 SSH，或仅重试 Direct，不会重新配对。"
         }
     }
 
