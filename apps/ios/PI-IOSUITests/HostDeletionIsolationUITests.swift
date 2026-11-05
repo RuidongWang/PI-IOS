@@ -3,16 +3,17 @@ import XCTest
 final class HostDeletionIsolationUITests: XCTestCase {
     private var app: XCUIApplication!
 
-    override func setUp() {
+    /// 门禁必须在 `launch()` 之前：应用启动会读取真实状态并自动连接已配对 host。
+    override func setUpWithError() throws {
         continueAfterFailure = false
+        guard ProcessInfo.processInfo.environment["PI_IOS_DELETE_HOST_B"] == "1" else {
+            throw XCTSkip("Set PI_IOS_DELETE_HOST_B=1 for the real PI-adaptor deletion isolation run.")
+        }
         app = XCUIApplication()
         app.launch()
     }
 
     func testDeletingHostBOnlyRemovesLocalRecord() throws {
-        guard ProcessInfo.processInfo.environment["PI_IOS_DELETE_HOST_B"] == "1" else {
-            throw XCTSkip("Set PI_IOS_DELETE_HOST_B=1 for the real PI-adaptor deletion isolation run.")
-        }
         let hostAName = ProcessInfo.processInfo.environment["PI_IOS_HOST_A_NAME"] ?? "嗷嗷"
         let hostBName = ProcessInfo.processInfo.environment["PI_IOS_HOST_B_NAME"] ?? "QA PI-adaptor B"
 

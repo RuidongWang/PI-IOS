@@ -50,10 +50,13 @@ final class PrivateKeyImportUITests: XCTestCase {
 
         app.buttons["servers.pasteKey.import"].tap()
 
+        // 不能只查“含私钥”的文本：弹层标题「私钥全文（以 -----BEGIN 开头）」永远存在，
+        // 那样即使导入按钮什么都没做、弹层没关，也会假通过。
+        let error = app.staticTexts["servers.pasteKey.error"]
+        XCTAssertTrue(error.waitForExistence(timeout: 5), "无效内容必须显示可读的失败原因")
         XCTAssertTrue(
-            app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "私钥")).firstMatch
-                .waitForExistence(timeout: 5),
-            "无效内容必须显示可读的失败原因"
+            error.label.contains("没有找到私钥块"),
+            "失败原因要具体说明找不到私钥块，实际：\(error.label)"
         )
         XCTAssertTrue(editor.exists, "校验失败时弹窗必须保持打开，方便改完再导入")
     }
@@ -62,7 +65,7 @@ final class PrivateKeyImportUITests: XCTestCase {
 
     /// 侧边栏 → 设置 → 添加服务器（私钥入口只在服务器表单里）。
     private func openServersScreen() throws {
-        let menu = app.buttons["line.3.horizontal"]
+        let menu = app.buttons["打开侧边栏"]
         XCTAssertTrue(menu.waitForExistence(timeout: 10), "会话页必须有侧边栏入口")
         menu.tap()
         // 侧边栏底部三个根入口：会话 / 项目 / 设置。

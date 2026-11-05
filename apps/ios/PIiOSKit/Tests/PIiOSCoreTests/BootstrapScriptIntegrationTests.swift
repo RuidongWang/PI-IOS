@@ -74,6 +74,33 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         }
     }
 
+    func testOpenSSLFailureDuringSANChangeKeepsOldIdentityAndLoopbackSucceeds() throws {
+        let environment = try makeEnvironment(opensslFails: true, existingDirectIdentity: true)
+        let direct = try BootstrapDirectConfiguration(
+            directName: "new.example",
+            directPort: 9443,
+            loopbackPort: 43_871
+        )
+        let process = try launch(
+            script: generatedScript(environment, direct: direct),
+            environment: environment
+        )
+        defer { terminateIfNeeded(process) }
+        try completePairingHandshake(environment: environment, process: process)
+        let state = try decodeState(environment.stateURL)
+        XCTAssertEqual(state.step, .done)
+        XCTAssertEqual(state.status, .ok)
+        let tls = environment.installRoot.appendingPathComponent("tls", isDirectory: true)
+        XCTAssertEqual(try Data(contentsOf: tls.appendingPathComponent("direct-cert.pem")), Data("old-cert".utf8))
+        XCTAssertEqual(try Data(contentsOf: tls.appendingPathComponent("direct-key.pem")), Data("old-key".utf8))
+        XCTAssertEqual(try Data(contentsOf: tls.appendingPathComponent("direct-name")), Data("old.example\n".utf8))
+        let unit = try String(
+            contentsOf: environment.home.appendingPathComponent(".config/systemd/user/pi-adaptor.service"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(unit.contains("PI_ADAPTOR_DIRECT_ENABLED=0"))
+    }
+
     func testDownloadFailureResumesAndDoesNotSwitchCurrent() throws {
         let environment = try makeEnvironment(downloadMode: "fail-once")
         let first = try launch(
@@ -483,7 +510,9 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         legacyEnableState: String = "enabled",
         failPiAdaptorStop: Bool = false,
         failLegacyRestore: Bool = false,
-        piAdaptorInitiallyActive: Bool = false
+        piAdaptorInitiallyActive: Bool = false,
+        opensslFails: Bool = false,
+        existingDirectIdentity: Bool = false
     ) throws -> Environment {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("pi-ios-bootstrap-integration-\(UUID().uuidString)", isDirectory: true)
@@ -614,6 +643,16 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
             to: fakeBin.appendingPathComponent("curl")
         )
         try writeExecutable(
+            "#!/bin/sh\ncase \"${1:-}\" in\n  -m) printf 'aarch64\\n' ;;\n  -s) printf 'Linux\\n' ;;\n  *) printf 'Linux\\n' ;;\nesac\n",
+            to: fakeBin.appendingPathComponent("uname")
+        )
+
+        try writeExecutable(
+            "#!/bin/sh\nif [ \"${FAKE_OPENSSL_FAIL:-0}\" = 1 ]; then exit 1; fi\nexec /usr/bin/openssl \"$@\"\n",
+            to: fakeBin.appendingPathComponent("openssl")
+        )
+
+        try writeExecutable(
             #"""
             #!/bin/sh
             set -eu
@@ -717,8 +756,16 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         processEnvironment["FAKE_DOWNLOAD_MODE"] = downloadMode
         processEnvironment["FAKE_DOWNLOAD_COUNT"] = downloadCount.path
         processEnvironment["REAL_NODE"] = realNode.path
+        processEnvironment["FAKE_OPENSSL_FAIL"] = opensslFails ? "1" : "0"
 
         let installRoot = home.appendingPathComponent(".pi-adaptor", isDirectory: true)
+        if existingDirectIdentity {
+            let tls = installRoot.appendingPathComponent("tls", isDirectory: true)
+            try FileManager.default.createDirectory(at: tls, withIntermediateDirectories: true)
+            try Data("old-cert".utf8).write(to: tls.appendingPathComponent("direct-cert.pem"))
+            try Data("old-key".utf8).write(to: tls.appendingPathComponent("direct-key.pem"))
+            try Data("old.example\n".utf8).write(to: tls.appendingPathComponent("direct-name"))
+        }
         let workDirectory = installRoot.appendingPathComponent(".bootstrap", isDirectory: true)
         return Environment(
             root: root,
@@ -738,7 +785,8 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
     private func generatedScript(
         _ environment: Environment,
         force: Bool = false,
-        allowLegacyPPT1: Bool = false
+        allowLegacyPPT1: Bool = false,
+        direct: BootstrapDirectConfiguration? = nil
     ) throws -> URL {
         let configuration = try BootstrapScriptConfiguration(
             release: environment.release,
@@ -750,7 +798,8 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
             stopTimeoutSeconds: 5,
             verifyTimeoutSeconds: 15,
             force: force,
-            allowLegacyPPT1: allowLegacyPPT1
+            allowLegacyPPT1: allowLegacyPPT1,
+            direct: direct
         )
         let url = environment.root.appendingPathComponent("bootstrap-\(UUID().uuidString).sh")
         try Data(BootstrapScriptBuilder.build(configuration).utf8).write(to: url)

@@ -4,6 +4,31 @@ import PIiOSCore
 @testable import PIiOSNet
 
 final class RemoteProviderOperationsTests: XCTestCase {
+    func testDiscoveryUsesActiveRACPAdHocSchemaWithoutIdempotencyOrSSH() async throws {
+        let client = RecordingProviderV2Client()
+        let models = try await RemoteProviderOperations.discoverModels(
+            client: client,
+            requestURL: "https://api.deepseek.com",
+            apiKey: "sk-test"
+        )
+        XCTAssertEqual(models.map(\.modelId), ["model_1", "model_2"])
+        XCTAssertNil(models.first?.contextWindow, "通用默认值不得冒充上游实测容量")
+        XCTAssertNil(models.first?.maxTokens)
+        XCTAssertEqual(models.first?.thinkingLevels, ["off", "high"])
+        XCTAssertEqual(models.last?.contextWindow, 256_000)
+        XCTAssertEqual(models.last?.maxTokens, 16_384)
+        XCTAssertNil(models.last?.thinkingLevels)
+        let recorded = await client.request(named: "provider/discover")
+        let request = try XCTUnwrap(recorded)
+        XCTAssertEqual(request.method, "provider/discover")
+        XCTAssertEqual(request.params.value(at: ["baseUrl"])?.stringValue, "https://api.deepseek.com")
+        XCTAssertEqual(request.params.value(at: ["apiKey"])?.stringValue, "sk-test")
+        XCTAssertNotNil(request.params.value(at: ["context", "requestId"])?.stringValue)
+        XCTAssertNil(request.params.value(at: ["context", "idempotencyKey"]))
+        XCTAssertNil(request.params.value(at: ["providerId"]))
+        XCTAssertEqual(request.timeout, 10)
+    }
+
     func testImportUsesProviderCreateWithWriteContext() async throws {
         let client = RecordingProviderV2Client()
         let payload = ProviderImportPayload.make(
@@ -253,6 +278,29 @@ private actor RecordingProviderV2Client: RACPV2Requesting {
         let provider = makeProvider(modelID: requestedModelId ?? "model_1")
         let value: JSONValue
         switch method {
+        case "provider/discover":
+            value = .object([
+                "models": .array([
+                    .object([
+                        "id": .string("model_1"),
+                        "displayName": .string("Model 1"),
+                        "contextWindow": .number(128_000),
+                        "maxTokens": .number(8_192),
+                        "thinkingLevels": .array([.string("off"), .string("high")]),
+                        "defaultThinkingLevel": .string("high"),
+                        "supportsImages": .bool(false),
+                    ]),
+                    .object([
+                        "id": .string("model_2"),
+                        "displayName": .string("Model 2"),
+                        "contextWindow": .number(256_000),
+                        "maxTokens": .number(16_384),
+                        "thinkingLevels": .array([]),
+                        "defaultThinkingLevel": .null,
+                        "supportsImages": .bool(true),
+                    ]),
+                ]),
+            ])
         case "provider/create", "provider/update":
             value = .object(["provider": provider])
         case "provider/list":

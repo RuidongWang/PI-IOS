@@ -11,8 +11,13 @@ final class ConnectionCodefixE2ETests: XCTestCase {
 
     private let marker = "PI-E2E-CODEFIX"
 
-    override func setUp() {
+    /// 门禁必须在 `launch()` 之前：应用启动会读取真实状态并自动连接已配对 host，
+    /// 放到测试方法里再跳过已经产生了真实网络访问。
+    override func setUpWithError() throws {
         continueAfterFailure = false
+        guard ProcessInfo.processInfo.environment["PI_IOS_CODE_FIX_E2E"] == "1" else {
+            throw XCTSkip("Set PI_IOS_CODE_FIX_E2E=1 to run the live connection E2E.")
+        }
         app = XCUIApplication()
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         app.launch()
@@ -20,12 +25,6 @@ final class ConnectionCodefixE2ETests: XCTestCase {
 
     override func tearDown() {
         app?.terminate()
-    }
-
-    private func requireLiveHost() throws {
-        guard ProcessInfo.processInfo.environment["PI_IOS_CODE_FIX_E2E"] == "1" else {
-            throw XCTSkip("Set PI_IOS_CODE_FIX_E2E=1 to run the live connection E2E.")
-        }
     }
 
     private func showRoot(_ title: String) {
@@ -129,7 +128,6 @@ final class ConnectionCodefixE2ETests: XCTestCase {
     // MARK: - AC-08
 
     func testAC08StreamingThenRunStateClearedOnCompletion() throws {
-        try requireLiveHost()
         openLiveSession()
 
         let running = app.staticTexts["conversation.runningTurn"]
@@ -160,7 +158,6 @@ final class ConnectionCodefixE2ETests: XCTestCase {
     // MARK: - AC-09
 
     func testAC09InterruptStopsTurnAndClearsRunningState() throws {
-        try requireLiveHost()
         openLiveSession()
 
         send("\(marker) 请写一篇大约八百字的中文说明文，介绍远程协作的优缺点，不要使用工具。")

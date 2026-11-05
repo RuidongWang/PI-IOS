@@ -19,11 +19,19 @@
 			remoteGlobalIDString = AA0000000000000000000005;
 			remoteInfo = "PI-IOS";
 		};
+		CC0000000000000000000008 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA0000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA0000000000000000000005;
+			remoteInfo = "PI-IOS";
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		AA0000000000000000000006 /* PI-IOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "PI-IOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB0000000000000000000002 /* PI-IOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "PI-IOSUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC0000000000000000000002 /* PI-IOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "PI-IOSTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -35,6 +43,11 @@
 		BB0000000000000000000001 /* PI-IOSUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "PI-IOSUITests";
+			sourceTree = "<group>";
+		};
+		CC0000000000000000000001 /* PI-IOSTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "PI-IOSTests";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -56,6 +69,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CC0000000000000000000005 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -64,6 +84,7 @@
 			children = (
 				AA0000000000000000000004 /* PI-IOS */,
 				BB0000000000000000000001 /* PI-IOSUITests */,
+				CC0000000000000000000001 /* PI-IOSTests */,
 				AA0000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -73,6 +94,7 @@
 			children = (
 				AA0000000000000000000006 /* PI-IOS.app */,
 				BB0000000000000000000002 /* PI-IOSUITests.xctest */,
+				CC0000000000000000000002 /* PI-IOSTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -125,6 +147,27 @@
 			productReference = BB0000000000000000000002 /* PI-IOSUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		CC0000000000000000000003 /* PI-IOSTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC0000000000000000000011 /* Build configuration list for PBXNativeTarget "PI-IOSTests" */;
+			buildPhases = (
+				CC0000000000000000000004 /* Sources */,
+				CC0000000000000000000005 /* Frameworks */,
+				CC0000000000000000000006 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				CC0000000000000000000007 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				CC0000000000000000000001 /* PI-IOSTests */,
+			);
+			name = "PI-IOSTests";
+			productName = "PI-IOSTests";
+			productReference = CC0000000000000000000002 /* PI-IOSTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -139,6 +182,10 @@
 						CreatedOnToolsVersion = 27.0;
 					};
 					BB0000000000000000000003 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = AA0000000000000000000005;
+					};
+					CC0000000000000000000003 = {
 						CreatedOnToolsVersion = 27.0;
 						TestTargetID = AA0000000000000000000005;
 					};
@@ -164,6 +211,7 @@
 			targets = (
 				AA0000000000000000000005 /* PI-IOS */,
 				BB0000000000000000000003 /* PI-IOSUITests */,
+				CC0000000000000000000003 /* PI-IOSTests */,
 			);
 		};
 /* End PBXProject section */
@@ -177,6 +225,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		BB0000000000000000000006 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC0000000000000000000006 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -200,6 +255,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CC0000000000000000000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -207,6 +269,11 @@
 			isa = PBXTargetDependency;
 			target = AA0000000000000000000005 /* PI-IOS */;
 			targetProxy = BB0000000000000000000008 /* PBXContainerItemProxy */;
+		};
+		CC0000000000000000000007 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA0000000000000000000005 /* PI-IOS */;
+			targetProxy = CC0000000000000000000008 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -432,6 +499,52 @@
 			};
 			name = Release;
 		};
+		CC0000000000000000000012 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.piios.PI-IOSTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PI-IOS.app/PI-IOS";
+				TEST_TARGET_NAME = "PI-IOS";
+			};
+			name = Debug;
+		};
+		CC0000000000000000000013 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.piios.PI-IOSTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PI-IOS.app/PI-IOS";
+				TEST_TARGET_NAME = "PI-IOS";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -476,6 +589,15 @@
 			buildConfigurations = (
 				BB000000000000000000000A /* Debug */,
 				BB000000000000000000000B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC0000000000000000000011 /* Build configuration list for PBXNativeTarget "PI-IOSTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC0000000000000000000012 /* Debug */,
+				CC0000000000000000000013 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -20,7 +20,12 @@ final class OfflineCacheLimitUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 8))
         row.tap()
-        XCTAssertTrue(app.staticTexts["离线只读 · 缓存可能已过期"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label CONTAINS %@", "离线只读 · 缓存可能已过期"))
+                .firstMatch
+                .waitForExistence(timeout: 5)
+        )
 
         XCTAssertFalse(app.staticTexts["Cache item 005"].exists, "最旧 5 条应被缓存上限淘汰")
         XCTAssertTrue(app.staticTexts["Cache item 006"].exists)

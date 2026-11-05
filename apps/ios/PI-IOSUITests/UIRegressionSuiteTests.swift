@@ -337,33 +337,8 @@ final class UIRegressionSuiteTests: XCTestCase {
         app.buttons["完成"].firstMatch.tap()
         expect("INS-05", app.navigationBars["安装 PI-adaptor"].waitForExistence(timeout: 5), "关闭后安装页")
 
-        launch("offline-two-hosts", installFailure: "download-twice")
-        openInstall()
-        expect("INS-02", app.alerts["安装未完成"].waitForExistence(timeout: 5), "下载失败弹框")
-        app.alerts["安装未完成"].buttons["知道了"].tap()
-        expect("INS-02", text("安装失败详情见下方「故障分类」。"), "关闭弹框后就近保留失败入口")
-        expect("INS-02", text("download-failed"), "下载失败分类")
-        expect("INS-02", app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "已连续失败 2 次")).firstMatch.exists, "连续失败提示")
-        expect("INS-02", app.buttons["installHost.start"].label == "重试下载", "重试下载按钮")
-        expect("INS-02", app.buttons["installHost.back"].exists, "返回服务器按钮")
-        snapshot("INS-02", step: 1)
-
-        launch("offline-two-hosts", installFailure: "pair-expired")
-        openInstall()
-        expect("INS-03", text("pair-failed"), "配对失败分类")
-        expect("INS-03", text("配对失败后服务器已恢复原状态；重试会重新启动配对。"), "配对恢复说明")
-        expect("INS-03", app.buttons["installHost.start"].label == "重新配对", "重新配对按钮")
-        snapshot("INS-03", step: 1)
-
-        launch("offline-two-hosts", installFailure: "sudo-failure")
-        openInstall()
-        expect("INS-04", text("unit-failed"), "unit 失败分类")
-        let sudo = app.secureTextFields["installHost.sudoCredential"]
-        let retry = app.buttons["installHost.retrySudo"]
-        expect("INS-04", sudo.waitForExistence(timeout: 5) && retry.exists, "内联 sudo 控件")
-        expect("INS-04", !retry.isEnabled, "空密码禁用重新授权")
-        expect("INS-04", !app.buttons["installHost.start"].isEnabled, "unit-failed 主按钮禁用")
-        snapshot("INS-04", step: 1)
+        // INS-02/03/04 的失败页断言由 `InstallRecoveryUITests` 独占维护：
+        // 同一夹具、同一页面，原先在这里再启动三次 App 属于纯重复。
     }
 
     // MARK: - Models, providers, and skills
@@ -706,17 +681,8 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("CNV-02", app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "回到最新")).firstMatch.exists, "回到最新入口")
         snapshot("CNV-02", step: 1)
 
-        launch("online-tool-result-body")
-        openSession("S1", title: "Fixture S1 Alpha")
-        let completedToggle = app.descendants(matching: .any)["toolCard.call_done.toggle"].firstMatch
-        expect("CNV-03", text("工具 · bash") && completedToggle.exists, "工具卡折叠态")
-        completedToggle.tap()
-        expect("CNV-03", app.staticTexts["toolCard.call_done.preview"].label.contains("hello-from-tool"), "已完成工具正文")
-        expect("CNV-03", !text("服务器没有返回工具输出正文。"), "有正文时不显示空正文")
-        completedToggle.tap()
-        app.descendants(matching: .any)["toolCard.call_running.toggle"].firstMatch.tap()
-        expect("CNV-03", text("工具执行中…") && !text("服务器没有返回工具输出正文。"), "运行中卡文案")
-        snapshot("CNV-03", step: 1)
+        // CNV-03（工具卡正文/运行中文案）由 `ToolCardBodyUITests` 用同一夹具独占覆盖：
+        // 那里的断言更精确（预览标识 + 全文匹配），这里不再重复启动一次 App。
 
         launch("online-model-config")
         openSession("S2", title: "Alpha Two")
@@ -758,8 +724,12 @@ final class UIRegressionSuiteTests: XCTestCase {
         app.buttons["完成"].firstMatch.tap()
         app.buttons["打开侧边栏"].tap()
         app.buttons["sidebar.session.S2"].tap()
+        expect("CNV-11", app.navigationBars["Alpha Two"].waitForExistence(timeout: 5), "切到运行中的 S2")
         let chip = app.buttons["composer.permissionChip"]
-        expect("CNV-11", !chip.isEnabled || !app.navigationBars["会话配置"].exists, "运行中 chips 禁用")
+        expect("CNV-11", chip.waitForExistence(timeout: 5), "运行中仍显示权限 chip")
+        // 旧断言 `!chip.isEnabled || !配置页.exists` 中后一项在没点 chip 时恒为真：
+        // 生产里去掉运行中禁用也能通过。这里直接断言禁用本身。
+        expect("CNV-11", !chip.isEnabled, "运行中 chips 必须禁用")
         snapshot("CNV-11", step: 1)
 
         launch("online-model-config")
@@ -823,8 +793,8 @@ final class UIRegressionSuiteTests: XCTestCase {
     func testOfflineCases() {
         launch("offline-two-hosts", closeSidebar: false)
         app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "fixture-session-B")).firstMatch.tap()
-        expect("OFF-01", textContaining("离线，内容可能不是最新"), "会话操作区上方离线提示")
-        expect("OFF-01", text("缓存的历史（只读）") && text("离线只读 · 缓存可能已过期"), "缓存历史标识")
+        expect("OFF-01", textContaining("隧道未建立时只能读到本机缓存"), "会话操作区上方离线提示")
+        expect("OFF-01", text("缓存的历史（只读）") && textContaining("离线只读 · 缓存可能已过期"), "缓存历史标识")
         expect("OFF-01", text("缓存的待审批（1）") && text("离线时不可提交，恢复在线后再操作。"), "缓存审批说明")
         expect("OFF-01", text("未发送草稿（离线只读）") && text("Fixture B unsent draft"), "缓存草稿")
         expect("OFF-01", text("Fixture B private history"), "缓存历史文本")
@@ -836,7 +806,7 @@ final class UIRegressionSuiteTests: XCTestCase {
 
         launch("offline-cache-205", closeSidebar: false)
         app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "fixture-cache-session")).firstMatch.tap()
-        expect("OFF-02", text("离线只读 · 缓存可能已过期"), "缓存横幅")
+        expect("OFF-02", textContaining("离线只读 · 缓存可能已过期"), "缓存横幅")
         expect("OFF-02", !text("Cache item 005"), "005 已裁剪")
         expect("OFF-02", text("Cache item 006"), "006 保留")
         for _ in 0..<30 where !text("Cache item 205") { app.swipeUp() }
@@ -1103,7 +1073,6 @@ final class UIRegressionSuiteTests: XCTestCase {
 
     private func launch(
         _ scenario: String? = nil,
-        installFailure: String? = nil,
         closeSidebar: Bool = true
     ) {
         app.terminate()
@@ -1111,9 +1080,6 @@ final class UIRegressionSuiteTests: XCTestCase {
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         if let scenario {
             app.launchEnvironment["PI_IOS_UI_FIXTURE_SCENARIO"] = scenario
-        }
-        if let installFailure {
-            app.launchEnvironment["PI_IOS_INSTALL_FIXTURE_FAILURE"] = installFailure
         }
         app.launch()
         _ = app.wait(for: .runningForeground, timeout: 10)

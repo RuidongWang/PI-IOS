@@ -14,8 +14,10 @@ final class ServerInstallLatestUITests: XCTestCase {
         app.launch()
 
         openSettings(app)
+        let expectedHost = ProcessInfo.processInfo.environment["PI_IOS_EXPECTED_HOST"]
+            ?? "134.185.91.116"
         let hostRow = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS %@", "134.185.91.116")
+            NSPredicate(format: "label CONTAINS %@", expectedHost)
         ).firstMatch
         guard hostRow.waitForExistence(timeout: 15) else {
             throw XCTSkip("模拟器里没有已保存的真实服务器记录")
@@ -43,7 +45,7 @@ final class ServerInstallLatestUITests: XCTestCase {
         // 解析完成后界面必须显示本次目标版本与来源。
         let resolved = app.staticTexts["installHost.resolvedRelease"]
         XCTAssertTrue(resolved.waitForExistence(timeout: 120), "未显示解析到的目标版本")
-        XCTAssertTrue(resolved.label.contains("0.0.1"), resolved.label)
+        XCTAssertTrue(resolved.label.contains("0.0.2"), resolved.label)
         if resolved.label.contains("GitHub 最新稳定发布") {
             print("LIVE_RELEASE_SOURCE=latest label=\(resolved.label)")
         } else {

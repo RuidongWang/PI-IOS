@@ -51,7 +51,10 @@ final class ProjectsLaunchUITests: XCTestCase {
             "The projects screen must expose a non-mutating path to the directory browser."
         )
 
-        guard addProject.isEnabled else { return }
+        // 静默 return 会把“没跑”报成通过；目录不可浏览时明确记为跳过。
+        guard addProject.isEnabled else {
+            throw XCTSkip("The current PI-adaptor has no browsable project catalog.")
+        }
         addProject.tap()
 
         let sheet = app.descendants(matching: .any)
@@ -330,15 +333,18 @@ final class ProjectsLaunchUITests: XCTestCase {
         let models = app.buttons
             .matching(NSPredicate(format: "label CONTAINS %@", "模型服务"))
             .firstMatch
-        guard models.waitForExistence(timeout: 10) else {
-            throw XCTSkip("The model-services entry is unavailable in this App state.")
-        }
+        // 设置里的「模型服务」入口与认证预设不依赖 host；缺失是回归，不是环境跳过。
+        XCTAssertTrue(
+            models.waitForExistence(timeout: 10),
+            "The model-services entry must exist in Settings."
+        )
         models.tap()
 
         let subscription = segmentedButton(named: "订阅账号登录")
-        guard subscription.waitForExistence(timeout: 10) else {
-            throw XCTSkip("The authentication preset control is not reachable on this screen.")
-        }
+        XCTAssertTrue(
+            subscription.waitForExistence(timeout: 10),
+            "The authentication preset control must be reachable on the model-services screen."
+        )
         XCTAssertTrue(segmentedButton(named: "API Key + Base URL").exists)
 
         let deepSeekPreset = segmentedButton(named: "DeepSeek 官方")

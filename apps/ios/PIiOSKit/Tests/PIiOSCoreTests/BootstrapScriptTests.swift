@@ -8,7 +8,8 @@ final class BootstrapScriptTests: XCTestCase {
 
     private func configuration(
         target: BootstrapArtifactTarget = .linuxArm64,
-        port: Int = 43_871
+        port: Int = 43_871,
+        direct: BootstrapDirectConfiguration? = nil
     ) throws -> BootstrapScriptConfiguration {
         let release = try XCTUnwrap(
             PIAdaptorRelease(
@@ -26,7 +27,8 @@ final class BootstrapScriptTests: XCTestCase {
             readyTimeoutSeconds: 90,
             pairTimeoutSeconds: 600,
             stopTimeoutSeconds: 20,
-            verifyTimeoutSeconds: 90
+            verifyTimeoutSeconds: 90,
+            direct: direct
         )
     }
 
@@ -181,6 +183,44 @@ final class BootstrapScriptTests: XCTestCase {
             XCTAssertTrue(script.contains(#"die "\#(code)""#), code)
         }
         XCTAssertTrue(script.contains(#"PI_HOST_BOOTSTRAP_FAILED no-home"#))
+    }
+
+    func testDirectBootstrapGeneratesSingleLeafAndCapturesAttemptTrustWithoutBreakingLoopback() throws {
+        let direct = try BootstrapDirectConfiguration(
+            directName: "host.example",
+            directPort: 9443,
+            loopbackPort: 43_871
+        )
+        let script = BootstrapScriptBuilder.build(try configuration(direct: direct))
+        XCTAssertTrue(script.contains("openssl req -x509 -newkey rsa:3072"))
+        XCTAssertTrue(script.contains("basicConstraints=critical,CA:FALSE"))
+        XCTAssertTrue(script.contains("extendedKeyUsage=serverAuth"))
+        XCTAssertTrue(script.contains("subjectAltName=$DIRECT_SAN"))
+        XCTAssertTrue(script.contains("chmod 600 \"$tls_staging/direct-key.pem\""))
+        XCTAssertTrue(script.contains("tls_staging=\"$DIRECT_TLS.staging.$$\""))
+        XCTAssertTrue(script.contains("openssl pkey -in \"$tls_staging/direct-key.pem\" -check"))
+        XCTAssertFalse(script.contains("rm -f \"$DIRECT_TLS/direct-cert.pem\" \"$DIRECT_TLS/direct-key.pem\""))
+        XCTAssertTrue(script.contains("PI_ADAPTOR_DIRECT_ENABLED=\"$DIRECT_ACTIVE\""))
+        XCTAssertTrue(script.contains("PI_ADAPTOR_DIRECT_PORT=\"$DIRECT_PORT\""))
+        XCTAssertTrue(script.contains("'PI_HOST_DIRECT_TRUST '*)"))
+        XCTAssertTrue(script.contains("chmod 600 \"$trust_tmp\""))
+        XCTAssertTrue(script.contains("DIRECT_ACTIVE=0"), "direct 失败不得阻断 loopback")
+        try assertShellParses(script)
+
+        let invalid = [
+            "wss://host.example", "host.example/path", "user@host.example", "host.example?token=x",
+        ]
+        for name in invalid + ["::::", "2001:db8:::1", "fe80::1%lo0"] {
+            XCTAssertThrowsError(try BootstrapDirectConfiguration(
+                directName: name, directPort: 9443, loopbackPort: 43_871
+            ), name)
+        }
+        XCTAssertNoThrow(try BootstrapDirectConfiguration(
+            directName: "2001:db8::1", directPort: 9443, loopbackPort: 43_871
+        ))
+        XCTAssertThrowsError(try BootstrapDirectConfiguration(
+            directName: "host.example", directPort: 43_871, loopbackPort: 43_871
+        ))
     }
 
     func testAttemptIdPortAndTimeoutsRejectUnsafeValues() throws {

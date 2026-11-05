@@ -72,7 +72,9 @@ final class OfflineHostCacheUITests: XCTestCase {
 
     private func assertReadOnlyConversation(host: String, kind: String, absent: String) {
         XCTAssertFalse(app.buttons["切换服务器"].exists, "Conversation assertions require a closed drawer.")
-        let readOnly = app.staticTexts["离线只读 · 缓存可能已过期"]
+        let readOnly = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "离线只读 · 缓存可能已过期"))
+            .firstMatch
         XCTAssertTrue(readOnly.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["离线：发送已禁用"].exists)
         let input = app.textFields["给 Agent 的指令"]

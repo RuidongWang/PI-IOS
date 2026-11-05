@@ -148,6 +148,50 @@ final class BootstrapRunnerTests: XCTestCase {
         }
     }
 
+    func testKeepTransportOpenPreservesBootstrapSSHForDirectValidation() async throws {
+        let transport = MockBootstrapTransport(
+            responses: [
+                BootstrapRemoteCommand.probe: [
+                    SSHExecResult(exitStatus: 0, stdout: Data("platform=Linux\narch=aarch64\n".utf8), stderr: Data()),
+                ],
+                BootstrapRemoteCommand.installScript: [success()],
+                BootstrapRemoteCommand.launch: [success()],
+                BootstrapRemoteCommand.readState: [
+                    try state(.startPair),
+                    try state(.stopManual),
+                    try state(.startUnit),
+                    try state(.verifyDevice),
+                    try state(.done, status: .ok),
+                ],
+                BootstrapRemoteCommand.readPairing: [pairingResult()],
+                BootstrapRemoteCommand.writePairingOK: [success()],
+                BootstrapRemoteCommand.writeVerificationOK: [success()],
+            ]
+        )
+        let pairing = RecordingPairer(result: BootstrapPairedDevice(
+            deviceId: "dev_1", deviceToken: issuedToken, roles: ["owner"]
+        ))
+        let runner = BootstrapRunner(
+            transport: transport,
+            pairing: pairing,
+            verifier: RecordingVerifier(),
+            configuration: BootstrapRunnerConfiguration(
+                pollInterval: 0.001,
+                overallTimeout: 10,
+                commandTimeout: 2
+            ),
+            sleeper: { _ in }
+        )
+        let result = try await runner.run(
+            configuration: try configuration(),
+            keepTransportOpen: true
+        )
+        guard case .succeeded = result else { return XCTFail("应成功：\(result)") }
+        XCTAssertFalse(transport.closed)
+        await transport.close()
+        XCTAssertTrue(transport.closed)
+    }
+
     func testUnsupportedPlatformDoesNotUploadOrDownload() async throws {
         let transport = MockBootstrapTransport(
             responses: [

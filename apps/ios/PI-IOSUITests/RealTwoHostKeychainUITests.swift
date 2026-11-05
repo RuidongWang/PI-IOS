@@ -3,8 +3,13 @@ import XCTest
 final class RealTwoHostKeychainUITests: XCTestCase {
     private var app: XCUIApplication!
 
-    override func setUp() {
+    /// 这台用例会真实配对、连接两台 host；必须先过显式门禁再启动，
+    /// 否则默认跑全量套件时应用会读取真实状态并自动连接已配对 host。
+    override func setUpWithError() throws {
         continueAfterFailure = false
+        guard ProcessInfo.processInfo.environment["PI_IOS_TWO_HOST_KEYCHAIN"] == "1" else {
+            throw XCTSkip("Set PI_IOS_TWO_HOST_KEYCHAIN=1 for the real two-host keychain run.")
+        }
         app = XCUIApplication()
         app.launch()
     }
@@ -29,7 +34,11 @@ final class RealTwoHostKeychainUITests: XCTestCase {
         }
         openHost(hostBName)
 
-        let field = app.secureTextFields["ppt1.…"]
+        // 生产占位符是 `ppt2.…`（v2 令牌）。写死旧 `ppt1.…` 会让未配对 host
+        // 永远走「已经配对」分支，首次配对路径反而没人覆盖。
+        let field = app.secureTextFields.matching(
+            NSPredicate(format: "placeholderValue CONTAINS %@ OR label CONTAINS %@", "ppt2", "ppt2")
+        ).firstMatch
         if field.waitForExistence(timeout: 8) {
             guard !token.isEmpty else {
                 throw XCTSkip("Provide PI_IOS_HOST_B_PAIRING_TOKEN for the first real two-PI-adaptor pairing run.")
