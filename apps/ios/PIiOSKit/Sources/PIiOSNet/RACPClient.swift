@@ -500,6 +500,9 @@ public actor RACPClient {
     private var status = ConnectionStatus()
     private var heartbeatFailureGeneration: UUID?
     private var promotionFenced = false
+    /// 当前连接意图的非秘密诊断标识与起点（用于阶段耗时）。
+    private var attemptIntent: String?
+    private var attemptStartedAt: ContinuousClock.Instant?
 
     private var nextRequestId = 1
     private var pending: [RACPIdentifier: PendingRequest] = [:]
@@ -1355,19 +1358,22 @@ public actor RACPClient {
     /// 发送一条消息。`idempotencyKey` 必须由调用方持久化并在重试时复用（AC-14.4）。
     ///
     /// `admission` 为 `.queue` 时表示当前有 turn 在跑，这条指令排队（AC-13.1）。
+    /// `apiKey` 只随本次请求发送（服务端不落盘）；不得写入日志、诊断或错误文本。
     public func startTurn(
         sessionId: String,
         text: String,
         attachments: [String] = [],
         admission: RACPTurnAdmission?,
         idempotencyKey: String,
+        apiKey: String? = nil,
         timeout: TimeInterval = 30
     ) async throws -> RACPTurnStartResult {
         let params = RACPTurnStartParams(
             sessionId: sessionId,
             admission: admission,
             input: RACPTurnInput(text: text, attachments: attachments.map(JSONValue.string)),
-            context: makeContext(idempotencyKey: idempotencyKey)
+            context: makeContext(idempotencyKey: idempotencyKey),
+            apiKey: apiKey
         )
         let result: RACPTurnStartResult = try await request(.turnStart, params: params, timeout: timeout)
         let status = result.turn.status?.lowercased()
@@ -1806,8 +1812,17 @@ public actor RACPClient {
         while !Task.isCancelled {
             let generation = UUID()
             let attemptRoute = route
+            attemptIntent = ConnectionDiagnostics.shortID(generation)
+            attemptStartedAt = ContinuousClock.now
             do {
                 let connectBudget = attemptRoute == .direct ? budgets.directConnect : budgets.sshConnect
+                ConnectionDiagnostics.shared.record(
+                    kind: .phase,
+                    intent: attemptIntent,
+                    route: attemptRoute,
+                    phase: "attempt.start",
+                    budgetSeconds: connectBudget
+                )
                 try await withTimeoutValue(seconds: connectBudget, phase: "RACP 建连与身份验证") {
                     try await self.establish(route: attemptRoute, generation: generation)
                     try await self.verifyIdentity(route: attemptRoute, generation: generation)
@@ -1931,13 +1946,17 @@ public actor RACPClient {
     /// 连续多少次「建立通道阶段」失败后停止自动重连。
     static let maxConnectionStageFailures = 3
 
-    /// 是不是“再怎么重试也一样”的失败：握手被关闭、认证失败、端口无人监听、主机密钥不被接受。
+    /// 是不是“再怎么重试也一样”的失败：认证失败、端口无人监听、主机密钥不被接受。
+    ///
+    /// `.closedByPeer` **不在此列**：移动网络切换、NAT 超时与 sshd `MaxStartups` 造成的
+    /// 握手期 EOF 都是瞬时的，把它算成确定性失败会让一次网络抖动在三次之后永久停连，
+    /// 只能靠用户手点「连接」恢复。上限仍然是 `maxConnectionStageFailures = 3`。
     static func isConnectionStageFailure(_ error: Error) -> Bool {
         guard let error = error as? SSHTransportError else { return false }
         switch error {
-        case .closedByPeer, .authenticationFailed, .tunnelRefused, .hostKeyAlgorithmUnsupported, .hostKeyUnreadable:
+        case .authenticationFailed, .tunnelRefused, .hostKeyAlgorithmUnsupported, .hostKeyUnreadable:
             return true
-        case .invalidPrivateKey, .hostKeyRejected, .timedOut, .channelClosed, .networkFailure:
+        case .closedByPeer, .invalidPrivateKey, .hostKeyRejected, .timedOut, .channelClosed, .networkFailure:
             return false
         }
     }
@@ -2039,6 +2058,9 @@ public actor RACPClient {
     }
 
     private func teardown(reason: String?, failing error: Error? = nil) async {
+        // Phase 1：先同步失效所有指针与 generation（不 await）。
+        // 失败路径不能被 EventLoopFuture.get() 这类不响应取消的关闭操作卡住，
+        // 旧 generation 必须在进入 Phase 2 之前就不可用（契约 §7.2 资源关闭 best-effort）。
         let oldConnection = connection
         connection = nil
         let oldSocket = socket
@@ -2057,12 +2079,6 @@ public actor RACPClient {
         isDrainingHostAcks = false
         pendingSessionAck = nil
         isDrainingSessionAcks = false
-        if let oldConnection {
-            await oldConnection.close()
-        } else {
-            await oldSocket?.close()
-            await oldTransport?.close()
-        }
         serverInfo = nil
         status.activeRoute = nil
         status.activeGeneration = nil
@@ -2070,6 +2086,37 @@ public actor RACPClient {
         failAllPending(with: error ?? RACPClientError.notConnected)
         if !state.isOnline || reason != nil {
             await emit(.state(.offline(reason: reason)))
+        }
+
+        // Phase 2：有界关闭，最多等 1s。超时只是放弃等待，资源由底层自行收尾。
+        let started = ContinuousClock.now
+        await Self.closeBounded(
+            connection: oldConnection,
+            socket: oldSocket,
+            transport: oldTransport
+        )
+        ConnectionDiagnostics.shared.record(
+            kind: .teardown,
+            intent: attemptIntent,
+            elapsedMs: ConnectionDiagnostics.milliseconds(since: started),
+            detail: "teardown"
+        )
+    }
+
+    /// 旧连接关闭最多等 1s；调用点必须已经同步失效 generation。
+    static func closeBounded(
+        connection: RACPConnection?,
+        socket: (any RACPSocket)?,
+        transport: SSHTransport?
+    ) async {
+        let closer = OldConnectionCloser(
+            connection: connection,
+            socket: socket,
+            transport: transport
+        )
+        _ = await boundedAsyncValue(seconds: 1) {
+            await closer.close()
+            return true
         }
     }
 
@@ -2145,7 +2192,19 @@ public actor RACPClient {
         }
         // 通知帧：契约没有冻结事件通知的方法名，因此不按前缀判定；
         // 只要求「无 id + 载荷能解出整数 sequence」——这是契约 §3.2 归约的必需字段。
-        guard envelope.id == nil, let method = envelope.method else { return }
+        guard envelope.id == nil, let method = envelope.method else {
+            // 通知类请求（如 `notifications/initialized`）失败时，adaptor 回的是
+            // `{id:null, error:{...}}`：既无 id 也无 method，以前被静默丢弃，
+            // 用户只能在下一请求上看到 UNAUTHORIZED。这里补一条非秘密诊断，不改协议行为。
+            if envelope.id == nil, envelope.method == nil, let error = envelope.error {
+                Self.recordUndeliverableNotificationError(
+                    error,
+                    phase: status.phase,
+                    intent: attemptIntent
+                )
+            }
+            return
+        }
         if let error = envelope.error {
             await emit(.error(code: error.normalizedCode, message: error.message))
             return
@@ -2247,6 +2306,25 @@ public actor RACPClient {
         case .ignored:
             return
         }
+    }
+
+    /// 通知帧失败没有可投递的等待者：只记录稳定分类与错误码，不记录 message/正文。
+    static func recordUndeliverableNotificationError(
+        _ error: RACPErrorBody,
+        phase: ConnectionPhase,
+        intent: String?
+    ) {
+        let category = connectionCategory(
+            RACPClientError.server(code: error.normalizedCode, message: error.message),
+            route: .ssh
+        )
+        ConnectionDiagnostics.shared.record(
+            kind: .droppedFrame,
+            intent: intent,
+            phase: phase.diagnosticName,
+            category: category,
+            detail: error.normalizedCode.rawValue
+        )
     }
 
     private func queueSessionAck(_ ack: PendingEventAck, from socket: any RACPSocket) async {
@@ -2494,6 +2572,13 @@ public actor RACPClient {
 
     private func emitPhase(_ phase: ConnectionPhase) async {
         status.phase = phase
+        ConnectionDiagnostics.shared.record(
+            kind: .phase,
+            intent: attemptIntent,
+            route: phase.diagnosticRoute,
+            phase: phase.diagnosticName,
+            elapsedMs: attemptStartedAt.map { ConnectionDiagnostics.milliseconds(since: $0) }
+        )
         switch phase {
         case .offline:
             await emit(.state(.offline(reason: nil)))
@@ -2534,6 +2619,19 @@ public actor RACPClient {
         case .direct: status.directFailure = failure
         case .ssh: status.sshFailure = failure
         }
+        var isBudgetExpiry = false
+        if case RACPClientError.timedOut = error { isBudgetExpiry = true }
+        ConnectionDiagnostics.shared.record(
+            kind: .failure,
+            intent: attemptIntent,
+            route: route,
+            phase: phase.diagnosticName,
+            elapsedMs: attemptStartedAt.map { ConnectionDiagnostics.milliseconds(since: $0) },
+            category: category,
+            httpStatus: (error as? RACPConnectionError)?.httpStatus,
+            closeCode: (error as? RACPSocketTermination)?.closeCode,
+            detail: isBudgetExpiry ? "budget-expired" : nil
+        )
     }
 
     private static func isTransportFailure(_ category: ConnectionFailureCategory, error: Error) -> Bool {
@@ -2846,4 +2944,31 @@ final class PendingRequest: @unchecked Sendable {
 struct RACPTurnIDParams: Encodable, Sendable {
     var turnId: String
     var context: RACPContext
+}
+
+// MARK: - 有界关闭
+
+/// 只持有旧连接资源，负责在 1s 预算内尽力关闭。
+///
+/// 单独成类型是为了让 `boundedAsyncValue` 的 `@Sendable` 闭包只捕获这个
+/// `@unchecked Sendable` 盒子，而不是把 actor 状态或非 Sendable 的 socket 带出去。
+private final class OldConnectionCloser: @unchecked Sendable {
+    private let connection: RACPConnection?
+    private let socket: (any RACPSocket)?
+    private let transport: SSHTransport?
+
+    init(connection: RACPConnection?, socket: (any RACPSocket)?, transport: SSHTransport?) {
+        self.connection = connection
+        self.socket = socket
+        self.transport = transport
+    }
+
+    func close() async {
+        if let connection {
+            await connection.close()
+        } else {
+            await socket?.close()
+            await transport?.close()
+        }
+    }
 }

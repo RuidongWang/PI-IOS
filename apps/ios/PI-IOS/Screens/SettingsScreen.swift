@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import PIiOSCore
 
 /// 设置子页路由（information-architecture.md §3：设置 → 服务器 / 安装 PI-adaptor）。
@@ -34,6 +35,7 @@ struct SettingsScreen: View {
     @State private var adaptorUnitError: String?
     @State private var isLoadingAdaptorUnit = false
     @State private var adaptorUnitRequestID: UUID?
+    @State private var notificationStatus: LocalNotificationAuthorizationStatus = .notDetermined
 
     private var appearance: AppearanceMode {
         appearanceStore.mode
@@ -47,6 +49,7 @@ struct SettingsScreen: View {
                     tunnelSection
                     modelsSection
                     skillsSection
+                    notificationSection
                     deviceSection
                     pushNotice
                 }
@@ -102,6 +105,10 @@ struct SettingsScreen: View {
                 // 触发键仍含在线状态，保证离线→在线后自动重查（DEF-R4-001）。
                 await refreshAdaptorUnitStatus()
             }
+            .task {
+                // U10：设置页只展示系统通知权限并提供入口，不在进入页面时弹系统授权。
+                await refreshNotificationStatus()
+            }
         }
     }
 
@@ -109,6 +116,24 @@ struct SettingsScreen: View {
         Binding(
             get: { pendingRevokeHostID != nil },
             set: { if !$0 { pendingRevokeHostID = nil } }
+        )
+    }
+
+    /// 当前服务器的最近一次认证失败分类（U17）。只读现有连接状态，不新增 ConnectionModel 写接口。
+    private var currentAuthFailure: PairingAuthFailure {
+        guard let host = model.currentHost, connection.currentCatalogHostID == host.id else {
+            return .none
+        }
+        return PairingEntryPolicy.authFailure(from: connection.connectionStatus)
+    }
+
+    /// 当前服务器的设备令牌与重新配对入口策略。
+    private var currentPairingPolicy: PairingEntryPolicy? {
+        guard let host = model.currentHost else { return nil }
+        return PairingEntryPolicy(
+            hasDeviceToken: KeychainStore.loadDeviceToken(hostID: host.id) != nil,
+            isPaired: host.pairedAt != nil,
+            authFailure: currentAuthFailure
         )
     }
 
@@ -127,23 +152,26 @@ struct SettingsScreen: View {
                 )
             } else {
                 PIGroup {
-                    let showsRepair = model.currentHost?.pairedAt == nil
+                    let repairPolicy = currentPairingPolicy
+                    let showsRepair = repairPolicy?.shouldShowSettingsRepairRow == true
                     ForEach(Array(model.hosts.enumerated()), id: \.element.id) { index, host in
                         serverRow(
                             host,
                             showsDivider: index < model.hosts.count - 1 || showsRepair
                         )
                     }
-                    if let current = model.currentHost, current.pairedAt == nil {
+                    if let current = model.currentHost, let repairPolicy,
+                       repairPolicy.shouldShowSettingsRepairRow {
                         PIListRow(
-                            title: "重新配对",
-                            subtitle: "打开服务器页完成配对",
+                            title: repairPolicy.settingsRepairTitle,
+                            subtitle: repairPolicy.settingsRepairSubtitle,
                             icon: "link",
                             iconTint: PIColor.warning,
                             showsChevron: true,
                             showsDivider: false,
                             action: { path.append(.editServer(current.id)) }
                         )
+                        .accessibilityIdentifier("settings.pairingRepair")
                     }
                 }
                 addServerButton
@@ -253,9 +281,27 @@ struct SettingsScreen: View {
                             subtitle: error,
                             icon: "exclamationmark.triangle",
                             iconTint: PIColor.danger,
-                            isEnabled: false,
-                            showsDivider: true
+                            isEnabled: currentAuthFailure.isFailure,
+                            showsChevron: currentAuthFailure.isFailure,
+                            showsDivider: true,
+                            action: currentAuthFailure.isFailure
+                                ? { path.append(.editServer(host.id)) }
+                                : nil
                         )
+                    }
+                    // U17：设备令牌被拒绝时，错误提示就地给出可点的重新配对入口，
+                    // 不让用户去猜「撤销配对」是不是恢复路径（撤销仍需服务器确认，语义未改）。
+                    if currentPairingPolicy?.isRepairPromoted == true {
+                        PIListRow(
+                            title: "使用新的一次性令牌重新配对",
+                            subtitle: "打开服务器页完成配对；新配对成功前旧设备令牌保留",
+                            icon: "arrow.triangle.2.circlepath",
+                            iconTint: PIColor.warning,
+                            showsChevron: true,
+                            showsDivider: true,
+                            action: { path.append(.editServer(host.id)) }
+                        )
+                        .accessibilityIdentifier("settings.pairingRepairRow")
                     }
                     if connection.state.isOnline {
                         PIListRow(
@@ -413,6 +459,49 @@ struct SettingsScreen: View {
         }
     }
 
+    // MARK: - 通知（U10）
+
+    private var notificationSection: some View {
+        let status = notificationStatus
+        let action = NotificationPromptPolicy.settingsAction(status: status)
+        return PIGroup(
+            "通知",
+            footer: "只在回到 App 时提示离开期间的更新；不会收到后台实时推送。"
+        ) {
+            PIListRow(
+                title: "离开期间的更新提醒",
+                subtitle: NotificationPromptPolicy.settingsSubtitle(status),
+                value: NotificationPromptPolicy.statusText(status),
+                icon: "bell",
+                isEnabled: action != .none,
+                showsChevron: action != .none,
+                showsDivider: false,
+                action: action == .none ? nil : { performNotificationAction(action) }
+            )
+            .accessibilityIdentifier("settings.notificationRow")
+        }
+    }
+
+    private func performNotificationAction(_ action: NotificationPromptPolicy.SettingsAction) {
+        switch action {
+        case .requestAuthorization:
+            Task {
+                // 用户在这里主动启用：这是 App 内唯一主动弹系统授权的入口。
+                await LocalNotificationCoordinator.shared.requestAuthorization()
+                await refreshNotificationStatus()
+            }
+        case .openSystemSettings:
+            guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+            UIApplication.shared.open(url)
+        case .none:
+            break
+        }
+    }
+
+    private func refreshNotificationStatus() async {
+        notificationStatus = await LocalNotificationCoordinator.shared.authorizationStatus()
+    }
+
     // MARK: - 本机
 
     private var deviceSection: some View {
@@ -457,7 +546,7 @@ struct SettingsScreen: View {
             Text("不会收到后台推送")
                 .font(PIFont.captionStrong)
                 .foregroundStyle(PIColor.text2)
-            Text("打开 App 时才会刷新服务器状态与新消息。")
+            Text("打开 App 时才会刷新服务器状态与新消息；启用「离开期间的更新提醒」后，回到 App 时会提示离开期间的变化。")
                 .font(PIFont.caption)
                 .foregroundStyle(PIColor.text3)
                 .fixedSize(horizontal: false, vertical: true)

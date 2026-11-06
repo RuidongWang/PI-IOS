@@ -226,6 +226,13 @@ final class RACPSocketTerminationState: @unchecked Sendable {
         }
     }
 
+    /// 已落定的终态（没有则为 nil），供 open 后立即 close/错误路径同步检查。
+    func snapshot() -> RACPSocketTermination? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
     func finish(_ termination: RACPSocketTermination) {
         lock.lock()
         guard value == nil else {

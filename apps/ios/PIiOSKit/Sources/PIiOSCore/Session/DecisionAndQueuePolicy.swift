@@ -77,14 +77,28 @@ public enum DecisionPolicy {
 
 // MARK: - 排队补充指令（AC-13.1 / AC-13.2）
 
-/// 一条排队中的 turn。`queuedTurns` 元素内部形状未冻结，只读 `id` 与可选的文本摘要。
+/// 一条排队中的 turn。`queuedTurns` 元素内部形状未冻结，只读 `id`、可选的文本摘要与附件数。
 public struct QueuedTurn: Equatable, Sendable, Identifiable {
     public let id: String
     public let text: String?
+    /// 服务端快照新增的可选 `attachmentCount`：没有正文时用它说明这条排队指令带图。
+    public let attachmentCount: Int?
 
-    public init(id: String, text: String? = nil) {
+    public init(id: String, text: String? = nil, attachmentCount: Int? = nil) {
         self.id = id
         self.text = text
+        self.attachmentCount = attachmentCount
+    }
+
+    /// 队列行的展示正文：优先正文；缺正文时说明附件数或排队状态，不显示裸 id。
+    public var displayText: String {
+        if let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            return text
+        }
+        if let attachmentCount, attachmentCount > 0 {
+            return "\(attachmentCount) 张图片"
+        }
+        return "指令已排队（未包含可显示的正文）"
     }
 
     /// 从快照 `queuedTurns[]` 解析；缺字符串 `id` 的元素无法取消，直接丢弃而不是猜一个 id。
@@ -94,9 +108,16 @@ public struct QueuedTurn: Equatable, Sendable, Identifiable {
         for payload in payloads {
             guard let id = payload.value(at: ["id"])?.stringValue, !id.isEmpty else { continue }
             guard seen.insert(id).inserted else { continue }
-            let text = payload.value(at: ["text"])?.stringValue
+            let rawText = payload.value(at: ["text"])?.stringValue
                 ?? payload.value(at: ["input", "text"])?.stringValue
-            result.append(QueuedTurn(id: id, text: text))
+            let text = rawText?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let attachmentCount = payload.value(at: ["attachmentCount"])?.intValue
+                ?? payload.value(at: ["input", "attachmentCount"])?.intValue
+            result.append(QueuedTurn(
+                id: id,
+                text: text?.isEmpty == false ? text : nil,
+                attachmentCount: attachmentCount
+            ))
         }
         return result
     }
@@ -116,6 +137,12 @@ public enum SendAdmission: Equatable, Sendable {
         case .start, .blockedOffline: return nil
         case .queue: return .queue
         }
+    }
+
+    /// 当前发送会以 `admission: queue` 排队（界面据此显示一行短提示）。
+    public var isQueueing: Bool {
+        if case .queue = self { return true }
+        return false
     }
 
     public var isAllowed: Bool { self != .blockedOffline }

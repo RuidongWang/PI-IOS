@@ -8,6 +8,9 @@ struct AdaptorProvidersScreen: View {
     @State private var providers: [RACPV2Provider] = []
     @State private var isLoading = false
     @State private var error: String?
+    @State private var warning: String?
+    /// 本机 Keychain 里确实存有密钥的 provider id。
+    @State private var localKeyProviderIDs: Set<String> = []
     @State private var name = ""
     @State private var baseURL = ""
     @State private var apiKey = ""
@@ -19,12 +22,21 @@ struct AdaptorProvidersScreen: View {
     @State private var editApiKey = ""
     @State private var editModelID = ""
     @State private var editError: String?
+    @State private var editKeyWarning: String?
     @State private var isCreating = false
+    @State private var isSavingEdit = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: PISpacing.s16) {
-                PIGroup("服务器 provider", footer: "API Key 只写入 PI-adaptor；本机不保存明文。") {
+                if let warning {
+                    PIInlineMessage(kind: .warning, text: warning)
+                        .accessibilityIdentifier("providers.warning")
+                }
+                PIGroup(
+                    "服务器 provider",
+                    footer: "API Key 只保存在本机 Keychain，不写入 PI-adaptor 服务器；换机或重装后需要重新填写。"
+                ) {
                     if isLoading {
                         PIListRow(title: "正在读取…", isEnabled: false, showsDivider: false)
                     } else if providers.isEmpty {
@@ -33,7 +45,7 @@ struct AdaptorProvidersScreen: View {
                         ForEach(Array(providers.enumerated()), id: \.element.id) { index, provider in
                             PIListRow(
                                 title: provider.name,
-                                subtitle: "\(provider.baseUrl) · \(provider.models.count) 个模型 · \(provider.apiKeyMask ?? "无密钥")",
+                                subtitle: "\(provider.baseUrl) · \(provider.models.count) 个模型 · \(secretText(for: provider))",
                                 showsDivider: index < providers.count - 1
                             ) {
                                 HStack(spacing: PISpacing.s8) {
@@ -68,6 +80,7 @@ struct AdaptorProvidersScreen: View {
                     PIFormRow {
                         PIFormField(label: "名称") {
                             TextField("DeepSeek", text: $name)
+                                .disabled(isCreating)
                         }
                     }
                     PIFormRow {
@@ -75,11 +88,14 @@ struct AdaptorProvidersScreen: View {
                             TextField("https://api.example.com/v1", text: $baseURL)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
+                                .disabled(isCreating)
                         }
                     }
                     PIFormRow {
-                        PIFormField(label: "API Key") {
+                        PIFormField(label: "API Key", hint: "只保存在本机 Keychain") {
                             SecureField("sk-…", text: $apiKey)
+                                .disabled(isCreating)
+                                .accessibilityIdentifier("providers.createAPIKey")
                         }
                     }
                     PIFormRow {
@@ -87,6 +103,7 @@ struct AdaptorProvidersScreen: View {
                             TextField("deepseek-chat", text: $modelID)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
+                                .disabled(isCreating)
                         }
                     }
                     PIFormRow(showsDivider: false) {
@@ -121,7 +138,9 @@ struct AdaptorProvidersScreen: View {
         .task(id: connection.state.isOnline) {
             guard connection.state.isOnline else {
                 providers = []
+                localKeyProviderIDs = []
                 error = nil
+                warning = nil
                 isLoading = false
                 return
             }
@@ -141,7 +160,7 @@ struct AdaptorProvidersScreen: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("将从 PI-adaptor 清除该 provider 与密钥；不会自动把默认项切到其他 provider。")
+            Text("将从服务器删除该 provider 记录，并清除本机保存的密钥；不会自动把默认项切到其他 provider。")
         }
         .piMessageAlert(title: "Provider 操作失败", message: $error)
         .sheet(item: $editingProvider) { provider in
@@ -153,9 +172,18 @@ struct AdaptorProvidersScreen: View {
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                         SecureField("新 API Key（留空保持不变）", text: $editApiKey)
+                            .accessibilityIdentifier("providers.editAPIKey")
                         TextField("模型 ID", text: $editModelID)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                    }
+                    // U14：保存期间禁止继续编辑，避免请求值与本机 Keychain 写入分叉。
+                    .disabled(isSavingEdit)
+                    if let editKeyWarning {
+                        Section {
+                            PIInlineMessage(kind: .warning, text: editKeyWarning)
+                                .accessibilityIdentifier("providers.editKeyWarning")
+                        }
                     }
                 }
                 .scrollContentBackground(.hidden)
@@ -168,18 +196,37 @@ struct AdaptorProvidersScreen: View {
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("取消") { editingProvider = nil }
+                            .disabled(isSavingEdit)
                     }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("保存") { Task { await saveEdit(id: provider.id) } }
-                            .disabled(editName.isEmpty || editBaseURL.isEmpty || editModelID.isEmpty)
+                        Button(isSavingEdit ? "保存中…" : "保存") { Task { await saveEdit(id: provider.id) } }
+                            .disabled(
+                                isSavingEdit
+                                    || editName.isEmpty
+                                    || editBaseURL.isEmpty
+                                    || editModelID.isEmpty
+                            )
                     }
                 }
             }
         }
     }
 
+    /// v0.0.3 起 `apiKeyMask` 为 null 不再等于「无密钥」；
+    /// 由本机 Keychain 决定显示「密钥仅存本机」还是「本机缺少密钥」。
+    private func secretText(for provider: RACPV2Provider) -> String {
+        ProviderSecretDisplay.text(
+            authKind: provider.authKind,
+            hasApiKey: provider.hasApiKey,
+            apiKeyMask: provider.apiKeyMask,
+            keyStorage: provider.keyStorage,
+            hasLocalKey: localKeyProviderIDs.contains(provider.id)
+        )
+    }
+
     private func startEditing(_ provider: RACPV2Provider) {
         editError = nil
+        editKeyWarning = nil
         editName = provider.name
         editBaseURL = provider.baseUrl
         editApiKey = ""
@@ -197,24 +244,52 @@ struct AdaptorProvidersScreen: View {
             self.editError = "当前 PI-adaptor 不可用或已切换：请在当前 PI-adaptor 上重试。"
             return
         }
+        guard !isSavingEdit else { return }
+        // U14：冻结提交值；请求与 Keychain 写入都只读这份快照。
+        let intent = ProviderSaveIntent(
+            kind: .update(providerId: id),
+            hostID: host.id,
+            name: editName,
+            baseURL: editBaseURL,
+            models: [ProviderModelSpec(
+                id: editModelID,
+                contextWindow: 128_000,
+                maxTokens: 16_384,
+                thinkingLevels: []
+            )],
+            apiKey: editApiKey,
+            apiKeyDraft: editApiKey
+        )
+        isSavingEdit = true
+        editError = nil
+        editKeyWarning = nil
+        defer { isSavingEdit = false }
         do {
             let provider = try await connection.updateAdaptorProvider(
                 id: id,
-                name: editName,
-                baseURL: editBaseURL,
-                apiKey: editApiKey.isEmpty ? nil : editApiKey,
-                modelID: editModelID
+                name: intent.name,
+                baseURL: intent.baseURL,
+                apiKey: intent.requestAPIKey,
+                modelID: intent.models.first?.id ?? ""
             )
             guard model.canApplyProviderOperation(context) else {
                 self.editError = "PI-adaptor 在保存过程中已切换：本次修改可能已写入原 PI-adaptor，请到该 PI-adaptor 上核对。"
                 return
             }
             recordLocalBinding(provider)
-            if !editApiKey.isEmpty {
-                _ = KeychainStore.saveProviderKey(editApiKey, hostID: host.id, providerId: id)
+            if let key = intent.keychainAPIKey,
+               !KeychainStore.saveProviderKey(key, hostID: intent.hostID, providerId: id) {
+                editKeyWarning = "服务器已更新，但本机密钥保存失败：发送时服务器会拒绝，请重新填写 API Key 后再保存。"
             }
-            editingProvider = nil
-            editError = nil
+            if intent.apiKeyDraftIsUnchanged(editApiKey) {
+                editApiKey = ""
+                // 有持久警告时留在编辑页，避免「密钥没存上」只闪一下就被关闭。
+                if editKeyWarning == nil {
+                    editingProvider = nil
+                }
+            } else {
+                editKeyWarning = "保存期间输入有变化：本次未提交后输入的内容，请核对后再保存一次。"
+            }
             await reload()
         } catch {
             self.editError = ConnectionErrorText.describe(error)
@@ -226,6 +301,7 @@ struct AdaptorProvidersScreen: View {
               let context = model.providerOperationContext(for: host)
         else {
             providers = []
+            localKeyProviderIDs = []
             return
         }
         isLoading = true
@@ -234,6 +310,11 @@ struct AdaptorProvidersScreen: View {
             let fetched = try await connection.listAdaptorProviders()
             guard model.canApplyProviderOperation(context) else { return }
             providers = fetched
+            localKeyProviderIDs = Set(
+                fetched.filter { provider in
+                    KeychainStore.loadProviderKey(hostID: host.id, providerId: provider.id) != nil
+                }.map(\.id)
+            )
             error = nil
         } catch {
             guard model.canApplyProviderOperation(context) else { return }
@@ -249,25 +330,55 @@ struct AdaptorProvidersScreen: View {
             self.error = "当前 PI-adaptor 不可用或已切换：请在当前 PI-adaptor 上重试。"
             return
         }
+        // U14：创建同样冻结提交值（new provider 的密钥必须来自本次提交时刻的输入）。
+        let intent = ProviderSaveIntent(
+            kind: .create,
+            hostID: host.id,
+            name: name,
+            baseURL: baseURL,
+            models: [ProviderModelSpec(
+                id: modelID,
+                contextWindow: 128_000,
+                maxTokens: 16_384,
+                thinkingLevels: []
+            )],
+            apiKey: apiKey,
+            apiKeyDraft: apiKey
+        )
+        if let rejection = intent.createRejection {
+            self.error = rejection
+            return
+        }
+        let frozenModelID = intent.models.first?.id ?? ""
+        guard !frozenModelID.isEmpty else {
+            self.error = "请填写模型 ID"
+            return
+        }
         isCreating = true
+        warning = nil
         defer { isCreating = false }
         do {
             let provider = try await connection.createAdaptorProvider(
-                name: name,
-                baseURL: baseURL,
-                apiKey: apiKey,
-                modelID: modelID
+                name: intent.name,
+                baseURL: intent.baseURL,
+                apiKey: intent.requestAPIKey ?? "",
+                modelID: frozenModelID
             )
             guard model.canApplyProviderOperation(context) else {
                 self.error = "PI-adaptor 在创建过程中已切换：该 provider 可能已写入原 PI-adaptor，请到该 PI-adaptor 上核对。"
                 return
             }
             recordLocalBinding(provider)
-            _ = KeychainStore.saveProviderKey(apiKey, hostID: host.id, providerId: provider.id)
-            name = ""
-            baseURL = ""
-            apiKey = ""
-            modelID = ""
+            // Keychain 写入只用冻结值，并按提交时的 Host 记录；失败必须可见。
+            if let key = intent.keychainAPIKey,
+               !KeychainStore.saveProviderKey(key, hostID: intent.hostID, providerId: provider.id) {
+                warning = "模型服务已创建，但本机密钥保存失败：发送时服务器会拒绝，请重新打开该服务填写 API Key。"
+            }
+            // 保存期间被改动的内容不清空（字段已禁用，这里只做防御）。
+            if intent.apiKeyDraftIsUnchanged(apiKey) { apiKey = "" }
+            if intent.name == name { name = "" }
+            if intent.baseURL == baseURL { baseURL = "" }
+            if frozenModelID == self.modelID { self.modelID = "" }
             await reload()
         } catch {
             self.error = ConnectionErrorText.describe(error)
@@ -320,41 +431,32 @@ struct AdaptorProvidersScreen: View {
             self.error = "当前 PI-adaptor 不可用或已切换：请在当前 PI-adaptor 上重试删除。"
             return
         }
-        // Capture the legacy mapping before removing the local record.
+        warning = nil
+        // Capture the local mapping (legacy id + local record id) before deleting.
         let existing = model.storedProvider(hostID: host.id, providerId: provider.id)
-        do {
-            do {
-                try await connection.deleteAdaptorProvider(id: provider.id)
-            } catch let error as RACPV2Error {
-                // 幂等删除：PI-adaptor 上已经查不到这条记录时继续清理本机镜像。
-                guard case .server(let code, _) = error, code == "NOT_FOUND" else { throw error }
-            }
-            guard model.canApplyProviderOperation(context) else { return }
-            // A provider mirrored from a legacy SSH import also lives in the legacy
-            // store; deleting only the v2 record would leave the legacy service and
-            // its secret on the server.
-            var legacyError: Error?
-            if let legacyProviderId = existing?.legacyProviderId {
-                do {
-                    _ = try await connection.removeProvider(record: host, providerId: legacyProviderId)
-                } catch {
-                    legacyError = error
-                }
-                guard model.canApplyProviderOperation(context) else { return }
-            }
-            if let legacyError {
-                self.error = "v2 Provider 已删除，但 legacy 服务清理失败：\(ConnectionErrorText.describe(legacyError))。本地映射已保留以便重试。"
-                await reload()
-                return
-            }
-            _ = model.removeLocalProvider(
-                id: "\(host.id.uuidString):\(provider.id)",
-                context: context
-            )
-            _ = KeychainStore.deleteProviderKey(hostID: host.id, providerId: provider.id)
+        // U07：与模型服务详情页共用同一套删除分支与文案；不再丢弃 legacy 回执。
+        let target = ProviderDeletionTarget(
+            host: host,
+            providerId: provider.id,
+            legacyProviderId: existing?.legacyProviderId,
+            hostV2Mirror: existing?.hostV2Mirror ?? true,
+            localRecordId: existing?.id,
+            displayName: provider.name,
+            keychainProviderIds: [provider.id, existing?.legacyProviderId].compactMap { $0 }
+        )
+        let report = await ProviderDeletionUseCase(model: model, connection: connection)
+            .delete(target)
+        guard model.canApplyProviderOperation(context) else { return }
+        if let failure = report.failureMessage {
+            // 业务失败/回执不可解析：本机映射与 Keychain 线索已由用例保留。
+            self.error = failure
             await reload()
-        } catch {
-            self.error = ConnectionErrorText.describe(error)
+            return
         }
+        if report.tone == .needsAttention {
+            // 已删除但默认模型未转移等需要跟进的结果，必须继续可见。
+            warning = report.message
+        }
+        await reload()
     }
 }

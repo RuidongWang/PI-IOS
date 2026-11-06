@@ -42,6 +42,10 @@ struct ConversationScreen: View {
     @State private var readingRestoreGeneration = 0
     @State private var selectedPhotos: [PhotosPickerItem] = []
     @State private var photoSelectionID = UUID()
+    /// U16：最近一次选图的读取失败数 / 成功读取数 / 部分失败是否已确认发送子集。
+    @State private var photoReadFailureCount = 0
+    @State private var photoReadSucceededCount = 0
+    @State private var photoReadAcknowledged = false
 
     init(session: SessionController) {
         self.session = session
@@ -315,6 +319,13 @@ struct ConversationScreen: View {
             }
             .onChange(of: session.selectedBindingKey) { _, _ in
                 Task { await refreshModelAvailability() }
+            }
+            .onChange(of: session.pendingAttachments.count) { _, count in
+                // 附件清空（发送成功或手动移除）后，上次部分读取失败的提示不再适用。
+                guard count == 0, photoReadAcknowledged else { return }
+                photoReadFailureCount = 0
+                photoReadSucceededCount = 0
+                photoReadAcknowledged = false
             }
         }
     }
@@ -1036,6 +1047,7 @@ struct ConversationScreen: View {
     private var inputSection: some View {
         ForEach(session.pendingInputs, id: \.id) { card in
             let questions = InputQuestionParser.questions(from: card)
+            let draftKey = answerDraftKey(card.id)
             PICard {
                 VStack(alignment: .leading, spacing: PISpacing.s8) {
                     Text("需要你回答")
@@ -1062,17 +1074,17 @@ struct ConversationScreen: View {
                                         PISelectableChip(
                                             title: option,
                                             isSelected: isSelected(
-                                                cardID: card.id,
+                                                draftKey: draftKey,
                                                 question: question.id,
                                                 option: option
                                             )
                                         ) {
                                             setSelected(
-                                                cardID: card.id,
+                                                draftKey: draftKey,
                                                 question: question.id,
                                                 option: option,
                                                 isOn: !isSelected(
-                                                    cardID: card.id,
+                                                    draftKey: draftKey,
                                                     question: question.id,
                                                     option: option
                                                 )
@@ -1089,12 +1101,14 @@ struct ConversationScreen: View {
                             isEnabled: !session.isBusy && connection.state.isOnline
                         ) {
                             let answers = InputQuestionParser.answers(
-                                selections: selections[card.id] ?? [:],
+                                selections: selections[draftKey] ?? [:],
                                 questionCount: questions.count
                             )
                             Task {
-                                await session.answer(inputId: card.id, answers: answers)
-                                selections[card.id] = nil
+                                // U06：只有成功或明确失效才清空已选答案；普通失败保留，
+                                // 重试复用 SessionRequestKeyStore 里已持久化的幂等键。
+                                let outcome = await session.answer(inputId: card.id, answers: answers)
+                                if outcome.clearsDraft { selections[draftKey] = nil }
                             }
                         }
                         PIApprovalSecondaryButton(
@@ -1105,7 +1119,10 @@ struct ConversationScreen: View {
                                 selections: [:],
                                 questionCount: questions.count
                             )
-                            Task { await session.answer(inputId: card.id, answers: answers) }
+                            Task {
+                                let outcome = await session.answer(inputId: card.id, answers: answers)
+                                if outcome.clearsDraft { selections[draftKey] = nil }
+                            }
                         }
                     }
                 }
@@ -1113,12 +1130,22 @@ struct ConversationScreen: View {
         }
     }
 
-    private func isSelected(cardID: String, question: Int, option: String) -> Bool {
-        selections[cardID]?[question]?.contains(option) ?? false
+    /// 回答草稿的作用域键：服务器 + 会话 + 提问卡（U06）。
+    /// 切换服务器或会话后不会把 A 会话选中的答案带到 B 会话。
+    private func answerDraftKey(_ inputID: String) -> String {
+        AnswerDraftScope(
+            hostID: model.currentHost?.id.uuidString ?? "",
+            sessionID: session.attachedSessionId ?? "",
+            inputID: inputID
+        ).storageKey
     }
 
-    private func setSelected(cardID: String, question: Int, option: String, isOn: Bool) {
-        var card = selections[cardID] ?? [:]
+    private func isSelected(draftKey: String, question: Int, option: String) -> Bool {
+        selections[draftKey]?[question]?.contains(option) ?? false
+    }
+
+    private func setSelected(draftKey: String, question: Int, option: String, isOn: Bool) {
+        var card = selections[draftKey] ?? [:]
         var set = card[question] ?? []
         if isOn {
             set.insert(option)
@@ -1126,7 +1153,7 @@ struct ConversationScreen: View {
             set.remove(option)
         }
         card[question] = set
-        selections[cardID] = card
+        selections[draftKey] = card
     }
 
     // MARK: - 排队（AC-13）
@@ -1136,14 +1163,17 @@ struct ConversationScreen: View {
         if !session.queuedTurns.isEmpty {
             VStack(alignment: .leading, spacing: PISpacing.s8) {
                 PISectionHeader(text: "排队中（\(session.queuedTurns.count)）")
+                    .accessibilityIdentifier("conversation.queueHeader")
                 ForEach(session.queuedTurns) { turn in
                     PICard {
                         HStack(spacing: PISpacing.s8) {
                             VStack(alignment: .leading, spacing: PISpacing.s4) {
-                                Text(turn.text ?? "排队指令 \(turn.id)")
+                                // 优先显示正文；服务端快照缺正文时显示附件数/排队提示，不显示裸 id。
+                                Text(turn.displayText)
                                     .font(PIFont.body)
                                     .foregroundStyle(PIColor.text)
                                     .lineLimit(2)
+                                    .accessibilityIdentifier("conversation.queuedTurnText.\(turn.id)")
                                 Text("当前 turn 结束后自动开始")
                                     .font(PIFont.meta)
                                     .foregroundStyle(PIColor.text3)
@@ -1160,10 +1190,13 @@ struct ConversationScreen: View {
                             }
                             .buttonStyle(PIPressableButtonStyle())
                             .disabled(session.isBusy || !connection.state.isOnline)
+                            .accessibilityIdentifier("conversation.cancelQueued.\(turn.id)")
                         }
                     }
+                    .accessibilityIdentifier("conversation.queuedTurn.\(turn.id)")
                 }
             }
+            .accessibilityIdentifier("conversation.queueSection")
         }
     }
 
@@ -1180,6 +1213,44 @@ struct ConversationScreen: View {
                 Text("离线：发送已禁用")
                     .font(PIFont.meta)
                     .foregroundStyle(PIColor.warning)
+            }
+            if session.sendAdmission.isQueueing {
+                // 只保留一行短提示；运行状态仍由页面顶部状态行表达，不恢复旧的长提示。
+                Text("当前 turn 运行中，发送将排队")
+                    .font(PIFont.meta)
+                    .foregroundStyle(PIColor.text2)
+                    .accessibilityIdentifier("conversation.queueHint")
+            }
+            if let notice = photoReadFailureNotice {
+                HStack(alignment: .top, spacing: PISpacing.s8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(PIFont.meta)
+                        .foregroundStyle(PIColor.warning)
+                        .accessibilityHidden(true)
+                    Text(notice)
+                        .font(PIFont.meta)
+                        .foregroundStyle(PIColor.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("composer.photoReadFailure")
+                    Spacer(minLength: PISpacing.s4)
+                    if photoReadNeedsConfirmation {
+                        // U16：部分失败时不允许无提示发送子集，必须显式确认。
+                        Button("仍要发送已读取的图片") {
+                            photoReadAcknowledged = true
+                        }
+                        .font(PIFont.metaSmall.weight(.semibold))
+                        .foregroundStyle(PIColor.accent)
+                        .accessibilityIdentifier("composer.confirmPartialPhotos")
+                    } else if photoReadSucceededCount == 0 {
+                        // 全部失败：给出明确的关闭入口，保留“失败可见”而不是静默跳过。
+                        Button("知道了") {
+                            photoReadFailureCount = 0
+                        }
+                        .font(PIFont.metaSmall.weight(.semibold))
+                        .foregroundStyle(PIColor.text2)
+                        .accessibilityIdentifier("composer.dismissPhotoReadFailure")
+                    }
+                }
             }
             if !session.pendingAttachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -1225,11 +1296,29 @@ struct ConversationScreen: View {
                     let selection = session.attachmentSelectionGeneration
                     let photoSelection = UUID()
                     photoSelectionID = photoSelection
+                    photoReadFailureCount = 0
+                    photoReadSucceededCount = 0
+                    photoReadAcknowledged = false
                     Task {
+                        var failed = 0
+                        var succeeded = 0
                         for item in items {
-                            guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
                             guard session.attachmentSelectionGeneration == selection,
                                   photoSelectionID == photoSelection else { break }
+                            // U16：读取失败不再静默跳过；计数后在输入栏上方明确呈现，
+                            // 部分失败必须确认后才能发送已读取的子集。
+                            let data: Data
+                            do {
+                                guard let loaded = try await item.loadTransferable(type: Data.self) else {
+                                    failed += 1
+                                    continue
+                                }
+                                data = loaded
+                            } catch {
+                                failed += 1
+                                continue
+                            }
+                            succeeded += 1
                             let mime = imageMimeType(data)
                             let ext = mime == "image/png" ? "png" : (mime == "image/webp" ? "webp" : "jpg")
                             await session.addImage(
@@ -1238,7 +1327,12 @@ struct ConversationScreen: View {
                                 fileName: "photo-\(UUID().uuidString).\(ext)"
                             )
                         }
-                        if photoSelectionID == photoSelection { selectedPhotos = [] }
+                        guard session.attachmentSelectionGeneration == selection,
+                              photoSelectionID == photoSelection else { return }
+                        photoReadFailureCount = failed
+                        photoReadSucceededCount = succeeded
+                        photoReadAcknowledged = false
+                        selectedPhotos = []
                     }
                 }
                 // 占位文字自己画、自己对齐：原生 placeholder 跟着输入框内部基线走，
@@ -1263,22 +1357,26 @@ struct ConversationScreen: View {
                     .accessibilityIdentifier("conversation.composer")
                 Button {
                     scrollToBottomRequest &+= 1
+                    // U11：点击瞬间冻结发送意图；模型可用性检查可能等待网络，
+                    // 期间切换会话/模型或继续编辑都由 send(expected:) 拒绝，不会误发。
+                    let intent = session.makeSendIntent()
                     Task {
-                        await refreshModelAvailability()
-                        await session.send()
+                        let check = await refreshModelAvailability()
+                        guard check != .superseded else { return }
+                        await session.send(expected: intent)
                     }
                 } label: {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(session.canSend && !session.isBusy ? PIColor.onAccent : PIColor.text3)
+                        .foregroundStyle(canTapSend ? PIColor.onAccent : PIColor.text3)
                         .frame(width: 36, height: 36)
                         .background(
-                            session.canSend && !session.isBusy ? PIColor.accent : PIColor.surface3,
+                            canTapSend ? PIColor.accent : PIColor.surface3,
                             in: Circle()
                         )
                         .contentShape(Circle())
                 }
-                .disabled(!session.canSend || session.isBusy)
+                .disabled(!canTapSend)
                 .accessibilityLabel("发送")
             }
             .padding(.leading, 6)
@@ -1308,6 +1406,25 @@ struct ConversationScreen: View {
         if data.starts(with: [0x89, 0x50, 0x4E, 0x47]) { return "image/png" }
         if data.starts(with: [0x52, 0x49, 0x46, 0x46]) { return "image/webp" }
         return "image/jpeg"
+    }
+
+    /// 发送按钮可用性：附件部分读取失败且未确认时禁止发送（U16）。
+    private var canTapSend: Bool {
+        session.canSend && !session.isBusy && !photoReadNeedsConfirmation
+    }
+
+    /// 最近一次选图的读取失败提示；`nil` 表示没有失败。
+    private var photoReadFailureNotice: String? {
+        guard photoReadFailureCount > 0 else { return nil }
+        if photoReadSucceededCount > 0 {
+            return "部分图片读取失败（\(photoReadFailureCount) 张），当前只包含已读取的 \(photoReadSucceededCount) 张。确认后才能发送。"
+        }
+        return "全部图片读取失败（\(photoReadFailureCount) 张），请重新选择图片。"
+    }
+
+    /// 部分失败且未确认：必须显式确认才能发送已读取的子集。
+    private var photoReadNeedsConfirmation: Bool {
+        photoReadFailureCount > 0 && photoReadSucceededCount > 0 && !photoReadAcknowledged
     }
 
     private var composerConfigurationChips: some View {
@@ -1418,14 +1535,17 @@ struct ConversationScreen: View {
         return false
     }
 
-    private func refreshModelAvailability() async {
+    /// 检查当前会话模型的可用性，并返回显式结果（U11）：`superseded` 表示检查期间
+    /// 会话/服务器/模型绑定已经被更新的检查取代，发送方必须放弃这次点击而不是继续发送。
+    @discardableResult
+    private func refreshModelAvailability() async -> ModelAvailabilityCheckResult {
         guard connection.state.isOnline,
               let sessionID = session.attachedSessionId,
               let host = model.currentHost
         else {
             legacyOnlyProviderIDs = []
             session.markModelAvailabilityUnknown("服务器离线或尚未打开会话")
-            return
+            return .skipped(reason: "服务器离线或尚未打开会话")
         }
         modelAvailabilityGeneration &+= 1
         let generation = modelAvailabilityGeneration
@@ -1445,7 +1565,7 @@ struct ConversationScreen: View {
                   model.currentHost?.id == host.id,
                   session.attachedSessionId == sessionID,
                   session.selectedBindingKey == bindingKey
-            else { return }
+            else { return .superseded }
             // A successful v2 probe means the PI-adaptor keeps providers in the v2
             // store; anything our local catalog knows only from the legacy store
             // cannot drive a turn on it.
@@ -1465,11 +1585,14 @@ struct ConversationScreen: View {
                 )
                 if healed {
                     session.markModelAvailabilityChecking()
+                    return .skipped(reason: "已触发模型重新绑定，正在重新检查可用性")
                 } else {
                     session.markModelUnavailable(reason)
+                    return .unavailable(reason: reason)
                 }
             } else {
                 session.applyModelAvailability(status)
+                return Self.availabilityCheckResult(session.modelAvailability)
             }
         } catch {
             legacyOnlyProviderIDs = []
@@ -1482,23 +1605,44 @@ struct ConversationScreen: View {
                       model.currentHost?.id == host.id,
                       session.attachedSessionId == sessionID,
                       session.selectedBindingKey == bindingKey
-                else { return }
+                else { return .superseded }
                 switch receipt {
                 case .success(let status):
                     session.applyModelAvailability(status)
+                    return Self.availabilityCheckResult(session.modelAvailability)
                 case .failure(let failure):
                     session.markModelAvailabilityUnknown(failure.displayMessage)
+                    return .failed(reason: failure.displayMessage)
                 case .unparseable(let reason):
-                    session.markModelAvailabilityUnknown("服务器返回的绑定状态无法解析：\(reason)")
+                    let message = "服务器返回的绑定状态无法解析：\(reason)"
+                    session.markModelAvailabilityUnknown(message)
+                    return .failed(reason: message)
                 }
             } catch {
                 guard generation == modelAvailabilityGeneration,
                       model.currentHost?.id == host.id,
                       session.attachedSessionId == sessionID,
                       session.selectedBindingKey == bindingKey
-                else { return }
-                session.markModelAvailabilityUnknown(ConnectionErrorText.describe(error))
+                else { return .superseded }
+                let message = ConnectionErrorText.describe(error)
+                session.markModelAvailabilityUnknown(message)
+                return .failed(reason: message)
             }
+        }
+    }
+
+    private static func availabilityCheckResult(
+        _ availability: SessionModelAvailability
+    ) -> ModelAvailabilityCheckResult {
+        switch availability {
+        case .available:
+            return .available
+        case .checking:
+            return .skipped(reason: "正在检查模型可用性")
+        case .unavailable(let reason):
+            return .unavailable(reason: reason)
+        case .unknown(let reason):
+            return .failed(reason: reason)
         }
     }
 
@@ -1577,6 +1721,17 @@ struct ConversationScreen: View {
         }
         return "\(providerID) · \(modelID)"
     }
+}
+
+/// 模型可用性检查的显式结果（U11）。发送按钮在等待检查后必须能区分
+/// 「仍可用」「不可用/失败」与「检查结果已被更新的会话/绑定取代」。
+private enum ModelAvailabilityCheckResult: Equatable {
+    case available
+    case unavailable(reason: String)
+    case failed(reason: String)
+    case skipped(reason: String)
+    /// 检查期间会话/服务器/模型绑定已变化，本次结果不再适用于点击时的意图。
+    case superseded
 }
 
 private struct ConversationContentBottomKey: PreferenceKey {

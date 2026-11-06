@@ -503,8 +503,8 @@ public final class SessionViewModel {
                 $0.value >= snapshot.cursor.sequence
             }
         }
-        queuedTurns = snapshot.queuedTurns
-        queuedTurnIDs = Set(snapshot.queuedTurns.compactMap {
+        queuedTurns = Self.mergedQueuedTurns(snapshot.queuedTurns, preservingLocalFrom: queuedTurns)
+        queuedTurnIDs = Set(queuedTurns.compactMap {
             $0.value(at: ["id"])?.stringValue
         })
         pendingApprovals = snapshot.pendingApprovals
@@ -791,13 +791,50 @@ public final class SessionViewModel {
         }
     }
 
-    public func recordQueuedTurn(id: String, text: String?) {
+    public func recordQueuedTurn(id: String, text: String?, attachmentCount: Int? = nil) {
         guard !id.isEmpty else { return }
         queuedTurnIDs.insert(id)
         guard !queuedTurns.contains(where: { $0.value(at: ["id"])?.stringValue == id }) else { return }
         var payload: [String: JSONValue] = ["id": .string(id)]
         if let text, !text.isEmpty { payload["text"] = .string(text) }
+        if let attachmentCount, attachmentCount > 0 {
+            payload["attachmentCount"] = .number(Double(attachmentCount))
+        }
         queuedTurns.append(.object(payload))
+    }
+
+    /// 排队项正文只存在于快照的可选字段里。服务端快照缺 `text`/`attachmentCount`
+    /// 时，按 `id` 保留本机已知值，否则「发送后立即本地反馈」会在下一次快照刷新
+    /// 时被抹掉（AC-13.1 的可见性要求）。快照仍是队列成员与顺序的唯一权威：
+    /// 不在快照里的项一律丢弃，本地值只可能补字段，不能新增条目。
+    private static func mergedQueuedTurns(
+        _ snapshot: [JSONValue],
+        preservingLocalFrom local: [JSONValue]
+    ) -> [JSONValue] {
+        guard !local.isEmpty else { return snapshot }
+        var localByID: [String: JSONValue] = [:]
+        for payload in local {
+            guard let id = payload.value(at: ["id"])?.stringValue, !id.isEmpty else { continue }
+            localByID[id] = payload
+        }
+        return snapshot.map { payload in
+            guard var object = payload.objectValue,
+                  let id = object["id"]?.stringValue,
+                  let known = localByID[id]
+            else { return payload }
+            let snapshotText = object["text"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if snapshotText?.isEmpty != false,
+               let localText = known.value(at: ["text"])?.stringValue,
+               !localText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                object["text"] = .string(localText)
+            }
+            if object["attachmentCount"]?.intValue == nil,
+               let localCount = known.value(at: ["attachmentCount"])?.intValue {
+                object["attachmentCount"] = .number(Double(localCount))
+            }
+            return .object(object)
+        }
     }
 
     public func removeQueuedTurn(id: String) {

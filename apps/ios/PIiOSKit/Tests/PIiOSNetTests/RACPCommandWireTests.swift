@@ -107,6 +107,32 @@ final class RACPCommandWireTests: XCTestCase {
         XCTAssertEqual((input["attachments"] as? [Any])?.count, 0, "P0 恒为空数组")
     }
 
+    func testTurnStartCarriesTransientAPIKeyOnlyWhenPresent() throws {
+        // key 不落服务器：只在本次 turn/start 顶层携带，服务端不持久化。
+        let withKey = RACPTurnStartParams(
+            sessionId: "ses_1",
+            admission: nil,
+            input: RACPTurnInput(text: "继续"),
+            context: RACPContext(requestId: "req_3"),
+            apiKey: "sk-transient-only-in-memory"
+        )
+        let withKeyPayload = try XCTUnwrap(
+            try encodedObject(.turnStart, params: withKey)["params"] as? [String: Any]
+        )
+        XCTAssertEqual(withKeyPayload["apiKey"] as? String, "sk-transient-only-in-memory")
+        XCTAssertNil(withKeyPayload["idempotencyKey"], "幂等键仍只能出现在 context 内")
+
+        let withoutKey = RACPTurnStartParams(
+            sessionId: "ses_1",
+            input: RACPTurnInput(text: "继续"),
+            context: RACPContext(requestId: "req_4")
+        )
+        let withoutKeyPayload = try XCTUnwrap(
+            try encodedObject(.turnStart, params: withoutKey)["params"] as? [String: Any]
+        )
+        XCTAssertNil(withoutKeyPayload["apiKey"], "nil 必须省略字段，不能发送 null")
+    }
+
     func testTurnInterruptAddressesTurnById() throws {
         let params = RACPTurnIDParams(
             turnId: "turn_9",

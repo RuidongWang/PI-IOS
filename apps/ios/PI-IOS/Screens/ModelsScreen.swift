@@ -20,6 +20,7 @@ struct ModelsScreen: View {
     @State private var isImporting = false
     @State private var statusMessage: String?
     @State private var errorMessage: String?
+    @State private var keyWarning: String?
     @State private var selectedProvider: StoredModelProvider?
     @State private var deletionNotice: ProviderDeletionNotice?
     @State private var authPreset: ProviderAuthPreset = .apiKey
@@ -64,6 +65,19 @@ struct ModelsScreen: View {
     }
 
     private var currentHost: HostRecord? { model.currentHost }
+
+    /// 本机模型记录没有服务端 `authKind`，只能按本机 Keychain 判断密钥是否还在。
+    private func localKeyText(_ provider: StoredModelProvider) -> String {
+        let hasV2Key = KeychainStore.loadProviderKey(
+            hostID: provider.hostID,
+            providerId: provider.providerId
+        ) != nil
+        let hasLegacyKey = provider.legacyProviderId.map { legacyProviderId in
+            legacyProviderId != provider.providerId
+                && KeychainStore.loadProviderKey(hostID: provider.hostID, providerId: legacyProviderId) != nil
+        } ?? false
+        return ProviderSecretDisplay.localText(hasLocalKey: hasV2Key || hasLegacyKey)
+    }
 
     /// 获取模型走 SSH（只需本机保存的凭证），导入却必须经在线的 PI-adaptor
     /// 隧道调用 `provider/create`。两者前置条件不同，必须提前说清楚，否则用户
@@ -214,17 +228,24 @@ struct ModelsScreen: View {
 
     @ViewBuilder
     private var status: some View {
-        if let errorMessage {
-            PIInlineMessage(kind: .danger, text: errorMessage)
-        } else if let statusMessage {
-            PIInlineMessage(kind: .success, text: statusMessage)
+        Group {
+            if let errorMessage {
+                PIInlineMessage(kind: .danger, text: errorMessage)
+            } else if let statusMessage {
+                PIInlineMessage(kind: .success, text: statusMessage)
+            }
+            // Keychain 写入失败属于「服务器已完成、本机密钥不可用」的部分结果，必须单独可见。
+            if let keyWarning {
+                PIInlineMessage(kind: .warning, text: keyWarning)
+                    .accessibilityIdentifier("models.keyWarning")
+            }
         }
     }
 
     private var configuredProviders: some View {
         PIGroup(
             "本机模型清单",
-            footer: "清单只保存 providerId、模型与标准参数，不保存 API Key。点一条服务可查看详情并删除。"
+            footer: "清单只保存 providerId、模型与标准参数；API Key 单独保存在本机 Keychain，不写入清单文件。点一条服务可查看详情并删除。"
         ) {
             if model.currentModelProviders.isEmpty {
                 PIListRow(
@@ -237,7 +258,7 @@ struct ModelsScreen: View {
                 ForEach(Array(model.currentModelProviders.enumerated()), id: \.element.id) { index, provider in
                     PIListRow(
                         title: provider.name,
-                        subtitle: "\(provider.models.count) 个模型 · \(provider.baseURL)",
+                        subtitle: "\(provider.models.count) 个模型 · \(provider.baseURL) · \(localKeyText(provider))",
                         value: provider.defaultModelId.flatMap { id in
                             provider.models.first(where: { $0.id == id })?.displayName
                         },
@@ -297,7 +318,7 @@ struct ModelsScreen: View {
                         .disabled(authPreset != .apiKey)
                         .accessibilityIdentifier("models.baseURL")
                 }
-                PIFormField(label: "API Key", hint: "经 SSH 发送，不写入本机文件") {
+                PIFormField(label: "API Key", hint: "只保存在本机 Keychain，发送时经 SSH 传给服务器") {
                     SecureField("API Key", text: $apiKey)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -629,6 +650,7 @@ struct ModelsScreen: View {
         isImporting = true
         statusMessage = nil
         errorMessage = nil
+        keyWarning = nil
         Task {
             do {
                 let receipt = try await connection.importProvider(record: host, payload: data)
@@ -647,11 +669,15 @@ struct ModelsScreen: View {
                                 serverDefaultSet: success.defaultSet,
                                 hostV2Mirror: true
                             ) else { return }
-                            _ = KeychainStore.saveProviderKey(
+                            // 服务器已导入后密钥只落本机 Keychain；写入失败必须可见，
+                            // 不能只留下一条“已导入”让发送时才失败。
+                            if !KeychainStore.saveProviderKey(
                                 normalizedAPIKey,
                                 hostID: operation.hostID,
                                 providerId: providerId
-                            )
+                            ) {
+                                keyWarning = "已导入 \(input.models.count) 个模型，但本机密钥保存失败：发送时服务器会拒绝，请打开该模型服务重新填写 API Key。"
+                            }
                             if configurationFingerprint == importFingerprint {
                                 apiKey = ""
                             }

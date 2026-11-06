@@ -50,6 +50,12 @@ enum AdaptorInstallError: LocalizedError {
     case malformedProbe
     case emptySudoPassword
     case sudoFailed(String)
+    /// U15: the current local record no longer matches the frozen install target.
+    case installationSuperseded
+    /// Identity matched and the receipt could not be persisted; the token was not promoted.
+    case receiptPersistenceFailed(String)
+    /// Runtime verification completed without an adaptor hostId; nothing was promoted.
+    case adaptorIdentityMissing
 
     var errorDescription: String? {
         switch self {
@@ -63,17 +69,61 @@ enum AdaptorInstallError: LocalizedError {
             return "请输入 sudo 密码；空密码不会发送到服务器"
         case .sudoFailed(let detail):
             return detail.isEmpty ? "sudo 授权失败，pi-adaptor unit 未启动" : detail
+        case .installationSuperseded:
+            return "旧安装结果已过期，请到原服务器核对。"
+                + "这台服务器在本机记录中的身份已变化，本次安装回执未写入，暂存的设备令牌也未提升为活跃令牌。"
+        case .receiptPersistenceFailed(let detail):
+            return "远端安装与运行验证已通过，但无法提交本机服务器记录：\(detail)"
+        case .adaptorIdentityMissing:
+            return "运行验证未取得 PI-adaptor 身份（hostId），已丢弃本次安装结果，未提升设备令牌。"
         }
     }
 }
 
-struct BootstrapPairingCommit: Sendable {
-    let hostID: UUID
+struct BootstrapPairingCommit {
+    let target: InstallTargetSnapshot
     let adaptorHostId: String
     let port: Int
     let version: String
     let attemptId: String
     let releaseSource: AdaptorReleaseResolutionSource?
+    let directEndpoint: String?
+
+    var hostID: UUID { target.hostID }
+}
+
+/// Immutable description of one install attempt, frozen when the user presses
+/// start. `target` is the HostRecord identity that was on screen; `record` is a
+/// value copy of the same record, so SSH credentials and the commit check can
+/// never observe a form edited after the click (U09/U15).
+struct InstallRequest {
+    let target: InstallTargetSnapshot
+    let record: HostRecord
+    let adaptorPort: Int
+    /// Test-only override for the bundled release version.
+    let releaseVersion: String?
+    let force: Bool
+    let direct: BootstrapDirectConfiguration?
+    let directEndpoint: String?
+    let authorizeDirectPin: Bool
+}
+
+extension InstallTargetSnapshot {
+    init(record: HostRecord, identityGeneration: Int) {
+        self.init(
+            hostID: record.id,
+            host: record.host,
+            sshPort: record.port,
+            username: record.username,
+            hostPort: record.hostPort,
+            directEndpoint: record.directEndpoint,
+            identityGeneration: identityGeneration
+        )
+    }
+
+    func matches(record: HostRecord, identityGeneration: Int) -> Bool {
+        matches(InstallTargetSnapshot(record: record, identityGeneration: identityGeneration))
+    }
 }
 
 struct AdaptorInstallRunOutcome: Sendable {
@@ -168,7 +218,7 @@ final class ConnectionModel: ObservableObject {
     /// (AppModel) can persist it onto the host record.
     var onResolvedHostPort: ((UUID, Int) -> Void)?
     var onDirectVerified: ((UUID, String, String) -> Void)?
-    var onBootstrapPairingCommit: ((BootstrapPairingCommit) async -> Bool)?
+    var onBootstrapPairingCommit: ((BootstrapPairingCommit) async -> BootstrapPairingCommitResult)?
     @Published private(set) var hasLoadedCatalog = false
     @Published private(set) var isRefreshingCatalog = false
     @Published private(set) var catalogError: String?
@@ -210,6 +260,9 @@ final class ConnectionModel: ObservableObject {
     private var cacheFlushTask: Task<Void, Never>?
     private var cacheFlushGeneration = 0
     var currentCatalogHostID: UUID? { cacheHostID }
+    /// 当前选中的 HostRecord id（由 AppModel 的 setCacheHostID 保持同步）。
+    /// Provider key lookup 用它定位本机 Keychain 中的 (host, provider) 密钥。
+    var currentHostID: UUID? { cacheHostID }
     /// 会话内的读写（发送、审批、排队、配置）全部走它。
     let session: SessionController
     private let usesUITestFixture: Bool
@@ -467,6 +520,13 @@ final class ConnectionModel: ObservableObject {
         session.onSessionWillChange = { [weak self] in
             await self?.flushPendingCacheWrites()
         }
+        // Key 不落服务器：send 前按当前 host 从本机 Keychain 取一次，仅随
+        // turn/start 透传；闭包不缓存 key、不写日志，读取失败返回 nil，由服务端
+        // 以 PROVIDER_SECRET_MISSING 明确拒绝。
+        session.providerAPIKey = { [weak self] providerId in
+            guard let hostID = self?.currentHostID else { return nil }
+            return KeychainStore.loadProviderKey(hostID: hostID, providerId: providerId)
+        }
 #if DEBUG
         session.configureUITestInterruption(enabled: fixture?.supportsFixtureInterrupt == true)
 #endif
@@ -483,6 +543,14 @@ final class ConnectionModel: ObservableObject {
         if let hostID, let catalog = fixtureCatalogs[hostID] {
             applyFixtureCatalog(catalog)
         }
+    }
+
+    /// Provider API keys live only in the local Keychain, scoped by (host, provider).
+    /// The session send path resolves the key through here; the value must never be
+    /// logged, persisted to the state file, or sent anywhere except `turn/start`.
+    func providerKeyForCurrentHost(_ providerId: String) -> String? {
+        guard let hostID = cacheHostID else { return nil }
+        return KeychainStore.loadProviderKey(hostID: hostID, providerId: providerId)
     }
 
     var cacheItemLimit: Int { cacheStore.itemLimit }
@@ -590,15 +658,7 @@ final class ConnectionModel: ObservableObject {
     /// adapters. This is an isolated/test-injected operation; callers must not
     /// invoke it against a production PI-adaptor without explicit user action.
     func installAdaptor(
-        record: HostRecord,
-        port: Int,
-        /// 测试专用：显式指定内置版本。正常安装传 `nil`，自动解析最新稳定发布。
-        releaseVersion: String? = nil,
-        /// 强制重装：忽略 PI-adaptor install receipt，重新下载、校验并激活。
-        force: Bool = false,
-        direct: BootstrapDirectConfiguration? = nil,
-        directEndpoint: String? = nil,
-        authorizeDirectPin: Bool = false,
+        request: InstallRequest,
         directTrustAuthorizer: (@Sendable (BootstrapDirectTrust) async -> Bool)? = nil,
         /// 版本解析完成时回调，用于在安装页显示本次目标版本与回退原因。
         onReleaseResolved: ((AdaptorReleaseResolution) -> Void)? = nil,
@@ -607,8 +667,23 @@ final class ConnectionModel: ObservableObject {
 #if DEBUG
         installAdaptorCallCountForTesting += 1
 #endif
+        let record = request.record
+        let port = request.adaptorPort
+        let releaseVersion = request.releaseVersion
+        let force = request.force
+        let direct = request.direct
+        let directEndpoint = request.directEndpoint
+        let authorizeDirectPin = request.authorizeDirectPin
         guard (1...65_535).contains(port) else {
             throw BootstrapScriptError.invalidPort
+        }
+        // The request is built from the record at click time; a mismatch here means
+        // the caller assembled it from a different record and must be rejected.
+        guard request.target.matches(
+            record: record,
+            identityGeneration: request.target.identityGeneration
+        ) else {
+            throw AdaptorInstallError.installationSuperseded
         }
         if let previous = pendingBootstrapTransports.removeValue(forKey: record.id) {
             await previous.transport?.close()
@@ -789,17 +864,82 @@ final class ConnectionModel: ObservableObject {
             KeychainStore.clearStagedPairing(hostID: record.id, attemptId: attemptId)
             throw error
         }
+        let identityState = attemptState.current
         if case .succeeded = result {
-            guard KeychainStore.promoteStagedPairing(
-                hostID: record.id,
-                attemptId: attemptId
-            ) else {
+            guard let adaptorHostId = identityState.hostId, !adaptorHostId.isEmpty else {
                 await revokeStagedPairingBestEffort(
                     record: record,
                     port: port,
                     attemptId: attemptId
                 )
                 KeychainStore.clearStagedPairing(hostID: record.id, attemptId: attemptId)
+                throw AdaptorInstallError.adaptorIdentityMissing
+            }
+            let canonicalEndpoint = directEndpoint.flatMap {
+                HostValidator.canonicalDirectEndpoint($0)
+            }
+            let commit = BootstrapPairingCommit(
+                target: request.target,
+                adaptorHostId: adaptorHostId,
+                port: port,
+                version: release.version,
+                attemptId: attemptId,
+                releaseSource: resolution.source,
+                directEndpoint: canonicalEndpoint
+            )
+            let commitResult: BootstrapPairingCommitResult
+            if let onBootstrapPairingCommit {
+                // The one controlled commit point (U15): re-check the frozen identity
+                // and write the receipt once, then promote the staged token.
+                commitResult = await BootstrapInstallCommitCoordinator.commit(
+                    writeReceipt: { await onBootstrapPairingCommit(commit) },
+                    promoteStaged: {
+                        KeychainStore.promoteStagedPairing(
+                            hostID: record.id,
+                            attemptId: attemptId
+                        )
+                    },
+                    cleanupAttempt: {
+                        await self.revokeStagedPairingBestEffort(
+                            record: record,
+                            port: port,
+                            attemptId: attemptId
+                        )
+                        KeychainStore.clearStagedPairing(
+                            hostID: record.id,
+                            attemptId: attemptId
+                        )
+                    }
+                )
+            } else {
+                // No app-level owner (tests/previews): still promote only after the
+                // remote verification succeeded, and clean up this attempt on failure.
+                if KeychainStore.promoteStagedPairing(
+                    hostID: record.id,
+                    attemptId: attemptId
+                ) {
+                    commitResult = .committed
+                } else {
+                    commitResult = .tokenPromotionFailed
+                    await revokeStagedPairingBestEffort(
+                        record: record,
+                        port: port,
+                        attemptId: attemptId
+                    )
+                    KeychainStore.clearStagedPairing(
+                        hostID: record.id,
+                        attemptId: attemptId
+                    )
+                }
+            }
+            switch commitResult {
+            case .committed:
+                break
+            case .staleTarget:
+                throw AdaptorInstallError.installationSuperseded
+            case .receiptPersistenceFailed(let reason):
+                throw AdaptorInstallError.receiptPersistenceFailed(reason)
+            case .tokenPromotionFailed:
                 throw ConnectionPairingError.keychainWriteFailed
             }
         } else {
@@ -810,34 +950,14 @@ final class ConnectionModel: ObservableObject {
             )
             KeychainStore.clearStagedPairing(hostID: record.id, attemptId: attemptId)
         }
-        let identityState = attemptState.current
         var directVerified = false
         var directError = identityState.error
-        var pairingCommitFailed = false
-        if case .succeeded = result,
-           let adaptorHostId = identityState.hostId,
-           let onBootstrapPairingCommit {
-            let committed = await onBootstrapPairingCommit(
-                BootstrapPairingCommit(
-                    hostID: record.id,
-                    adaptorHostId: adaptorHostId,
-                    port: port,
-                    version: release.version,
-                    attemptId: attemptId,
-                    releaseSource: resolution.source
-                )
-            )
-            if !committed {
-                pairingCommitFailed = true
-                directError = "配对记录与 hostId 未能写入本机，已阻止 direct 首验"
-            }
-        }
         let canonicalEndpoint = directEndpoint.flatMap { HostValidator.canonicalDirectEndpoint($0) }
         if directEndpoint != nil && canonicalEndpoint == nil {
             directError = "direct endpoint 不合法"
         }
         var didRejectDirect = false
-        let wantsDirect = !pairingCommitFailed && canonicalEndpoint != nil
+        let wantsDirect = canonicalEndpoint != nil
             && (authorizeDirectPin || directTrustAuthorizer != nil)
         var directAuthorized = authorizeDirectPin
         if wantsDirect, let trust = identityState.trust, let directTrustAuthorizer {
@@ -858,6 +978,12 @@ final class ConnectionModel: ObservableObject {
             )
             directVerified = verification.verified
             directError = verification.error
+            if verification.verified, let adaptorHostId = identityState.hostId, !adaptorHostId.isEmpty {
+                // v0.0.2 parity: a successful first direct verification promotes the
+                // record to directPreferred. The staged token was promoted above, and
+                // `attemptBootstrapDirect` already saved the matching pin.
+                onDirectVerified?(record.id, canonicalEndpoint, adaptorHostId)
+            }
         }
         if !shouldAttemptDirect || directVerified {
             _ = try? await transport.exec(
@@ -945,10 +1071,10 @@ final class ConnectionModel: ObservableObject {
             for await update in updates {
                 if case .state(.online) = update {
                     guard KeychainStore.saveDirectTLSTrustPin(pin, hostID: record.id) else {
-                        await client.stop()
+                        _ = await client.stopBestEffort(timeout: 1)
                         return (false, "direct pin 未能写入 Keychain")
                     }
-                    await client.stop()
+                    _ = await client.stopBestEffort(timeout: 1)
                     return (true, nil)
                 }
                 if case .state(.offline(let reason)) = update {
@@ -957,7 +1083,7 @@ final class ConnectionModel: ObservableObject {
             }
             throw RACPClientError.notConnected
         } catch {
-            await client.stop()
+            _ = await client.stopBestEffort(timeout: 1)
             return (false, error.localizedDescription)
         }
     }
@@ -1876,7 +2002,7 @@ final class ConnectionModel: ObservableObject {
         let stream = await newClient.start()
         guard self.client === newClient, connectionGeneration == generation else {
             releaseHostKeyBroker(operationID)
-            await newClient.stop()
+            _ = await newClient.stopBestEffort(timeout: 1)
             return
         }
         updateTask = Task { [weak self] in
@@ -1936,7 +2062,7 @@ final class ConnectionModel: ObservableObject {
               connectionGeneration == expectedGeneration,
               candidateClient === candidate
         else {
-            await candidate.stop()
+            _ = await candidate.stopBestEffort(timeout: 1)
             releaseHostKeyBroker(operationID)
             return
         }
@@ -1965,7 +2091,7 @@ final class ConnectionModel: ObservableObject {
         expectedGeneration: Int
     ) async {
         guard let oldClient = client else {
-            await candidate.stop()
+            _ = await candidate.stopBestEffort(timeout: 1)
             releaseHostKeyBroker(brokerID)
             return
         }
@@ -2058,7 +2184,7 @@ final class ConnectionModel: ObservableObject {
                   connectionGeneration == generation,
                   connectionIntentGeneration == intent
             else { throw ConnectionLifecycleError.connectionChanged }
-            await oldClient.stop()
+            _ = await oldClient.stopBestEffort(timeout: 1)
             guard !Task.isCancelled,
                   client === candidate,
                   connectionGeneration == generation,
@@ -2105,9 +2231,9 @@ final class ConnectionModel: ObservableObject {
                     lastError = error.localizedDescription
                 }
             } else {
-                await oldClient.stop()
+                _ = await oldClient.stopBestEffort(timeout: 1)
             }
-            await candidate.stop()
+            _ = await candidate.stopBestEffort(timeout: 1)
             if candidateClient === candidate {
                 candidateClient = nil
                 candidateTask = nil
@@ -2169,8 +2295,12 @@ final class ConnectionModel: ObservableObject {
         connectedAccount = nil
         connectionStatus = ConnectionStatus()
         state = .offline(reason: nil)
-        let candidateStop = Task { await oldCandidate?.stop() }
-        let activeStop = Task { await oldClient?.stop() }
+        let candidateStop = Task {
+            if let oldCandidate { _ = await oldCandidate.stopBestEffort(timeout: 1) }
+        }
+        let activeStop = Task {
+            if let oldClient { _ = await oldClient.stopBestEffort(timeout: 1) }
+        }
 
 #if DEBUG
         if disconnectFlushDelayForTesting > 0 {

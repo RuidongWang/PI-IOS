@@ -66,4 +66,27 @@ final class SSHErrorMappingTests: XCTestCase {
         let mapped = SSHTransport.mapTransportError(original, phase: "SSH 握手与认证")
         XCTAssertEqual(mapped as? SSHTransportError, original)
     }
+
+    /// S4：`probeActivation` 的兜底 catch 以前把一切都改写成 timedOut，
+    /// 导致真实认证/握手失败被当成超时（无限退避而非报「认证失败」）。
+    func testProbeActivationFailureKeepsRealErrorsClassified() {
+        let eof = SSHTransport.probeActivationFailure(ChannelError.eof)
+        guard case SSHTransportError.closedByPeer = eof else {
+            return XCTFail("握手期 EOF 必须保真为 closedByPeer，实际：\(eof)")
+        }
+
+        let auth = SSHTransport.probeActivationFailure(SSHTransportError.authenticationFailed)
+        XCTAssertEqual(auth as? SSHTransportError, .authenticationFailed)
+
+        let hostKey = SSHTransport.probeActivationFailure(
+            SSHTransportError.hostKeyAlgorithmUnsupported
+        )
+        XCTAssertEqual(hostKey as? SSHTransportError, .hostKeyAlgorithmUnsupported)
+    }
+
+    /// 只有取消才允许转成超时（预算到点用取消表达）。
+    func testProbeActivationFailureMapsOnlyCancellationToTimeout() {
+        let canceled = SSHTransport.probeActivationFailure(CancellationError())
+        XCTAssertEqual(canceled as? SSHTransportError, .timedOut("SSH 握手与认证"))
+    }
 }

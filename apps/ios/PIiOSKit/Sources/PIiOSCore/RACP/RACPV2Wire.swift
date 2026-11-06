@@ -91,6 +91,9 @@ public struct RACPV2Provider: Codable, Equatable, Sendable, Identifiable {
     public var authKind: String
     public var hasApiKey: Bool
     public var apiKeyMask: String?
+    /// 密钥归属。v0.0.3 起 `authKind == "api_key"` 的服务端记录返回 `"client"`：
+    /// 密钥只在设备 Keychain 中，服务端不保存；缺省（nil）表示旧服务端语义。
+    public var keyStorage: String?
     public var isDefault: Bool
     public var models: [RACPV2ProviderModel]
     public var createdAt: String
@@ -98,7 +101,7 @@ public struct RACPV2Provider: Codable, Equatable, Sendable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, vendorKey, type, protocolName = "protocol", baseUrl, authKind,
-             hasApiKey, apiKeyMask, isDefault, models, createdAt, updatedAt
+             hasApiKey, apiKeyMask, keyStorage, isDefault, models, createdAt, updatedAt
     }
 }
 

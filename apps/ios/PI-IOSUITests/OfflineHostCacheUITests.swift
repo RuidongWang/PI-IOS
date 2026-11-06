@@ -54,7 +54,9 @@ final class OfflineHostCacheUITests: XCTestCase {
     }
 
     private func cachedRow(_ id: String) -> XCUIElement {
-        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", id)).firstMatch
+        // 离线行标题现在是「本机保存的标题」（U01），不再以会话 ID 开头，
+        // 所以按稳定 identifier 定位，而不是 label BEGINSWITH。
+        app.buttons["sidebar.cachedSession.\(id)"]
     }
 
     private func assertSidebar(host: String, absent: String) {

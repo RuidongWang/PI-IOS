@@ -67,6 +67,23 @@ struct InstallAdaptorScreen: View {
         return nil
     }
 
+    /// U09/U15: freeze the whole install request at click time. Every retry —
+    /// including the sudo re-authorization entry — reuses exactly these values;
+    /// authorization inputs (sudo password, direct trust callback) stay separate.
+    private func installRequest(host: HostRecord, force: Bool) -> InstallRequest? {
+        guard let port = Int(portText.piTrimmed) else { return nil }
+        return InstallRequest(
+            target: model.installTargetSnapshot(for: host),
+            record: host,
+            adaptorPort: port,
+            releaseVersion: nil,
+            force: force,
+            direct: directConfiguration,
+            directEndpoint: canonicalDirectEndpoint,
+            authorizeDirectPin: false
+        )
+    }
+
     private var canStart: Bool {
         host != nil && portError == nil && directConfigurationError == nil && !coordinator.isRunning
     }
@@ -446,13 +463,8 @@ struct InstallAdaptorScreen: View {
                         title: "重新授权并继续",
                         isEnabled: !sudoCredential.isEmpty && !coordinator.isRunning
                     ) {
-                        guard let host, let port = Int(portText.piTrimmed) else { return }
-                        coordinator.start(
-                            host: host,
-                            port: port,
+                        coordinator.retrySudo(
                             sudoCredential: sudoCredential,
-                            direct: directConfiguration,
-                            directEndpoint: canonicalDirectEndpoint,
                             model: model,
                             connection: connection
                         )
@@ -511,13 +523,12 @@ struct InstallAdaptorScreen: View {
                         )
                     }
                 } else {
-                    guard let host, let port = Int(portText.piTrimmed) else { return }
-                    coordinator.start(
+                    guard let host, let request = installRequest(
                         host: host,
-                        port: port,
-                        forceReinstall: forceReinstall,
-                        direct: directConfiguration,
-                        directEndpoint: canonicalDirectEndpoint,
+                        force: forceReinstall
+                    ) else { return }
+                    coordinator.start(
+                        request: request,
                         model: model,
                         connection: connection
                     )
@@ -709,6 +720,10 @@ private final class InstallAdaptorCoordinator: ObservableObject {
     private var runTask: Task<Void, Never>?
     private var trustContinuation: CheckedContinuation<Bool, Never>?
     private var runID = UUID()
+    /// U09: the immutable request the last attempt started with. The sudo
+    /// re-authorization entry replays exactly this request instead of rebuilding it
+    /// from a possibly edited form.
+    private var lastRequest: InstallRequest?
 
 #if DEBUG
     init() {
@@ -787,16 +802,14 @@ private final class InstallAdaptorCoordinator: ObservableObject {
     }
 
     func start(
-        host: HostRecord,
-        port: Int,
+        request: InstallRequest,
         sudoCredential: String? = nil,
-        forceReinstall: Bool = false,
-        direct: BootstrapDirectConfiguration? = nil,
-        directEndpoint: String? = nil,
         model: AppModel,
         connection: ConnectionModel
     ) {
         guard !isRunning else { return }
+        let host = request.record
+        lastRequest = request
         let generation = UUID()
         let previousDirectAttempt = directAttemptId
         runID = generation
@@ -836,13 +849,12 @@ private final class InstallAdaptorCoordinator: ObservableObject {
                     guard self.runID == generation else { return }
                 }
                 let outcome = try await connection.installAdaptor(
-                    record: host,
-                    port: port,
-                    force: forceReinstall,
-                    direct: direct,
-                    directEndpoint: directEndpoint,
+                    request: request,
                     directTrustAuthorizer: { [weak self] trust in
-                        guard let self, direct != nil, directEndpoint != nil else { return false }
+                        guard let self,
+                              request.direct != nil,
+                              request.directEndpoint != nil
+                        else { return false }
                         return await self.requestDirectAuthorization(trust)
                     },
                     onReleaseResolved: { resolution in
@@ -872,12 +884,49 @@ private final class InstallAdaptorCoordinator: ObservableObject {
                 self.phase = .failed
                 self.isFailureAlertDismissed = false
                 self.failureCount += 1
-                self.failureDetail = ConnectionErrorText.describe(error)
+                if let installError = error as? AdaptorInstallError {
+                    switch installError {
+                    case .installationSuperseded:
+                        // U15 stale branch: point the user back to the original server,
+                        // never invite them to retry A's install against the new record.
+                        self.failureCode = nil
+                        self.failureDetail = error.localizedDescription
+                    case .receiptPersistenceFailed:
+                        self.failureCode = .receiptFailed
+                        self.failureDetail = error.localizedDescription
+                    default:
+                        self.failureDetail = ConnectionErrorText.describe(error)
+                    }
+                } else {
+                    self.failureDetail = ConnectionErrorText.describe(error)
+                }
             }
             if self.runID == generation {
                 self.runTask = nil
             }
         }
+    }
+
+    /// U09 sudo recovery entry: the original immutable request is replayed, and a
+    /// changed target identity stops the retry explicitly instead of running A's
+    /// parameters against B.
+    func retrySudo(
+        sudoCredential: String,
+        model: AppModel,
+        connection: ConnectionModel
+    ) {
+        guard let request = lastRequest else { return }
+        guard let current = model.hosts.first(where: { $0.id == request.record.id }),
+              model.installTargetSnapshot(for: current).matches(request.target)
+        else {
+            phase = .failed
+            isFailureAlertDismissed = false
+            failureCode = nil
+            failureDetail = "服务器身份已变化，旧安装任务不能沿用；请到原服务器核对后重新开始安装。"
+            failureCount += 1
+            return
+        }
+        start(request: request, sudoCredential: sudoCredential, model: model, connection: connection)
     }
 
     private func receive(_ event: BootstrapRunnerEvent) {
@@ -918,58 +967,39 @@ private final class InstallAdaptorCoordinator: ObservableObject {
         switch outcome.result {
         case .succeeded(let success):
             state = success.state
-            let persisted = model.completeAdaptorInstallation(
-                id: host.id,
-                expectedHost: host.host,
-                expectedPort: host.port,
-                expectedUsername: host.username,
-                port: success.port,
-                version: outcome.releaseVersion,
-                attemptId: outcome.attemptId,
-                releaseSource: outcome.releaseSource.map { $0.isFallback ? .fallback : .latest }
-            )
-            switch BootstrapInstallCompletionPolicy.disposition(
-                persisted: persisted,
-                saveError: model.saveError
-            ) {
-            case .succeeded:
-                if outcome.requiresSSHOnlyConfirmation {
-                    phase = .directFailed
-                    directError = outcome.directError ?? "Direct 首验失败"
-                    directAttemptId = outcome.attemptId
-                    postInstallWarning = outcome.directError
-                    activity = "配对与 hostId 已保存；Direct 首验失败，等待你明确选择。"
-                    failureCode = nil
-                    failureDetail = nil
-                    return
-                }
-                if let directError = outcome.directError {
-                    phase = .failed
-                    isFailureAlertDismissed = false
-                    failureDetail = directError
-                    failureCount += 1
-                    return
-                }
-                let info = success.serverInfo
-                phase = .success
-                let sourceName = outcome.releaseSource?.displayName ?? "版本来源未知"
-                activity = "\(info.serverName) \(info.serverVersion) 正在运行（\(sourceName)）；pi-adaptor.service active、设备令牌重连与 ping 均成功。"
-                if let source = outcome.releaseSource, source.isFallback {
-                    releaseNotice = source.fallbackReason
-                }
-                postInstallWarning = nil
+            // U15: the install receipt and the staged-token promotion already happened
+            // in ConnectionModel's single controlled commit section. This view only
+            // consumes the result — it must never write a second receipt from an old
+            // snapshot.
+            if outcome.requiresSSHOnlyConfirmation {
+                phase = .directFailed
+                directError = outcome.directError ?? "Direct 首验失败"
+                directAttemptId = outcome.attemptId
+                postInstallWarning = outcome.directError
+                activity = "配对与 hostId 已保存；Direct 首验失败，等待你明确选择。"
                 failureCode = nil
                 failureDetail = nil
-                failureCount = 0
-                connectAfterInstall(host: host, model: model, connection: connection)
-            case .failed(let reason):
+                return
+            }
+            if let directError = outcome.directError {
                 phase = .failed
                 isFailureAlertDismissed = false
-                failureCode = .receiptFailed
-                failureDetail = "远端安装与运行验证已通过，但无法提交本机服务器记录：\(reason)"
-                postInstallWarning = reason
+                failureDetail = directError
                 failureCount += 1
+                return
             }
+            let info = success.serverInfo
+            phase = .success
+            let sourceName = outcome.releaseSource?.displayName ?? "版本来源未知"
+            activity = "\(info.serverName) \(info.serverVersion) 正在运行（\(sourceName)）；pi-adaptor.service active、设备令牌重连与 ping 均成功。"
+            if let source = outcome.releaseSource, source.isFallback {
+                releaseNotice = source.fallbackReason
+            }
+            postInstallWarning = nil
+            failureCode = nil
+            failureDetail = nil
+            failureCount = 0
+            connectAfterInstall(host: host, model: model, connection: connection)
         case .failed(let failure):
             state = failure.state
             phase = .failed

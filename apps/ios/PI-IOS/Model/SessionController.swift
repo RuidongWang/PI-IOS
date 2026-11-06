@@ -59,6 +59,13 @@ final class SessionController: ObservableObject {
     /// Flush the outgoing session's coalesced cache before changing `attachedSessionId`.
     var onSessionWillChange: (() async -> Void)?
 
+    /// 由 `ConnectionModel` 注入：按 provider id 读取本机 Keychain 里的 API key。
+    ///
+    /// 密钥不落服务器（keyStorage=client），发送时按当前 `selectedProviderId` 取 key
+    /// 并作为 `turn/start.apiKey` 一次性透传。这里只保存取 key 的闭包，绝不缓存 key、
+    /// 不写日志；读取失败返回 nil，由服务端以 `PROVIDER_SECRET_MISSING` 明确拒绝。
+    var providerAPIKey: ((String) -> String?)?
+
     private var client: RACPClient?
     private var bindGeneration = 0
     private var sessionSelectionGeneration = 0
@@ -347,7 +354,31 @@ final class SessionController: ObservableObject {
         pendingAttachments.removeAll { $0.id == id }
     }
 
-    func send() async {
+    /// 点击发送时冻结的当前发送意图（U11）。必须在模型可用性检查之前调用，
+    /// 之后把返回值原样传给 `send(expected:)`；发送任务只认这份冻结值。
+    func makeSendIntent() -> SendIntent? {
+        guard let state = currentSendState() else { return nil }
+        return SendIntent(
+            hostID: state.hostID,
+            sessionID: state.sessionID,
+            bindingKey: state.bindingKey,
+            draftText: state.draftText,
+            attachmentIDs: state.attachmentIDs,
+            selectionGeneration: state.selectionGeneration
+        )
+    }
+
+    /// 发送一条消息。
+    ///
+    /// `expected` 非空时，入口与 `refreshView()` 之后都会核对当前会话/服务器/模型绑定/
+    /// 草稿/附件是否仍属于点击时冻结的意图；不匹配就取消本次发送并保留草稿，
+    /// 绝不把另一会话的内容当成这次点击发出去（U11）。成功后也只有当前状态仍属于
+    /// 原意图时才清草稿，提交期间的新编辑不会被旧任务清掉。
+    func send(expected intent: SendIntent? = nil) async {
+        guard intentIsCurrent(intent) else {
+            notice = "会话、模型或草稿已变化：本次发送已取消，草稿已保留"
+            return
+        }
         guard let sessionId = attachedSessionId else {
             lastError = "还没有打开会话"
             return
@@ -379,6 +410,10 @@ final class SessionController: ObservableObject {
               trimmedDraft == text,
               let hostID = currentRequestHostID()
         else { return }
+        guard intentIsCurrent(intent) else {
+            notice = "会话、模型或草稿已变化：本次发送已取消，草稿已保留"
+            return
+        }
         do {
             let attachmentIDs = pendingAttachments.map(\.id)
             let action: SessionRequestAction = attachmentIDs.isEmpty
@@ -390,17 +425,22 @@ final class SessionController: ObservableObject {
             )
             draftPreview = (text, attempt.idempotencyKey)
             onDraftChanged?(sessionId, draftText, attempt.idempotencyKey)
+            // 密钥只从本机 Keychain 取一次并随这次请求透传；不缓存、不写日志。
+            let apiKey = selectedProviderId.flatMap { providerAPIKey?($0) }
             let result = try await client.startTurn(
                 sessionId: sessionId,
                 text: text,
                 attachments: attachmentIDs,
                 admission: attempt.admission,
-                idempotencyKey: attempt.idempotencyKey
+                idempotencyKey: attempt.idempotencyKey,
+                apiKey: apiKey
             )
             try requestKeys.acknowledge(attempt)
             guard isCurrent(client, generation: generation, selection: selection) else { return }
             runningTurnId = await client.sessionView().runningTurnId
-            if trimmedDraft == text && draftPreview?.key == attempt.idempotencyKey {
+            if intentIsCurrent(intent),
+               trimmedDraft == text,
+               draftPreview?.key == attempt.idempotencyKey {
                 draftText = ""
                 draftPreview = nil
                 pendingAttachments = []
@@ -415,6 +455,42 @@ final class SessionController: ObservableObject {
             guard isCurrent(client, generation: generation, selection: selection) else { return }
             lastError = ConnectionErrorText.describe(error)
         }
+    }
+
+    /// 当前发送状态的快照，用于冻结/核对 `SendIntent`。
+    private struct SendState {
+        let hostID: String
+        let sessionID: String
+        let bindingKey: String
+        let draftText: String
+        let attachmentIDs: [String]
+        let selectionGeneration: Int
+    }
+
+    private func currentSendState() -> SendState? {
+        guard let sessionID = attachedSessionId else { return nil }
+        return SendState(
+            hostID: attachedHostID ?? "",
+            sessionID: sessionID,
+            bindingKey: selectedBindingKey,
+            draftText: trimmedDraft,
+            attachmentIDs: pendingAttachments.map(\.id),
+            selectionGeneration: sessionSelectionGeneration
+        )
+    }
+
+    /// `intent == nil` 表示调用方不冻结意图（内部兼容路径）；否则逐项核对。
+    private func intentIsCurrent(_ intent: SendIntent?) -> Bool {
+        guard let intent else { return true }
+        guard let state = currentSendState() else { return false }
+        return intent.matches(
+            hostID: state.hostID,
+            sessionID: state.sessionID,
+            bindingKey: state.bindingKey,
+            draftText: state.draftText,
+            attachmentIDs: state.attachmentIDs,
+            selectionGeneration: state.selectionGeneration
+        )
     }
 
     // MARK: 中止 / 取消排队（AC-09.1 / AC-13.2）
@@ -607,10 +683,16 @@ final class SessionController: ObservableObject {
     }
 
     /// 回答 AskTool 提问；`answers` 顺序必须与该卡问题顺序对齐（AC-11.1）。
-    func answer(inputId: String, answers: [[String]?]) async {
+    ///
+    /// 返回结构化结果供界面决定是否清空已选答案（U06）：只有成功或明确失效才清，
+    /// 普通失败必须保留用户的选择。失败重试复用 `requestKeys` 里已持久化的幂等键，
+    /// 不会把同一条回答当第二条提交。
+    @discardableResult
+    func answer(inputId: String, answers: [[String]?]) async -> InputAnswerOutcome {
         guard isOnline, let client else {
-            lastError = "隧道未连接：回答现在提交会失败，已阻止"
-            return
+            let reason = "隧道未连接：回答现在提交会失败，已阻止"
+            lastError = reason
+            return .failed(reason: reason)
         }
         let generation = bindGeneration
         let selection = sessionSelectionGeneration
@@ -618,11 +700,21 @@ final class SessionController: ObservableObject {
         guard isCurrent(client, generation: generation, selection: selection),
               let sessionId = attachedSessionId,
               let hostID = currentRequestHostID()
-        else { return }
-        guard case let .actionable(cardRevision) = DecisionPolicy.inputAvailability(id: inputId, pending: pendingInputs),
-              let revision = cardRevision else {
-            lastError = "该提问已不可提交或缺少版本：请刷新后重试"
-            return
+        else {
+            // 会话已切换或身份已变化：提交结果未知，保留草稿让用户重试。
+            return .failed(reason: lastError ?? "会话已切换：请重新提交回答")
+        }
+        let availability = DecisionPolicy.inputAvailability(id: inputId, pending: pendingInputs)
+        guard case let .actionable(cardRevision) = availability, let revision = cardRevision else {
+            if case .missing = availability {
+                let reason = "该提问已由其他端处理或不存在：请刷新后重试"
+                lastError = reason
+                await refreshView()
+                return .noLongerActionable(reason: reason)
+            }
+            let reason = "该提问缺少版本：请刷新后重试"
+            lastError = reason
+            return .failed(reason: reason)
         }
         let busy = beginBusy()
         defer { endBusy(busy) }
@@ -637,14 +729,31 @@ final class SessionController: ObservableObject {
                 idempotencyKey: attempt.idempotencyKey
             )
             try requestKeys.acknowledge(attempt)
-            guard isCurrent(client, generation: generation, selection: selection) else { return }
+            guard isCurrent(client, generation: generation, selection: selection) else {
+                // 服务器已受理；界面可以按作用域清掉这张卡的选择。
+                return .submitted
+            }
             notice = "已回答提问"
             lastError = nil
             await refreshView()
+            return .submitted
         } catch {
-            guard isCurrent(client, generation: generation, selection: selection) else { return }
-            lastError = ConnectionErrorText.describe(error)
+            let described = ConnectionErrorText.describe(error)
+            guard isCurrent(client, generation: generation, selection: selection) else {
+                lastError = described
+                return .failed(reason: described)
+            }
             await refreshView()
+            // 刷新后卡片消失 = 其他端已经回答/卡片失效；否则按错误码分诊。
+            let stillPending = pendingInputs.contains { $0.id == inputId }
+            let outcome = AnswerDraftPolicy.outcomeAfterFailure(
+                serverCode: Self.serverCode(from: error),
+                cardStillPending: stillPending,
+                reason: described
+            )
+            lastError = outcome.reason ?? described
+            await refreshView()
+            return outcome
         }
     }
 

@@ -196,8 +196,10 @@ public final class SSHTransport {
         let channel: Channel
         do {
             channel = try await bootstrap.connect(host: request.host, port: request.port).get()
+            ConnectionDiagnostics.shared.record(kind: .sshStage, detail: "ssh.tcp-connected")
         } catch {
             try? await group.shutdownGracefully()
+            ConnectionDiagnostics.shared.record(kind: .sshStage, detail: "ssh.tcp-failed")
             throw Self.mapTransportError(error, phase: "建立 TCP 连接")
         }
 
@@ -220,6 +222,7 @@ public final class SSHTransport {
         } catch {
             try? await channel.close().get()
             try? await group.shutdownGracefully()
+            ConnectionDiagnostics.shared.record(kind: .sshStage, detail: "ssh.handshake-failed")
             throw Self.mapTransportError(error, phase: "SSH 握手与认证")
         }
     }
@@ -327,7 +330,7 @@ public final class SSHTransport {
         let originator = channel.remoteAddress ?? (try? SocketAddress(ipAddress: "127.0.0.1", port: 0))
         guard let originator else { throw SSHTransportError.channelClosed }
         do {
-            return try await withTimeout(seconds: timeout, phase: "打开 direct-tcpip 通道") {
+            let channel = try await withTimeout(seconds: timeout, phase: "打开 direct-tcpip 通道") {
                 try await self.createChannel(
                     channelType: .directTCPIP(
                         .init(
@@ -342,7 +345,10 @@ public final class SSHTransport {
                     }
                 }
             }
+            ConnectionDiagnostics.shared.record(kind: .sshStage, detail: "ssh.direct-tcpip-opened")
+            return channel
         } catch {
+            ConnectionDiagnostics.shared.record(kind: .sshStage, detail: "ssh.direct-tcpip-failed")
             throw Self.mapTransportError(error, phase: "打开 direct-tcpip 通道（目标 \(remoteHost):\(port)）")
         }
     }
@@ -386,6 +392,7 @@ public final class SSHTransport {
                     }
                 }
                 try? await probe.close().get()
+                ConnectionDiagnostics.shared.record(kind: .sshStage, detail: "ssh.authenticated")
                 return
             } catch let transportError as SSHTransportError {
                 guard case .timedOut = transportError else {
@@ -401,12 +408,25 @@ public final class SSHTransport {
                 // 正在等用户核对指纹：用剩余的确认窗口再等一次。
                 budget = max(0.1, Self.seconds(from: remaining))
                 continue
-            } catch is CancellationError {
-                throw SSHTransportError.timedOut("SSH 握手与认证")
             } catch {
-                throw SSHTransportError.timedOut("SSH 握手与认证")
+                // 兜底不再一律当成超时：ChannelError/NIOSSHError 等真实握手/认证失败
+                // 必须保持可分类（契约 §9.2 认证、主机密钥错误不得被伪装成 timeout）。
+                let mapped = Self.probeActivationFailure(error)
+                ConnectionDiagnostics.shared.record(
+                    kind: .sshStage,
+                    phase: "ssh.handshake",
+                    detail: "ssh.probe-failed"
+                )
+                throw mapped
             }
         }
+    }
+
+    /// probeActivation 的兜底分类：只有取消才算超时，其余交给 `mapTransportError`。
+    static func probeActivationFailure(_ error: Error) -> Error {
+        if error is CancellationError { return SSHTransportError.timedOut("SSH 握手与认证") }
+        if let transportError = error as? SSHTransportError { return transportError }
+        return mapTransportError(error, phase: "SSH 握手与认证")
     }
 
     private static func seconds(from duration: Duration) -> TimeInterval {

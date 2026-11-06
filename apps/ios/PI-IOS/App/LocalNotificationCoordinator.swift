@@ -17,21 +17,30 @@ final class LocalNotificationCoordinator: NSObject, UNUserNotificationCenterDele
         UNUserNotificationCenter.current().delegate = self
     }
 
-    func requestAuthorizationIfNeeded() async {
-        guard !didAttemptAuthorization else { return }
-        didAttemptAuthorization = true
-
+    /// 当前系统通知权限（只读）：不触发任何系统弹层。
+    func authorizationStatus() async -> LocalNotificationAuthorizationStatus {
         let settings = await UNUserNotificationCenter.current().notificationSettings()
-        let status = Self.authorizationStatus(settings.authorizationStatus)
+        return Self.authorizationStatus(settings.authorizationStatus)
+    }
+
+    /// 真正请求系统授权。
+    ///
+    /// 只在 `NotificationPromptPolicy` 判定「用户已明确启用」之后调用：启动时不再
+    /// 无上下文直接弹权限（U10）。既有 `LocalNotificationAuthorizationPolicy` 的语义
+    /// 保持不变——系统还没决定、且本进程没请求过，才真正请求。
+    @discardableResult
+    func requestAuthorization() async -> Bool {
+        let status = await authorizationStatus()
         guard LocalNotificationAuthorizationPolicy.shouldRequest(
             status: status,
-            alreadyAttempted: false
+            alreadyAttempted: didAttemptAuthorization
         ) else {
-            return
+            return false
         }
-        _ = try? await UNUserNotificationCenter.current().requestAuthorization(
+        didAttemptAuthorization = true
+        return (try? await UNUserNotificationCenter.current().requestAuthorization(
             options: [.alert, .sound]
-        )
+        )) ?? false
     }
 
     /// AppModel 的旧通知路径在自己刷新完基线时会调用这里；只要 AppRootView 已建立

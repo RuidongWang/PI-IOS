@@ -74,8 +74,9 @@ public enum DirectTLSTrustEvaluator {
     }
 }
 
-// MARK: - URLSession delegate：拒绝所有重定向并执行 direct TLS challenge
+// MARK: - URLSession delegate 共享状态
 
+/// TLS/重定向结论必须优先于后续超时分类（契约 §4.2 第 5-6 条）。
 final class DirectRACPSessionState: @unchecked Sendable {
     private let lock = NSLock()
     private var trustFailed = false
@@ -98,19 +99,100 @@ final class DirectRACPSessionState: @unchecked Sendable {
     }
 }
 
-final class DirectRACPSessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+// MARK: - 101 单次结算闸门
+
+/// 升级成功的唯一判据是
+/// `URLSessionWebSocketDelegate.urlSession(_:webSocketTask:didOpenWithProtocol:)`。
+///
+/// 不再用 `sendPing` 的 pong：pong 只是"服务端应用层还活着"的额外证据，单次丢失会被
+/// 误判成 Upgrade 失败并触发 SSH 回退。open / 失败 / 取消 三者在这里锁内单次结算，
+/// delegate 的迟到回调、URLSession 的错误回调与调用方取消不会互相覆盖。
+final class DirectWebSocketOpenGate: @unchecked Sendable {
+    enum Outcome: Equatable {
+        case opened(negotiatedProtocol: String?)
+        case failed(RACPConnectionError)
+    }
+
+    private let lock = NSLock()
+    private var outcome: Outcome?
+    private var waiters: [CheckedContinuation<Outcome, Never>] = []
+    private var opened = false
+
+    /// open 是否已经发生（即使闸门已被取消先行结算）。
+    var didOpen: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return opened
+    }
+
+    func settleOpen(negotiatedProtocol: String?) {
+        settle(.opened(negotiatedProtocol: negotiatedProtocol), opened: true)
+    }
+
+    func settleFailure(_ error: RACPConnectionError) {
+        settle(.failed(error), opened: false)
+    }
+
+    func settleCanceled() {
+        settle(.failed(RACPConnectionError(category: .canceled)), opened: false)
+    }
+
+    /// 任意次数、任意时刻可等待；已结算时立即返回同一结果。
+    func wait() async -> Outcome {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if let outcome {
+                lock.unlock()
+                continuation.resume(returning: outcome)
+                return
+            }
+            waiters.append(continuation)
+            lock.unlock()
+        }
+    }
+
+    private func settle(_ value: Outcome, opened: Bool) {
+        lock.lock()
+        if opened { self.opened = true }
+        guard outcome == nil else {
+            lock.unlock()
+            return
+        }
+        outcome = value
+        let waiters = self.waiters
+        self.waiters = []
+        lock.unlock()
+        for waiter in waiters {
+            waiter.resume(returning: value)
+        }
+    }
+}
+
+// MARK: - URLSession delegate：拒绝所有重定向、执行 direct TLS challenge、结算 101
+
+final class DirectRACPSessionDelegate: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
     let endpointHost: String
     let expectedCertificateSHA256: String
     let state: DirectRACPSessionState
+    let gate: DirectWebSocketOpenGate
+    /// open 之后的 close/error 必须能写入 socket 终态；弱引用避免 session → delegate → socket 循环。
+    private weak var socket: DirectRACPWebSocket?
 
     init(
         endpointHost: String,
         expectedCertificateSHA256: String,
-        state: DirectRACPSessionState = DirectRACPSessionState()
+        state: DirectRACPSessionState = DirectRACPSessionState(),
+        gate: DirectWebSocketOpenGate = DirectWebSocketOpenGate()
     ) {
         self.endpointHost = endpointHost
         self.expectedCertificateSHA256 = expectedCertificateSHA256
         self.state = state
+        self.gate = gate
+        super.init()
+    }
+
+    func attach(socket: DirectRACPWebSocket) {
+        self.socket = socket
     }
 
     func urlSession(
@@ -147,6 +229,82 @@ final class DirectRACPSessionDelegate: NSObject, URLSessionTaskDelegate, @unchec
             state.recordTrustFailure()
             completionHandler(.cancelAuthenticationChallenge, nil)
         }
+    }
+
+    // MARK: URLSessionWebSocketDelegate
+
+    /// 101 成功的唯一判据。`protocol` 是服务端协商出的子协议（未协商为 nil）。
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didOpenWithProtocol protocol: String?
+    ) {
+        gate.settleOpen(negotiatedProtocol: `protocol`)
+        ConnectionDiagnostics.shared.record(
+            kind: .directOpen,
+            phase: `protocol` == nil ? "open.no-protocol" : "open",
+            detail: "gate.open"
+        )
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
+        reason: Data?
+    ) {
+        let termination = RACPSocketTermination(
+            closeCode: Int(closeCode.rawValue),
+            reason: reason.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        )
+        let opened = gate.didOpen
+        if opened {
+            // open 后立刻 close：必须在这里落终态，否则要等 handshake 的请求超时才失败。
+            socket?.recordDelegateTermination(termination)
+        } else {
+            gate.settleFailure(RACPConnectionError(category: termination.category))
+        }
+        ConnectionDiagnostics.shared.record(
+            kind: .directClose,
+            category: termination.category,
+            closeCode: termination.closeCode,
+            detail: opened ? "close.after-open" : "close.before-open"
+        )
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        let webSocketTask = task as? URLSessionWebSocketTask
+        if gate.didOpen {
+            // open 之后的传输错误：只要还没有终态，就按 1006 落定，别让上层等超时。
+            guard socket?.terminationSnapshot() == nil else { return }
+            guard let error else { return }
+            let mapped = DirectRACPWebSocket.map(error, task: webSocketTask, state: state)
+            socket?.recordDelegateTermination(
+                RACPSocketTermination(closeCode: 1006, reason: "", category: mapped.category)
+            )
+            ConnectionDiagnostics.shared.record(
+                kind: .directClose,
+                category: mapped.category,
+                closeCode: 1006,
+                detail: "error.after-open"
+            )
+            return
+        }
+        guard error != nil || socket?.terminationSnapshot() == nil else { return }
+        if let error {
+            gate.settleFailure(DirectRACPWebSocket.map(error, task: webSocketTask, state: state))
+        } else {
+            gate.settleFailure(RACPConnectionError(category: .socketInterrupted))
+        }
+        ConnectionDiagnostics.shared.record(
+            kind: .directOpen,
+            category: state.category(),
+            detail: "gate.failed"
+        )
     }
 }
 
@@ -203,34 +361,53 @@ public final class DirectRACPWebSocket: RACPSocket, @unchecked Sendable {
         guard let host = request.url?.host else { throw RACPConnectionError(category: .endpoint) }
 
         let state = DirectRACPSessionState()
+        let gate = DirectWebSocketOpenGate()
         let delegate = DirectRACPSessionDelegate(
             endpointHost: host,
             expectedCertificateSHA256: certificateSHA256,
-            state: state
+            state: state,
+            gate: gate
         )
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = false
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         let task = session.webSocketTask(with: request)
         let socket = DirectRACPWebSocket(task: task, session: session, sessionDelegate: delegate)
+        delegate.attach(socket: socket)
 
+        // 先 resume，再用 delegate 的 didOpenWithProtocol 判定 101；取消时必须自行结算闸门，
+        // 否则预算到点后要等 URLSession 回调才能退出。
+        let outcome = await withTaskCancellationHandler {
+            task.resume()
+            return await gate.wait()
+        } onCancel: {
+            gate.settleCanceled()
+            task.cancel()
+        }
+
+        if case .failed(let error) = outcome {
+            await socket.close()
+            throw error
+        }
+        guard case .opened(let negotiatedProtocol) = outcome else {
+            await socket.close()
+            throw RACPConnectionError(category: .internal)
+        }
         do {
-            try await withTaskCancellationHandler {
-                try await socket.confirmUpgrade()
-            } onCancel: {
-                task.cancel()
-            }
-            let negotiated = (task.response as? HTTPURLResponse)?
-                .value(forHTTPHeaderField: "Sec-WebSocket-Protocol")
-            guard negotiated == RACPWebSocket.subprotocol else {
+            guard negotiatedProtocol == RACPWebSocket.subprotocol else {
                 throw RACPConnectionError(category: .protocol)
             }
             socket.startReceiving()
+            // open 后立刻 close（例如 1008 device revoked）必须在 connect 阶段暴露，
+            // 否则 handshake 要等到请求超时才失败，且分类会退化成 socketInterrupted。
+            if let termination = socket.terminationSnapshot() {
+                throw termination
+            }
             return socket
         } catch {
-            let mapped = Self.map(error, task: task, state: state)
             await socket.close()
-            throw mapped
+            if let termination = error as? RACPSocketTermination { throw termination }
+            throw Self.map(error, task: task, state: state)
         }
     }
 
@@ -254,6 +431,9 @@ public final class DirectRACPWebSocket: RACPSocket, @unchecked Sendable {
     public func send(text: String) async throws {
         let isClosed = lock.withLock { closed }
         guard !isClosed else {
+            // 已落定的远端终态（如 1008 device revoked）原样抛出：握手阶段若只剩
+            // socketInterrupted，会触发一次没有意义的 SSH 回退。
+            if let termination = terminationState.snapshot() { throw termination }
             throw RACPConnectionError(category: .socketInterrupted)
         }
         do {
@@ -285,18 +465,15 @@ public final class DirectRACPWebSocket: RACPSocket, @unchecked Sendable {
         _ = await terminationError
     }
 
-    private func confirmUpgrade() async throws {
-        // task.resume() 本身不证明 Upgrade 成功；pong 只在 WS handshake 完成后到达。
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            task.sendPing { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: ())
-                }
-            }
-            task.resume()
-        }
+    /// 已落定的终态（没有则为 nil）。用于 connect 在 open 后立刻发现远端 close。
+    func terminationSnapshot() -> RACPSocketTermination? {
+        terminationState.snapshot()
+    }
+
+    /// URLSession delegate 观察到的 open 后终态。与 `finishRemotely` 一样只结算一次，
+    /// 这样 receiveLoop 尚未启动时也能让 `terminationError` 立刻可用。
+    func recordDelegateTermination(_ termination: RACPSocketTermination) {
+        finishRemotely(termination)
     }
 
     private func startReceiving() {
@@ -340,7 +517,7 @@ public final class DirectRACPWebSocket: RACPSocket, @unchecked Sendable {
         }
     }
 
-    private func finishRemotely(_ termination: RACPSocketTermination) {
+    fileprivate func finishRemotely(_ termination: RACPSocketTermination) {
         lock.lock()
         let wasClosed = closed
         closed = true
@@ -373,7 +550,7 @@ public final class DirectRACPWebSocket: RACPSocket, @unchecked Sendable {
         }
     }
 
-    private static func map(
+    static func map(
         _ error: Error,
         task: URLSessionWebSocketTask?,
         state: DirectRACPSessionState

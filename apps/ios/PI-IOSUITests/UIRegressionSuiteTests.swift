@@ -383,7 +383,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("MDL-01", app.navigationBars["模型服务"].waitForExistence(timeout: 5), "模型服务页")
         expect("MDL-01", text("本机模型清单"), "本机模型清单分组")
         expect("MDL-01", app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Alpha Models")).firstMatch.exists, "Alpha Models 行")
-        expect("MDL-01", text("1 个模型 · https://alpha.invalid"), "服务副标题")
+        expect("MDL-01", textContaining("1 个模型 · https://alpha.invalid"), "服务副标题")
         expect("MDL-01", text("Alpha Pro"), "默认模型")
         scrollUntil(textContaining: "点一条服务可查看详情并删除")
         expect("MDL-01", textContaining("点一条服务可查看详情并删除"), "清单 footer")
@@ -430,13 +430,13 @@ final class UIRegressionSuiteTests: XCTestCase {
         scrollUntilHittable(app.buttons["删除这条服务"])
         expect(
             "MDL-04",
-            text("删除这条服务") && textContaining("删除会移除服务器上的 provider 记录与密钥。"),
+            text("删除这条服务") && textContaining("删除会移除服务器上的 provider 记录"),
             "删除区"
         )
         snapshot("MDL-04", step: 1)
         app.buttons["删除这条服务"].tap()
         expect("MDL-05", text("删除「Alpha Models」？"), "删除确认标题")
-        expect("MDL-05", textContaining("将从服务器删除该 provider 及其密钥，并清理本机记录。"), "删除确认正文")
+        expect("MDL-05", textContaining("将从服务器删除该 provider 记录"), "删除确认正文")
         app.buttons["取消"].firstMatch.tap()
         expect("MDL-05", app.navigationBars["模型服务详情"].exists, "取消后停留详情")
         app.buttons["删除这条服务"].tap()
@@ -653,7 +653,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         launch("offline-two-hosts", closeSidebar: false)
         expect("SID-07", text("离线：下面是可以只读查看的缓存会话。"), "离线侧栏提示")
         expect("SID-07", app.buttons["sidebar.project.fixture-project-B"].exists, "B 项目组")
-        expect("SID-07", app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "fixture-session-B")).firstMatch.exists, "缓存会话 B")
+        expect("SID-07", app.buttons["sidebar.cachedSession.fixture-session-B"].exists, "缓存会话 B")
         expect("SID-07", app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "本机缓存（只读）")).firstMatch.exists, "只读副标题")
         expect(
             "SID-07",
@@ -792,7 +792,8 @@ final class UIRegressionSuiteTests: XCTestCase {
 
     func testOfflineCases() {
         launch("offline-two-hosts", closeSidebar: false)
-        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "fixture-session-B")).firstMatch.tap()
+        // 离线行标题现在是「本机保存的标题」（U01），按稳定 identifier 定位而不是标题里的会话 ID。
+        app.buttons["sidebar.cachedSession.fixture-session-B"].tap()
         expect("OFF-01", textContaining("隧道未建立时只能读到本机缓存"), "会话操作区上方离线提示")
         expect("OFF-01", text("缓存的历史（只读）") && textContaining("离线只读 · 缓存可能已过期"), "缓存历史标识")
         expect("OFF-01", text("缓存的待审批（1）") && text("离线时不可提交，恢复在线后再操作。"), "缓存审批说明")

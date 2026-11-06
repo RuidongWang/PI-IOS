@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>从手机配置模型到模型请求 · 数据流</title>
+<style>
+  :root{
+    --ink:#09090c;
+    --paper:#e9e4da;
+    --text:#e7e2d8;
+    --muted:#a79e90;
+    --dim:#736a5c;
+    --line:rgba(233,228,218,.10);
+    --line-2:rgba(233,228,218,.18);
+    --c-access:#62b6e8;
+    --c-proto:#f0a93c;
+    --c-event:#3fc8b6;
+    --c-session:#9fc95c;
+    --c-store:#b58cf0;
+    --c-agent:#ef7a72;
+    --c-alert:#e2554d;
+    --serif:"Songti SC","STSong","Iowan Old Style","Palatino",serif;
+    --sans:"Hiragino Sans GB","PingFang SC",-apple-system,BlinkMacSystemFont,sans-serif;
+    --mono:"SF Mono",Menlo,"Andale Mono",Consolas,monospace;
+    --cond:"DIN Condensed","DIN Alternate","SF Compact Display",var(--mono);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--ink);color:var(--text);font:16px/1.8 var(--sans);-webkit-font-smoothing:antialiased}
+  body::after{content:"";position:fixed;inset:0;z-index:9;pointer-events:none;opacity:.05;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/></filter><rect width='180' height='180' filter='url(%23n)'/></svg>")}
+  .bg{position:fixed;inset:0;z-index:-1;pointer-events:none;
+    background:
+      radial-gradient(760px 560px at 8% -6%, rgba(98,182,232,.12), transparent 62%),
+      radial-gradient(780px 560px at 96% -2%, rgba(239,122,114,.09), transparent 62%),
+      radial-gradient(680px 520px at 80% 52%, rgba(181,140,240,.07), transparent 62%),
+      radial-gradient(700px 520px at 6% 80%, rgba(63,200,182,.06), transparent 62%),
+      linear-gradient(#09090c,#08080a 55%,#09090c)}
+  .bg::after{content:"";position:absolute;inset:0;
+    background-image:linear-gradient(rgba(233,228,218,.022) 1px,transparent 1px),
+                     linear-gradient(90deg,rgba(233,228,218,.022) 1px,transparent 1px);
+    background-size:52px 52px;
+    -webkit-mask-image:radial-gradient(circle at 50% 6%,#000,transparent 70%);
+            mask-image:radial-gradient(circle at 50% 6%,#000,transparent 70%)}
+  ::selection{background:rgba(240,169,60,.3);color:#fff}
+
+  .topbar{position:sticky;top:0;z-index:50;backdrop-filter:blur(16px);
+    background:linear-gradient(rgba(9,9,12,.94),rgba(9,9,12,.5));border-bottom:1px solid var(--line)}
+  .topbar .in{max-width:1120px;margin:0 auto;padding:12px 28px;display:flex;align-items:center;gap:18px}
+  .brand{font:600 11.5px/1 var(--mono);letter-spacing:.26em;text-transform:uppercase;white-space:nowrap;
+    background:linear-gradient(90deg,var(--c-access),var(--c-proto) 50%,var(--c-agent));
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .topbar nav{display:flex;gap:16px;margin-left:auto;overflow:auto}
+  .topbar nav a{color:var(--dim);text-decoration:none;font:11.5px/1 var(--mono);letter-spacing:.08em;white-space:nowrap;
+    padding-bottom:3px;border-bottom:1px solid transparent;transition:.2s}
+  .topbar nav a:hover{color:var(--c);border-bottom-color:var(--c)}
+
+  main{max-width:1120px;margin:0 auto;padding:0 28px 100px}
+  section{padding:80px 0 6px;border-top:1px solid var(--line);margin-top:60px;--c:var(--c-proto)}
+  .shead{display:grid;grid-template-columns:56px 1fr;gap:22px;align-items:start;margin-bottom:28px}
+  .snum{font:400 34px/1 var(--cond);color:var(--c);opacity:.55;padding-top:4px}
+  .skicker{font:11px/1 var(--mono);letter-spacing:.18em;text-transform:uppercase;color:var(--c);
+    margin-bottom:10px;display:flex;gap:10px;align-items:center}
+  .skicker::after{content:"";height:1px;flex:1;background:linear-gradient(90deg,var(--c),transparent);opacity:.35}
+  h2{font:600 clamp(24px,3vw,33px)/1.28 var(--serif);margin:0 0 12px}
+  .lede{color:var(--muted);max-width:74ch;margin:0;font-size:15px;line-height:1.85}
+  .lede code,code{font-family:var(--mono);font-size:.92em;color:var(--c-event)}
+
+  /* hero */
+  .hero{padding:76px 0 0;margin:0;border:0}
+  .kicker{font:11px/1 var(--mono);letter-spacing:.2em;text-transform:uppercase;color:var(--dim);margin-bottom:22px}
+  h1{font:600 clamp(34px,4.8vw,56px)/1.1 var(--serif);margin:0 0 22px}
+  h1 em{font-style:normal;color:var(--c-agent)}
+  h1 i{font-style:normal;background:linear-gradient(90deg,var(--c-access),var(--c-event));
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero p{font-size:16.5px;color:var(--muted);max-width:58ch;margin:0 0 34px;line-height:1.9}
+  .hero p b{color:var(--paper);font-weight:500}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line-2);border-bottom:1px solid var(--line-2)}
+  .stat{padding:18px 6px;border-right:1px solid var(--line);--c:var(--c-proto)}
+  .stat:last-child{border-right:0}
+  .stat b{display:block;font:400 36px/1 var(--cond);color:var(--c)}
+  .stat span{display:block;margin-top:8px;font:11px/1.4 var(--mono);color:var(--dim);letter-spacing:.06em}
+
+  /* sequence diagram */
+  .seq{padding:16px 12px 6px;overflow-x:auto}
+  .seq svg{display:block;width:100%;min-width:880px;height:auto}
+  .lane-head{font:600 12px var(--mono)}
+  .life{stroke:rgba(233,228,218,.16);stroke-width:1;stroke-dasharray:3 7}
+  .msg{fill:none;stroke-width:1.6}
+  .msglabel{font:10.5px var(--mono)}
+  .msgnum{font:600 9.5px var(--mono)}
+
+  /* steps */
+  .stepswrap{display:grid;grid-template-columns:236px 1fr;gap:26px;align-items:start}
+  .idx{position:sticky;top:72px;display:flex;flex-direction:column;gap:1px}
+  .idx a{display:flex;gap:10px;align-items:baseline;text-decoration:none;color:var(--muted);
+    font:11.5px/1.5 var(--mono);padding:7px 10px;border-left:2px solid transparent;transition:.18s}
+  .idx a:hover{color:var(--paper);background:rgba(233,228,218,.04);border-left-color:var(--c)}
+  .idx a span{color:var(--dim);min-width:16px}
+  .idx a.hit{border-left-color:var(--c);color:var(--c);background:rgba(233,228,218,.05)}
+
+  .card{border:1px solid var(--line);border-left:2px solid var(--c);background:rgba(233,228,218,.02);
+    padding:18px 22px 20px;margin-bottom:12px;border-radius:2px;transition:.3s}
+  .card.hit{box-shadow:0 0 0 1px var(--c), 0 14px 40px -30px var(--c)}
+  .card-top{display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap}
+  .num{font:600 11px/1 var(--mono);color:var(--c)}
+  .zone{font:10px/1 var(--mono);padding:4px 7px;border-radius:2px;color:var(--c);
+    border:1px solid var(--c);opacity:.85}
+  .card h3{margin:2px 0 10px;font:600 16.5px/1.5 var(--serif)}
+  .code{font:12px/1.75 var(--mono);background:#070708;border:1px solid var(--line);border-radius:2px;
+    padding:13px 15px;overflow:auto;color:#c6bfb1;margin:0;white-space:pre}
+  .card .note{color:var(--muted);font-size:13px;margin:10px 0 0;line-height:1.8}
+  .card .file{display:block;margin-top:10px;font:11px/1.6 var(--mono);color:var(--dim)}
+  .card .file b{color:var(--c-session);font-weight:400}
+
+  /* secret flow */
+  .flowrow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap;margin-top:4px}
+  .node{flex:1 1 150px;min-width:150px;border:1px solid var(--line-2);border-left:2px solid var(--c,var(--line-2));
+    background:rgba(0,0,0,.25);padding:12px 12px 11px;border-radius:2px}
+  .node b{display:block;font:600 11.5px/1.4 var(--mono);color:var(--paper);margin-bottom:4px}
+  .node small{display:block;font:10px/1.5 var(--mono);color:var(--dim)}
+  .arrow{flex:0 0 26px;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:12px}
+  .store-tag{--c:var(--c-session)}
+  .nonlist{margin-top:18px;border:1px dashed rgba(226,85,77,.4);background:rgba(226,85,77,.04);
+    padding:14px 16px;border-radius:2px}
+  .nonlist h4{margin:0 0 8px;font:600 12px/1.4 var(--mono);color:var(--c-alert);letter-spacing:.06em}
+  .nonlist ul{margin:0;padding-left:18px;color:var(--muted);font-size:13px;line-height:1.9}
+  .nonlist li::marker{color:var(--c-alert)}
+
+  /* compare */
+  .cmp{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .cmp .panel{padding:18px 20px}
+  .cmp h3{margin:0 0 4px;font:600 14px/1.5 var(--mono);color:var(--c);display:flex;gap:8px;align-items:center}
+  .cmp h3::before{content:"";width:7px;height:7px;border-radius:2px;background:var(--c)}
+  .cmp .sub{color:var(--dim);font:11px/1.5 var(--mono);margin:0 0 14px}
+  .chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:12px}
+  .chip{font:10.5px/1 var(--mono);border:1px solid var(--line-2);padding:7px 9px;border-radius:2px;color:#c0b9ab}
+  .chip.hot{border-color:var(--c);color:var(--c)}
+  .gt{color:var(--dim);font-size:11px}
+  .cmp p{margin:0;color:var(--muted);font-size:13px;line-height:1.8}
+
+  /* request */
+  .req{display:grid;grid-template-columns:1fr;gap:12px}
+  .reqline{display:flex;gap:12px;align-items:baseline;font:12.5px/1.7 var(--mono);
+    padding:10px 14px;border:1px solid var(--line);border-left:2px solid var(--c);background:rgba(0,0,0,.2)}
+  .reqline b{color:var(--c);font-weight:600;min-width:96px}
+
+  /* table */
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th{text-align:left;font:10.5px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--dim);
+    padding:0 14px 12px;border-bottom:1px solid var(--line-2)}
+  td{padding:12px 14px;border-bottom:1px solid var(--line);color:#c0b9ab;vertical-align:top;line-height:1.7}
+  td:first-child{color:var(--paper);white-space:nowrap}
+  td code{color:var(--c-agent);font-size:12.5px}
+  tbody tr:hover{background:rgba(233,228,218,.03)}
+
+  .panel{background:rgba(233,228,218,.023);border:1px solid var(--line);border-radius:3px}
+  footer{border-top:1px solid var(--line);margin-top:70px;padding:24px 0 0;color:var(--dim);font:11.5px/1.9 var(--mono)}
+  footer code{color:var(--muted)}
+
+  .reveal{opacity:0;transform:translateY(20px);transition:opacity .75s cubic-bezier(.2,.75,.2,1),transform .75s cubic-bezier(.2,.75,.2,1)}
+  .reveal.in{opacity:1;transform:none}
+
+  @media (max-width:920px){
+    .stats{grid-template-columns:repeat(2,1fr)}
+    .stat:nth-child(2){border-right:0}
+    .stat:nth-child(n+3){border-top:1px solid var(--line)}
+    .stepswrap{grid-template-columns:1fr}
+    .idx{position:static;flex-direction:row;overflow:auto;padding-bottom:8px}
+    .cmp{grid-template-columns:1fr}
+    .shead{grid-template-columns:1fr;gap:8px}
+    .snum{font-size:22px}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.reveal{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<div class="bg"></div>
+
+<header class="topbar">
+  <div class="in">
+    <span class="brand">PI-ADAPTOR · MODEL PATH</span>
+    <nav>
+      <a href="#seq" style="--c:var(--c-access)">01 时序</a>
+      <a href="#steps" style="--c:var(--c-proto)">02 十二跳</a>
+      <a href="#secret" style="--c:var(--c-store)">03 密钥</a>
+      <a href="#twopaths" style="--c:var(--c-agent)">04 两条路</a>
+      <a href="#request" style="--c:var(--c-session)">05 请求</a>
+      <a href="#fails" style="--c:var(--c-alert)">06 失败点</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <section class="hero">
+    <div class="kicker">RACP v2 · provider → session → turn → HTTP</div>
+    <h1>从手机填一个 Base URL，<br>到模型收到<em>第一条 message</em></h1>
+    <p>中间有 <b>12 跳</b>、<b>两次出网</b>。探测模型列表走的是手机发起的 SSH exec，真正对话走的是宿主进程里的 SDK —— 两条完全独立的通道，只有 API key 是共用的。</p>
+    <div class="stats">
+      <div class="stat" style="--c:var(--c-proto)"><b>12</b><span>数据跳</span></div>
+      <div class="stat" style="--c:var(--c-agent)"><b>2</b><span>次出网</span></div>
+      <div class="stat" style="--c:var(--c-store)"><b>1</b><span>个密钥，两处使用</span></div>
+      <div class="stat" style="--c:var(--c-event)"><b>0</b><span>次密钥回传手机</span></div>
+    </div>
+  </section>
+
+  <section id="seq" class="reveal" style="--c:var(--c-access)">
+    <div class="shead">
+      <div class="snum">01</div>
+      <div>
+        <div class="skicker">Sequence · 全链路</div>
+        <h2>一条 lifeline，看完整条数据流</h2>
+        <p class="lede">实线是请求，虚线是回包。紫色是 SSH 通道上的操作，珊瑚色是真正打到模型服务的 HTTP，琥珀色是 RACP 帧，草绿色是宿主内部落盘。</p>
+      </div>
+    </div>
+    <div class="panel seq"><svg id="seqsvg" viewBox="0 0 1120 700" role="img" aria-label="配置模型到模型请求的时序图"></svg></div>
+  </section>
+
+  <section id="steps" class="reveal" style="--c:var(--c-proto)">
+    <div class="shead">
+      <div class="snum">02</div>
+      <div>
+        <div class="skicker">Twelve hops · 十二跳</div>
+        <h2>每一跳：谁发的、发了什么、落在哪</h2>
+        <p class="lede">左边点一跳，右边滚到对应卡片。载荷是线上真实形状，落点是仓库里的文件与行号。</p>
+      </div>
+    </div>
+    <div class="stepswrap">
+      <div class="idx" id="idx"></div>
+      <div id="cards"></div>
+    </div>
+  </section>
+
+  <section id="secret" class="reveal" style="--c:var(--c-store)">
+    <div class="shead">
+      <div class="snum">03</div>
+      <div>
+        <div class="skicker">Secret · 密钥的一生</div>
+        <h2>明文只活在两个进程的内存里</h2>
+        <p class="lede">手机输入 → SSH stdin（探测用）→ 宿主内存 → <code>secrets/&lt;id&gt;</code>（0600）→ turn 启动时读回 → HTTP 头。除此之外任何地方出现的都只是掩码。</p>
+      </div>
+    </div>
+
+    <div class="panel" style="padding:22px 24px">
+      <div class="flowrow">
+        <div class="node" style="--c:var(--c-access)"><b>手机输入框</b><small>用户键入，内存中</small></div>
+        <div class="arrow">→</div>
+        <div class="node" style="--c:var(--c-store)"><b>SSH stdin</b><small>只给 /models 探测用</small></div>
+        <div class="arrow">→</div>
+        <div class="node" style="--c:var(--c-proto)"><b>provider/create</b><small>JSON 正文，一次</small></div>
+        <div class="arrow">→</div>
+        <div class="node" style="--c:var(--c-session)"><b>secrets/&lt;id&gt;</b><small>0600 明文，唯一持久副本</small></div>
+        <div class="arrow">→</div>
+        <div class="node" style="--c:var(--c-agent)"><b>Authorization</b><small>Bearer，发给模型</small></div>
+      </div>
+
+      <div class="nonlist">
+        <h4>密钥不会出现的地方</h4>
+        <ul>
+          <li><code>providers/providers.json</code> — 只有 <code>hasApiKey</code> 与掩码，索引可随便看</li>
+          <li>RACP 响应、<code>events.jsonl</code>、错误体 — <code>view()</code> 直接把 <code>apiKey</code> 置空</li>
+          <li><code>idempotency.json</code> — 含令牌的方法被排除，重放不会带出密钥</li>
+          <li>项目目录下的 <code>.pi-host-auth.json</code> — 实测是空对象 <code>{}</code>，密钥只在内存里传给 SDK</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="twopaths" class="reveal" style="--c:var(--c-agent)">
+    <div class="shead">
+      <div class="snum">04</div>
+      <div>
+        <div class="skicker">Two paths · 两条出网路径</div>
+        <h2>同一台服务器，两套 HTTP 客户端</h2>
+        <p class="lede">这是最容易看错的一段：模型列表不是宿主查的，对话也不是手机发的。两条路径之间没有共享代码，只共享 baseUrl 与 key。</p>
+      </div>
+    </div>
+
+    <div class="cmp">
+      <div class="panel" style="--c:var(--c-store)">
+        <h3>路径 A · 列模型</h3>
+        <p class="sub">GET {baseUrl}/models · 走 SSH exec</p>
+        <div class="chain">
+          <span class="chip hot">手机</span><span class="gt">→</span>
+          <span class="chip">SSH exec</span><span class="gt">→</span>
+          <span class="chip">服务器 python3</span><span class="gt">→</span>
+          <span class="chip hot">模型服务</span>
+        </div>
+        <p>脚本以 base64 内嵌在命令里，参数走 stdin。只接受同源重定向，读满 2 MiB 就停。结果以 <code class="fname">PI_MODELS_RESULT</code> 前缀回显在 stdout，手机解析成模型清单。</p>
+      </div>
+      <div class="panel" style="--c:var(--c-agent)">
+        <h3>路径 B · 发对话</h3>
+        <p class="sub">POST {baseUrl}/chat/completions · 走宿主 SDK</p>
+        <div class="chain">
+          <span class="chip hot">手机</span><span class="gt">→</span>
+          <span class="chip">RACP turn/start</span><span class="gt">→</span>
+          <span class="chip">宿主进程</span><span class="gt">→</span>
+          <span class="chip hot">模型服务</span>
+        </div>
+        <p>宿主把密钥读回内存，注册成 <code>openai-completions</code> provider，SDK 用 <code>baseURL = model.baseUrl</code> 建客户端，<code>stream: true</code> 发出。手机只收到已经标准化的事件，看不到这个 HTTP。</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="request" class="reveal" style="--c:var(--c-session)">
+    <div class="shead">
+      <div class="snum">05</div>
+      <div>
+        <div class="skicker">Final request · 终点</div>
+        <h2>模型真正收到的东西</h2>
+        <p class="lede">假设你在手机上填的是 <code>https://api.example.com/v1</code>，选中的模型 id 是 <code>qwen3-32b</code>。</p>
+      </div>
+    </div>
+
+    <div class="req">
+      <div class="reqline" style="--c:var(--c-agent)"><b>POST</b><span>https://api.example.com/v1/chat/completions</span></div>
+      <div class="reqline" style="--c:var(--c-store)"><b>Authorization</b><span>Bearer &lt;secrets/&lt;id&gt; 里的那串明文&gt;</span></div>
+      <div class="reqline" style="--c:var(--c-access)"><b>User-Agent</b><span>pi-coding-agent/1.3.0 …（SDK 自带）</span></div>
+      <div class="reqline" style="--c:var(--c-event)"><b>Accept</b><span>text/event-stream（stream: true）</span></div>
+    </div>
+
+    <pre class="code" style="margin-top:14px">{
+  "model": "qwen3-32b",
+  "messages": [
+    { "role": "system", "content": "You are pi…" },
+    { "role": "user",   "content": "整理一下今天的日志" }
+  ],
+  "stream": true,
+  "stream_options": { "include_usage": true },
+  "max_completion_tokens": 8192,
+  "tools": [ …会话里可用工具的函数签名… ]
+}</pre>
+
+    <p class="lede" style="margin-top:16px">回包是 SSE 分片，宿主逐块解成文本增量，一行行变成事件推回手机：</p>
+    <pre class="code" style="margin-top:10px">data: {"id":"chatcmpl-…","choices":[{"delta":{"content":"日志"}}]}
+data: {"id":"chatcmpl-…","choices":[{"delta":{"content":"已经"}}]}
+…
+data: {"id":"chatcmpl-…","choices":[{"finish_reason":"stop"}],"usage":{…}}
+data: [DONE]</pre>
+  </section>
+
+  <section id="fails" class="reveal" style="--c:var(--c-alert)">
+    <div class="shead">
+      <div class="snum">06</div>
+      <div>
+        <div class="skicker">Failure map · 失败点</div>
+        <h2>这条链上会断在哪</h2>
+        <p class="lede">每一跳都有确定的失败形态。知道断点，比知道链路更有用。</p>
+      </div>
+    </div>
+
+    <div class="panel" style="padding:20px 22px">
+      <table>
+        <thead><tr><th>断点</th><th>触发条件</th><th>表现</th></tr></thead>
+        <tbody>
+          <tr><td>① 探测</td><td>baseUrl 打不通 / 超时 / 跨源重定向</td><td>手机侧 <code>ModelListError</code>，模型清单为空，但 provider 仍可手填模型</td></tr>
+          <tr><td>④ provider/create</td><td>baseUrl 是 http，或解析到私网、loopback、元数据地址</td><td><code>INVALID_ARGUMENT</code>：<code>endpoint must use https</code> / <code>private endpoint is forbidden</code></td></tr>
+          <tr><td>④ provider/create</td><td>authKind=api_key 却没给密钥；authKind=none 却给了</td><td><code>INVALID_ARGUMENT</code></td></tr>
+          <tr><td>④ provider/create</td><td>vendorKey 重复</td><td><code>CONFLICT</code>：<code>provider vendorKey already exists</code></td></tr>
+          <tr><td>⑧ turn/start</td><td>会话没绑 provider 或 model</td><td><code>PROVIDER_NOT_CONFIGURED</code>：<code>provider is required</code> / <code>model is required</code></td></tr>
+          <tr><td>⑨ 读密钥</td><td>secrets 文件被手工删掉</td><td><code>PROVIDER_SECRET_MISSING</code></td></tr>
+          <tr><td>⑩ 发请求</td><td>模型名不在服务端、key 过期、baseUrl 少写 /v1</td><td>驱动捕获后发 <code>turn.failed</code>，error 里是 provider 返回的原文</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    来源 apps/pi-adaptor · apps/ios · 契约 docs/api/pi-adaptor.md（FROZEN）· 上游 pi-coding-agent 1.3.0<br>
+    单文件离线页面，无外部依赖，无网络请求。
+  </footer>
+</main>
+
+<script>
+(function(){
+  "use strict";
+  var $ = function(s,r){ return (r||document).querySelector(s); };
+  var C = {
+    access:"#62b6e8", proto:"#f0a93c", event:"#3fc8b6",
+    session:"#9fc95c", store:"#b58cf0", agent:"#ef7a72", alert:"#e2554d"
+  };
+
+  /* ---------- reveal ---------- */
+  var io = new IntersectionObserver(function(es){
+    es.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add("in"); io.unobserve(e.target); } });
+  }, {threshold:.08});
+  Array.prototype.forEach.call(document.querySelectorAll(".reveal"), function(el){ io.observe(el); });
+  window.setTimeout(function(){
+    var vh = window.innerHeight || 800;
+    Array.prototype.forEach.call(document.querySelectorAll(".reveal"), function(el){
+      if(el.getBoundingClientRect().top < vh * 1.15) el.classList.add("in");
+    });
+  }, 1200);
+
+  /* ---------- data ---------- */
+  var LANES = [
+    { x:120, name:"手机",     c:C.access },
+    { x:360, name:"SSH 通道", c:C.store  },
+    { x:660, name:"宿主进程", c:C.proto  },
+    { x:960, name:"模型服务", c:C.agent  }
+  ];
+
+  var STEPS = [
+    {
+      from:0, to:1, c:C.store, dash:false,
+      label:"exec：把探测脚本塞进 stdin",
+      zone:"手机侧",
+      title:"模型列表不是宿主查的，是手机让服务器代跑的",
+      payload:
+'# SSH channel.exec，不经 RACP\n' +
+'python3 -c "import base64;exec(base64.b64decode(\'…\'))"\n\n' +
+'# stdin\n' +
+'{"url":"https://api.example.com/v1/models",\n' +
+' "apiKey":"<key>","timeout":12}',
+      note:"RemoteProviderOperations.discoverModels 先由 ModelListParser.modelsURL 把 baseUrl 结尾的 /chat/completions、/responses、/messages 剥掉再补 /models，然后发这条命令。",
+      file:"PIiOSNet/RemoteProviderOperations.swift:19 · ModelDiscovery.swift:137"
+    },
+    {
+      from:2, to:3, c:C.agent, dash:false,
+      label:"GET {baseUrl}/models",
+      zone:"服务器上",
+      title:"python3 替手机发这一次 HTTP",
+      payload:
+'GET https://api.example.com/v1/models HTTP/1.1\n' +
+'Authorization: Bearer <key>\n' +
+'Accept: application/json\n' +
+'User-Agent: PI-IOS/0.1',
+      note:"脚本用 urllib，拒绝跨源重定向，最多读 2 MiB；HTTP 错误码也照常返回，交给手机判断。",
+      file:"RemoteProviderOperations.swift:398（discoveryScript）"
+    },
+    {
+      from:3, to:0, c:C.event, dash:true,
+      label:"模型清单 → stdout",
+      zone:"回程",
+      title:"清单以一行前缀文本回到手机",
+      payload:
+'PI_MODELS_RESULT {"status":200,"url":"…/models",\n' +
+' "body":"{\\"data\\":[{\\"id\\":\\"qwen3-32b\\"},…]}"}',
+      note:"手机按前缀切出 JSON，解析成可选模型列表。这条路径完全不经过宿主的 RACP 层 —— 宿主上的 provider/discover 至今是空实现，直接返回 { models: [] }。",
+      file:"host-service.ts:547（provider/discover 是空实现）"
+    },
+    {
+      from:0, to:2, c:C.proto, dash:false,
+      label:"provider/create",
+      zone:"RACP",
+      title:"提交 provider：地址、协议、模型清单、密钥",
+      payload:
+'{"jsonrpc":"2.0","id":4,"method":"provider/create","params":{\n' +
+'  "provider":{\n' +
+'    "name":"example","vendorKey":"pi-ios-example","type":"custom",\n' +
+'    "protocol":"openai-completions",\n' +
+'    "baseUrl":"https://api.example.com/v1",\n' +
+'    "authKind":"api_key","apiKey":"<key>",\n' +
+'    "models":[{"id":"qwen3-32b","displayName":"Qwen3 32B",\n' +
+'               "contextWindow":32768,"maxTokens":8192,\n' +
+'               "thinkingLevels":[],"defaultThinkingLevel":null,\n' +
+'               "supportsImages":false}]},\n' +
+'  "context":{"requestId":"req_…","idempotencyKey":"provider_import_example"}}}',
+      note:"idempotencyKey 由 sourceId 决定，重试同一次导入不会建出两个 provider。",
+      file:"RemoteProviderOperations.swift:305 · host-service.ts:532"
+    },
+    {
+      from:2, to:2, c:C.session, dash:false,
+      label:"校验 → 落盘",
+      zone:"宿主内部",
+      title:"先拒掉不该连的地址，再把密钥单独存成文件",
+      payload:
+'assertPublicHttpsEndpoint(baseUrl)\n' +
+'  → 必须 https；解析 DNS 后拒绝私网 / loopback / 元数据地址\n' +
+'authKind=api_key 且 apiKey 非空\n' +
+'vendorKey 唯一\n\n' +
+'providers/providers.json   ← 记录（不含密钥）\n' +
+'providers/secrets/<id>     ← 明文密钥，0600',
+      note:"密钥写文件走 writeSecret：临时文件 → fsync → rename → 目录 fsync，权限 0600。索引与密钥分离，所以备份 providers.json 不会泄露 key。",
+      file:"providers/store.ts:86 · security/secrets.ts"
+    },
+    {
+      from:2, to:0, c:C.event, dash:true,
+      label:"provider 视图（掩码）",
+      zone:"回程",
+      title:"手机只拿回一个 id 和一段掩码",
+      payload:
+'{"provider":{"id":"a1f…","name":"example",\n' +
+'  "baseUrl":"https://api.example.com/v1","models":[…],\n' +
+'  "hasApiKey":true,"apiKeyMask":"sk-…abcd","isDefault":true}}',
+      note:"view() 把 apiKey 置为 undefined，只回 hasApiKey 与 apiKeyMask。响应、事件、错误体里都不会出现明文。",
+      file:"providers/store.ts:70（view）"
+    },
+    {
+      from:0, to:2, c:C.proto, dash:false,
+      label:"session/configure",
+      zone:"RACP",
+      title:"把某个会话钉到某个 provider + model",
+      payload:
+'{"method":"session/configure","params":{\n' +
+'  "sessionId":"s_9","providerId":"a1f…","modelId":"qwen3-32b",\n' +
+'  "thinkingLevel":"off","permissionMode":"ask"}}',
+      note:"只改元数据并把 revision +1，然后广播 session.changed。正在跑的 turn 已经在启动时固化了 provider 与 model，改动对下一个 turn 生效。",
+      file:"host-service.ts:501 → 805（configureSession）"
+    },
+    {
+      from:0, to:2, c:C.proto, dash:false,
+      label:"turn/start",
+      zone:"RACP",
+      title:"发一条消息，宿主开始组执行环境",
+      payload:
+'{"method":"turn/start","params":{\n' +
+'  "sessionId":"s_9",\n' +
+'  "input":{"text":"整理一下今天的日志","attachments":[]},\n' +
+'  "admission":"reject_if_busy"}}',
+      note:"会话锁内准入：没在跑的 turn 就建 running 占位，否则按 admission 排队或直接 SESSION_BUSY。",
+      file:"host-service.ts:518 → 934（startTurn）"
+    },
+    {
+      from:2, to:2, c:C.agent, dash:false,
+      label:"读密钥 → 组运行时",
+      zone:"宿主内部",
+      title:"明文此时才回到内存，直接交给 SDK",
+      payload:
+'const secret = await providers.secret(providerId);   // 读 secrets/<id>\n' +
+'driver.start({\n' +
+'  provider:{ id, name, baseUrl, apiKey: secret, authKind },\n' +
+'  modelId, thinkingLevel, text, images,\n' +
+'  requestApproval, onEvent })\n\n' +
+'runtime.registerProvider(id, { baseUrl, apiKey: secret,\n' +
+'  api:"openai-completions", models:[…] })',
+      note:"每 turn 新建一个 ModelRuntime，注册完立刻 getModel。authPath 指向项目目录下的 .pi-host-auth.json，但凭据走的是内存里的 apiKey，那个文件实测只被写成 {}。",
+      file:"host-service.ts:999（launchTurn）· driver.ts:180-198"
+    },
+    {
+      from:2, to:3, c:C.agent, dash:false,
+      label:"POST {baseUrl}/chat/completions",
+      zone:"出网",
+      title:"SDK 用 model.baseUrl 建 OpenAI 客户端",
+      payload:
+'// pi-ai/dist/api/openai-completions.js\n' +
+'new OpenAI({ apiKey, baseURL: model.baseUrl, defaultHeaders })\n' +
+'client.chat.completions.create({\n' +
+'  model:"qwen3-32b", messages:[…], stream:true,\n' +
+'  stream_options:{ include_usage:true }, tools:[…] })',
+      note:"model.baseUrl 就是手机上填的那个 baseUrl，一字不改。少了 /v1 就在这里报 404 —— 这是最常见的配置错。",
+      file:"node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js:533 · 197"
+    },
+    {
+      from:3, to:2, c:C.event, dash:true,
+      label:"SSE 分片",
+      zone:"回程",
+      title:"流式增量被摊平成一条条 AgentEvent",
+      payload:
+'data: {"choices":[{"delta":{"content":"日志"}}]}\n' +
+'→ assistantMessageEvent.text_delta\n' +
+'→ { kind:"item.delta", payload:{ itemId, delta:"日志" } }',
+      note:"工具调用同理：tool_execution_start / update / end 被映射成 tool.started / updated / completed，累计快照还会换算成增量后缀。",
+      file:"agent/driver.ts:270-340"
+    },
+    {
+      from:2, to:0, c:C.proto, dash:true,
+      label:"events/event",
+      zone:"回程",
+      title:"事件先落盘，再投给订阅者",
+      payload:
+'{"method":"events/event","params":{"event":{\n' +
+'  "scope":"session","kind":"item.delta","sessionId":"s_9",\n' +
+'  "epoch":"e7","sequence":42,\n' +
+'  "payload":{"itemId":"i_1","itemType":"message","delta":"日志"}}}}',
+      note:"断线重连靠 {epoch, sequence} 续传；水位以下的游标会得到 CURSOR_EXPIRED，客户端全量 resync。",
+      file:"events/journal.ts · server/ws.ts:139"
+    }
+  ];
+
+  /* ---------- sequence svg ---------- */
+  var NS = "http://www.w3.org/2000/svg";
+  function el(name, attrs){
+    var n = document.createElementNS(NS, name);
+    for(var k in attrs) n.setAttribute(k, attrs[k]);
+    return n;
+  }
+  function rgba(hex, a){
+    var n = parseInt(hex.slice(1), 16);
+    return "rgba(" + ((n>>16)&255) + "," + ((n>>8)&255) + "," + (n&255) + "," + a + ")";
+  }
+
+  var svg = $("#seqsvg");
+  var defs = el("defs", {});
+  LANES.forEach(function(l, i){
+    var m = el("marker", { id:"a"+i, viewBox:"0 0 10 10", refX:"9", refY:"5",
+      markerWidth:"6", markerHeight:"6", orient:"auto-start-reverse" });
+    m.appendChild(el("path", { d:"M0,0 L10,5 L0,10 z", fill:l.c }));
+    defs.appendChild(m);
+  });
+  // 每个步骤自己的箭头颜色
+  STEPS.forEach(function(s, i){
+    var m = el("marker", { id:"s"+i, viewBox:"0 0 10 10", refX:"9", refY:"5",
+      markerWidth:"6", markerHeight:"6", orient:"auto-start-reverse" });
+    m.appendChild(el("path", { d:"M0,0 L10,5 L0,10 z", fill:s.c }));
+    defs.appendChild(m);
+  });
+  svg.appendChild(defs);
+
+  // lifelines
+  LANES.forEach(function(l){
+    var box = el("rect", { x:l.x-70, y:24, width:140, height:38, rx:3,
+      fill:rgba(l.c, .07), stroke:rgba(l.c, .5) });
+    svg.appendChild(box);
+    var t = el("text", { x:l.x, y:48, "text-anchor":"middle", class:"lane-head", fill:l.c });
+    t.textContent = l.name;
+    svg.appendChild(t);
+    svg.appendChild(el("line", { x1:l.x, y1:64, x2:l.x, y2:672, class:"life" }));
+  });
+
+  var TOP = 118, GAP = 47;
+  STEPS.forEach(function(s, i){
+    var y = TOP + i * GAP;
+    var g = el("g", {});
+    if(s.from === s.to){
+      var x = LANES[s.from].x;
+      g.appendChild(el("path", { d:"M"+(x+6)+","+(y-8)+" h54 v18 h-54",
+        class:"msg", stroke:s.c, "stroke-dasharray": s.dash ? "4 4" : "", "marker-end":"url(#s"+i+")" }));
+      var lt = el("text", { x:x+70, y:y+6, class:"msglabel", fill:s.c });
+      lt.textContent = (i+1) + "  " + s.label;
+      svg.appendChild(g); svg.appendChild(lt);
+      return;
+    }
+    var a = LANES[s.from].x, b = LANES[s.to].x;
+    var x1 = s.from < s.to ? a + 8 : a - 8;
+    var x2 = s.from < s.to ? b - 8 : b + 8;
+    g.appendChild(el("line", { x1:x1, y1:y, x2:x2, y2:y, class:"msg", stroke:s.c,
+      "stroke-dasharray": s.dash ? "5 4" : "", "marker-end":"url(#s"+i+")" }));
+    var mid = (a + b) / 2;
+    var label = el("text", { x:mid, y:y-9, "text-anchor":"middle", class:"msglabel", fill:s.c });
+    label.textContent = (i+1) + "  " + s.label;
+    svg.appendChild(g);
+    svg.appendChild(label);
+  });
+
+  /* ---------- cards + index ---------- */
+  var idx = $("#idx"), cards = $("#cards");
+
+  STEPS.forEach(function(s, i){
+    var n = i + 1;
+
+    var a = document.createElement("a");
+    a.href = "#step-" + n;
+    a.style.setProperty("--c", s.c);
+    a.innerHTML = "<span>" + (n < 10 ? "0"+n : n) + "</span>" + s.label;
+    a.addEventListener("click", function(ev){
+      ev.preventDefault();
+      var target = document.getElementById("step-" + n);
+      if(!target) return;
+      target.scrollIntoView({ behavior:"smooth", block:"center" });
+      document.querySelectorAll(".card").forEach(function(c){ c.classList.remove("hit"); });
+      document.querySelectorAll(".idx a").forEach(function(x){ x.classList.remove("hit"); });
+      target.classList.add("hit");
+      a.classList.add("hit");
+      window.setTimeout(function(){ target.classList.remove("hit"); }, 1600);
+    });
+    idx.appendChild(a);
+
+    var card = document.createElement("div");
+    card.className = "card";
+    card.id = "step-" + n;
+    card.style.setProperty("--c", s.c);
+    card.innerHTML =
+      '<div class="card-top"><span class="num">' + (n < 10 ? "0"+n : n) + '</span>' +
+      '<span class="zone">' + s.zone + '</span></div>' +
+      "<h3>" + s.title + "</h3>" +
+      '<pre class="code">' + esc(s.payload) + "</pre>" +
+      '<p class="note">' + s.note + "</p>" +
+      '<span class="file">落点 <b>' + s.file + "</b></span>";
+    cards.appendChild(card);
+  });
+
+  function esc(t){
+    return t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+})();
+</script>
+</body>
+</html>

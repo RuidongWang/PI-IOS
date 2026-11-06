@@ -50,6 +50,7 @@ struct UITestFixture {
         case "online-upstream-import": return onlineUpstreamImport()
         case "online-model-config": return onlineModelConfig()
         case "online-model-update": return onlineModelUpdate()
+        case "online-queued-turns": return onlineQueuedTurns()
         case "online-host-unit-active": return onlineHostUnitActive()
         case "online-host-unit-stopped": return onlineHostUnitStopped()
         case "online-two-hosts": return onlineTwoHosts()
@@ -631,6 +632,29 @@ struct UITestFixture {
             ],
             supportsFixtureInterrupt: true
         )
+    }
+
+    /// S1 正在运行 + 两条排队指令（一条有正文，一条只有附件数）：
+    /// 验证「排队中（N）」、正文/附件数回退、取消按钮与输入栏排队提示可见。
+    /// 排队项正文来自服务端快照的可选字段，夹具按 `QueuedTurn` 投影直接构造。
+    private static func onlineQueuedTurns() -> Self {
+        var fixture = onlineTwoSessions()
+        let summary = fixture.catalog!.sessions.first(where: { $0.id == "S1" })!
+        guard var snapshot = fixture.sessionSnapshots[summary.id] else { return fixture }
+        snapshot.runningTurnId = "turn-running-s1"
+        snapshot.activeItems = [
+            RACPItem(id: "fixture-queued-running-s1", payload: .object([
+                "id": .string("fixture-queued-running-s1"),
+                "role": .string("assistant"),
+                "text": .string("S1 is running"),
+            ])),
+        ]
+        snapshot.queuedTurns = [
+            QueuedTurn(id: "turn-queued-1", text: "检查磁盘使用率"),
+            QueuedTurn(id: "turn-queued-2", attachmentCount: 2),
+        ]
+        fixture.sessionSnapshots[summary.id] = snapshot
+        return fixture
     }
 
     private static func onlineHostUnitActive() -> Self {

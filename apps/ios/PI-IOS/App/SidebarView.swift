@@ -194,7 +194,7 @@ struct SidebarView: View {
                 if connection.state.isOnline {
                     if sidebarGroups.isEmpty {
                         Text(
-                            trimmedSearch.isEmpty
+                            searchQuery.isEmpty
                                 ? "没有活跃会话；上游同步的会话会先进入已归档，可在项目详情恢复。"
                                 : "没有匹配的会话或项目。"
                         )
@@ -207,8 +207,17 @@ struct SidebarView: View {
                         }
                     }
                 } else {
-                    if offlineSidebarGroups.isEmpty {
-                        Text("尚未连接服务器，本机也没有缓存的历史。")
+                    // 一次读出缓存 id 列表：离线分组的过滤与空态都基于同一份输入，
+                    // 避免每渲染一次就多读几次缓存快照。
+                    let cachedSessionIDs = connection.cachedSessionIds()
+                    let groups = offlineSidebarGroups(cachedSessionIDs: cachedSessionIDs)
+                    if groups.isEmpty {
+                        Text(
+                            SidebarFilterPolicy.offlineEmptyMessage(
+                                hasCachedSessions: !cachedSessionIDs.isEmpty,
+                                query: searchQuery
+                            )
+                        )
                             .font(PIFont.caption)
                             .foregroundStyle(PIColor.text2)
                             .fixedSize(horizontal: false, vertical: true)
@@ -217,7 +226,7 @@ struct SidebarView: View {
                             .font(PIFont.caption)
                             .foregroundStyle(PIColor.warning)
                             .fixedSize(horizontal: false, vertical: true)
-                        ForEach(offlineSidebarGroups) { group in
+                        ForEach(groups) { group in
                             offlineProjectGroup(group)
                         }
                     }
@@ -249,8 +258,9 @@ struct SidebarView: View {
         var id: String { projectID }
     }
 
-    private var trimmedSearch: String {
-        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// 归一化后的搜索查询：在线与离线分组共用同一份（见 `SidebarFilterPolicy`）。
+    private var searchQuery: String {
+        SidebarFilterPolicy.normalizedQuery(searchText)
     }
 
     private var sidebarGroups: [SidebarGroup] {
@@ -259,7 +269,7 @@ struct SidebarView: View {
             !model.isProjectDeleted(hostID: hostID, projectID: $0.id)
                 && !model.isProjectArchived(hostID: hostID, projectID: $0.id)
         }
-        let query = trimmedSearch.lowercased()
+        let query = searchQuery
         let groups = projects.compactMap { project -> SidebarGroup? in
             let name = model.projectDisplayName(
                 hostID: hostID,
@@ -275,13 +285,16 @@ struct SidebarView: View {
                     return !binding.isArchived && !binding.isDeleted
                 }
                 .filter { session in
-                    guard !query.isEmpty else { return true }
                     let title = model.sessionDisplayTitle(
                         hostID: hostID,
                         sessionID: session.id,
                         fallback: session.title ?? session.id
                     )
-                    return title.lowercased().contains(query) || name.lowercased().contains(query)
+                    return SidebarFilterPolicy.matches(
+                        title: title,
+                        projectName: name,
+                        query: query
+                    )
                 }
             let byID = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
             let pinnedOrders = Dictionary(uniqueKeysWithValues: sessions.compactMap { session in
@@ -308,12 +321,14 @@ struct SidebarView: View {
         }
     }
 
-    private var offlineSidebarGroups: [OfflineSidebarGroup] {
+    /// 离线分组：与在线分组共用同一套查询匹配（`SidebarFilterPolicy`）。
+    ///
+    /// `cachedSessionIDs` 由调用方一次读出后传入，避免过滤/空态各读一次缓存快照。
+    private func offlineSidebarGroups(cachedSessionIDs: [String]) -> [OfflineSidebarGroup] {
         guard let hostID = model.currentHost?.id else { return [] }
-        let cached = connection.cachedSessionIds()
         var byProject: [String: [String]] = [:]
 
-        for sessionID in cached {
+        for sessionID in cachedSessionIDs {
             let binding = model.sessionBinding(hostID: hostID, sessionID: sessionID)
             guard binding?.isArchived != true, binding?.isDeleted != true else { continue }
             let projectID = binding?.projectID ?? "offline-unassigned"
@@ -321,17 +336,18 @@ struct SidebarView: View {
                project.isArchived || project.isDeleted {
                 continue
             }
+            let projectName = offlineProjectName(hostID: hostID, projectID: projectID)
+            let title = offlineSessionTitle(hostID: hostID, sessionID: sessionID)
+            guard SidebarFilterPolicy.matches(
+                title: title,
+                projectName: projectName,
+                query: searchQuery
+            ) else { continue }
             byProject[projectID, default: []].append(sessionID)
         }
 
         let groups = byProject.map { projectID, sessionIDs in
-            let name = projectID == "offline-unassigned"
-                ? "未归属项目"
-                : model.projectDisplayName(
-                    hostID: hostID,
-                    projectID: projectID,
-                    fallback: projectID
-                )
+            let name = offlineProjectName(hostID: hostID, projectID: projectID)
             let pinnedOrders = Dictionary(uniqueKeysWithValues: sessionIDs.compactMap { sessionID in
                 model.sessionBinding(hostID: hostID, sessionID: sessionID)?
                     .pinOrder
@@ -358,15 +374,37 @@ struct SidebarView: View {
         }
     }
 
+    private func offlineProjectName(hostID: UUID, projectID: String) -> String {
+        projectID == "offline-unassigned"
+            ? "未归属项目"
+            : model.projectDisplayName(
+                hostID: hostID,
+                projectID: projectID,
+                fallback: projectID
+            )
+    }
+
+    /// 离线会话的显示标题：优先本机保存的标题，缺失才退回会话 ID。
+    ///
+    /// 说明：缓存快照里还有服务器下发的 `title`，但当前 `ConnectionModel` 没有
+    /// 公开的快照读取入口（本轮该文件被其它车道锁定），所以这里先用手上有的
+    /// `titleOverride`（本机保存的显示标题），没有才用 ID。
+    private func offlineSessionTitle(hostID: UUID, sessionID: String) -> String {
+        model.sessionDisplayTitle(hostID: hostID, sessionID: sessionID, fallback: sessionID)
+    }
+
     private func offlineProjectGroup(_ group: OfflineSidebarGroup) -> some View {
         let hostID = model.currentHost?.id
-        let collapsed = hostID.map {
-            model.isProjectGroupCollapsed(hostID: $0, projectID: group.projectID)
-        } == true
+        let collapsed = SidebarFilterPolicy.isCollapsed(
+            storedCollapsed: hostID.map {
+                model.isProjectGroupCollapsed(hostID: $0, projectID: group.projectID)
+            } == true,
+            query: searchQuery
+        )
         let current = hostID.map { model.lastProjectID(for: $0) == group.projectID } ?? false
         return VStack(alignment: .leading, spacing: 0) {
             Button {
-                guard let hostID else { return }
+                guard SidebarFilterPolicy.canToggleGroup(query: searchQuery), let hostID else { return }
                 model.toggleProjectGroup(hostID: hostID, projectID: group.projectID)
             } label: {
                 HStack(spacing: PISpacing.s8) {
@@ -414,7 +452,10 @@ struct SidebarView: View {
             if !collapsed {
                 ForEach(group.sessionIDs, id: \.self) { sessionID in
                     PIListRow(
-                        title: sessionID,
+                        // 离线行标题优先本机保存的标题，缺失才退回会话 ID（旧实现只显示 ID）。
+                        title: hostID.map {
+                            offlineSessionTitle(hostID: $0, sessionID: sessionID)
+                        } ?? sessionID,
                         subtitle: hostID.map {
                             model.hasSessionUpdate(hostID: $0, sessionID: sessionID)
                                 ? "本机缓存（只读） · 新" : "本机缓存（只读）"
@@ -428,6 +469,9 @@ struct SidebarView: View {
                             model.closeSidebar()
                         }
                     )
+                    // 稳定标识：离线行标题现在是「本机保存的标题」，不再以会话 ID 开头，
+                    // 按标题找不到行；用例应改用这个 identifier 定位。
+                    .accessibilityIdentifier("sidebar.cachedSession.\(sessionID)")
                 }
             }
         }
@@ -436,12 +480,16 @@ struct SidebarView: View {
 
     private func projectGroup(_ group: SidebarGroup) -> some View {
         let hostID = model.currentHost?.id
-        let collapsed = trimmedSearch.isEmpty
-            && hostID.map { model.isProjectGroupCollapsed(hostID: $0, projectID: group.project.id) } == true
+        let collapsed = SidebarFilterPolicy.isCollapsed(
+            storedCollapsed: hostID.map {
+                model.isProjectGroupCollapsed(hostID: $0, projectID: group.project.id)
+            } == true,
+            query: searchQuery
+        )
         let current = hostID.map { model.lastProjectID(for: $0) == group.project.id } ?? false
         return VStack(alignment: .leading, spacing: 0) {
             Button {
-                guard trimmedSearch.isEmpty, let hostID else { return }
+                guard SidebarFilterPolicy.canToggleGroup(query: searchQuery), let hostID else { return }
                 model.toggleProjectGroup(hostID: hostID, projectID: group.project.id)
             } label: {
                 HStack(spacing: PISpacing.s8) {

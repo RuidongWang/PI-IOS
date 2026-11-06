@@ -219,9 +219,34 @@ final class RACPRouteFallbackTests: XCTestCase {
         let client = makeClient(factory: factory, budgets: budgets)
         await client.start()
 
-        _ = try await waitForStatus(client) { $0.phase == .online(.ssh) }
+        let status = try await waitForStatus(client) { $0.phase == .online(.ssh) }
         XCTAssertEqual(factory.routes(), [.direct, .ssh])
         XCTAssertEqual(stalled.closeCount, 1)
+        // 预算耗尽（尚未得到 tlsTrust/auth/hostIdentity 等确定结论）必须归类 connectTimeout。
+        XCTAssertEqual(status.directFailure?.category, .connectTimeout)
+        await client.stop()
+    }
+
+    /// S3：失败路径的 teardown 必须是有界的。旧 socket 的 `close()` 只要卡住
+    /// （NIO 的 `EventLoopFuture.get()` 不响应取消），重连循环也不能被它拖住。
+    func testHangingCloseDoesNotBlockSSHFallback() async throws {
+        let hanging = ScriptedSocket()
+        hanging.hangOnClose = true
+        let ssh = ScriptedSocket()
+        let factory = ScriptedFactory(results: [
+            .success(RACPConnection(socket: hanging, route: .direct)),
+            .success(RACPConnection(socket: ssh, route: .ssh)),
+        ])
+        let client = makeClient(factory: factory)
+        await client.start()
+
+        _ = try await waitForStatus(client) { $0.phase == .online(.direct) }
+        hanging.terminate(closeCode: 1006, reason: "")
+
+        // 1s 有界关闭 + 立即回退；若 teardown 无限等待，这里会超时失败。
+        let status = try await waitForStatus(client, timeout: 3) { $0.phase == .online(.ssh) }
+        XCTAssertEqual(factory.routes(), [.direct, .ssh])
+        XCTAssertEqual(status.activeRoute, .ssh)
         await client.stop()
     }
 
@@ -430,6 +455,8 @@ private final class ScriptedSocket: RACPSocket, @unchecked Sendable {
     var discoveryUpstreamStatus: Int?
     var directTransportCapability: Bool? = true
     var ignorePing = false
+    /// 模拟“关闭永不返回”：NIO 的 EventLoopFuture.get() 不响应 Swift 任务取消。
+    var hangOnClose = false
     private(set) var methods: [String] = []
     private(set) var subscriptionAfterCursors: [String] = []
 
@@ -522,6 +549,10 @@ private final class ScriptedSocket: RACPSocket, @unchecked Sendable {
     }
 
     func close() async {
+        if hangOnClose {
+            try? await Task.sleep(for: .seconds(30))
+            return
+        }
         lock.lock()
         guard !closed else {
             lock.unlock()

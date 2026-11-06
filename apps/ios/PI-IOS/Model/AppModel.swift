@@ -54,6 +54,14 @@ final class AppModel: ObservableObject {
     private var pendingHostID: UUID?
     private var providerConnectionGeneration = 0
     private var providerIdentityGeneration = 0
+    /// U15: monotonic per-host-record identity generation. Bumped whenever an
+    /// install target's SSH identity or endpoint-port fields change, so an install
+    /// that started before the edit can never commit its token to the new record.
+    private var installIdentityGenerations: [UUID: Int] = [:]
+#if DEBUG
+    /// Test-only persistence override; never set outside PI-IOSTests.
+    var persistenceOverrideForTesting: (() -> Bool)?
+#endif
     private var foregroundResumeTracker = ForegroundResumeTracker()
     @Published private(set) var resumedSessionUpdates = ForegroundSessionUpdateMarkers()
 
@@ -64,12 +72,20 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastSessionId: String?
     @Published private(set) var lastProjectId: String?
 
-    init() {
-        let fixture = UITestFixture.current
+    /// `seed` is a test-only injection of persisted state; the app always uses the
+    /// default (load from the state file).
+    init(seed: PersistedState? = nil) {
+        let fixture = seed == nil ? UITestFixture.current : nil
         usesUITestFixture = fixture != nil
         connection = ConnectionModel(fixture: fixture)
-        let outcome = fixture.map { StateFile.LoadOutcome(state: $0.state, warning: nil) }
-            ?? StateFile.load()
+        let outcome: StateFile.LoadOutcome
+        if let seed {
+            outcome = StateFile.LoadOutcome(state: seed, warning: nil)
+        } else if let fixture {
+            outcome = StateFile.LoadOutcome(state: fixture.state, warning: nil)
+        } else {
+            outcome = StateFile.load()
+        }
         hosts = outcome.state.hosts
         offlineCacheLimit = outcome.state.offlineCacheLimit
         modelProviders = outcome.state.modelProviders
@@ -92,7 +108,7 @@ final class AppModel: ObservableObject {
         }
         loadWarning = outcome.warning
         canPersistLoadedState = outcome.canSave
-        if !usesUITestFixture {
+        if seed == nil, !usesUITestFixture {
             migrateLegacyDeviceTokens()
         }
         root = LandingRule.initialRoot(hosts: hosts)
@@ -109,20 +125,8 @@ final class AppModel: ObservableObject {
             )
         }
         connection.onBootstrapPairingCommit = { [weak self] commit in
-            guard let self, let host = self.hosts.first(where: { $0.id == commit.hostID }) else {
-                return false
-            }
-            return self.completeAdaptorInstallation(
-                id: host.id,
-                expectedHost: host.host,
-                expectedPort: host.port,
-                expectedUsername: host.username,
-                port: commit.port,
-                version: commit.version,
-                attemptId: commit.attemptId,
-                releaseSource: commit.releaseSource.map { $0.isFallback ? .fallback : .latest },
-                adaptorHostId: commit.adaptorHostId
-            )
+            guard let self else { return .staleTarget }
+            return self.completeAdaptorInstallation(commit)
         }
         observeTunnelState()
         observeRemoteMetadata()
@@ -866,6 +870,14 @@ final class AppModel: ObservableObject {
         hosts[index].keyFileName = draft.keyFileName
         let newDirectEndpoint = HostValidator.canonicalDirectEndpoint(draft.directEndpoint)
         hosts[index].directEndpoint = newDirectEndpoint
+        if serverIdentityChanged
+            || previousHostPort != hosts[index].hostPort
+            || previousAuthKind != hosts[index].authKind
+            || previousDirectEndpoint != newDirectEndpoint {
+            // Freeze invalidation (U15): an install attempt that started before this
+            // edit must not commit its receipt/token to the edited record.
+            bumpInstallIdentityGeneration(id)
+        }
         if previousDirectEndpoint != newDirectEndpoint {
             // 配置可保存，但新 endpoint 必须重新完整验证；旧 pin/hostId 不被覆盖。
             hosts[index].connectionPreference = .sshOnly
@@ -1068,56 +1080,78 @@ final class AppModel: ObservableObject {
         return persist()
     }
 
-    /// Bootstrap success is persisted only after the runner has paired, saved
-    /// the token to Keychain, restarted the user unit, and verified `ping` with
-    /// that device token.
+    /// U15 single controlled commit point for a successful install.
+    ///
+    /// The frozen install target is compared with the current record **before**
+    /// any mutation: `ConnectionModel` only promotes the staged device token when
+    /// this returns `.committed`. The install receipt is written here exactly
+    /// once; `InstallAdaptorScreen` no longer writes a second one.
     @discardableResult
-    func completeAdaptorInstallation(
-        id: UUID,
-        expectedHost: String,
-        expectedPort: Int,
-        expectedUsername: String,
-        port: Int,
-        version: String,
-        attemptId: String,
-        releaseSource: AdaptorInstallReleaseSource? = nil,
-        completedAt: Date = Date(),
-        adaptorHostId: String? = nil
-    ) -> Bool {
-        guard let index = hosts.firstIndex(where: { $0.id == id }) else { return false }
-        guard hosts[index].host == expectedHost,
-              hosts[index].port == expectedPort,
-              hosts[index].username == expectedUsername else {
+    func completeAdaptorInstallation(_ commit: BootstrapPairingCommit) -> BootstrapPairingCommitResult {
+        guard let index = hosts.firstIndex(where: { $0.id == commit.hostID }) else {
+            saveError = "安装完成时本机服务器记录已不存在，未把旧安装结果写回当前记录"
+            return .staleTarget
+        }
+        let current = InstallTargetSnapshot(
+            record: hosts[index],
+            identityGeneration: installIdentityGeneration(forHostID: commit.hostID)
+        )
+        guard BootstrapInstallCommitPolicy.canCommit(
+            expected: commit.target,
+            current: current,
+            existingAdaptorHostId: hosts[index].adaptorHostId,
+            committedAdaptorHostId: commit.adaptorHostId
+        ) else {
             saveError = "安装完成时服务器身份已变化，未把旧安装结果写回当前记录"
-            return false
+            return .staleTarget
         }
-        let outcome = connection.installOutcome(hostID: id, attemptId: attemptId)
-        hosts[index].hostPort = port
-        hosts[index].pairedAt = completedAt
-        let verifiedHostId = adaptorHostId ?? outcome?.adaptorHostId
-        if let verifiedHostId, !verifiedHostId.isEmpty {
-            hosts[index].adaptorHostId = verifiedHostId
-        }
-        if let endpoint = outcome?.directEndpoint {
+        let previousRecord = hosts[index]
+        hosts[index].hostPort = commit.port
+        hosts[index].pairedAt = Date()
+        hosts[index].adaptorHostId = commit.adaptorHostId
+        if let endpoint = commit.directEndpoint {
             hosts[index].directEndpoint = endpoint
+            // Direct 首验仍可能失败；只有 markDirectVerified 能提升为 directPreferred。
             hosts[index].connectionPreference = .sshOnly
         }
-        if outcome?.directVerified == true,
-           let endpoint = outcome?.directEndpoint,
-           let hostId = outcome?.adaptorHostId,
-           hosts[index].adaptorHostId == hostId,
-           KeychainStore.loadDirectTLSTrustPin(hostID: id)?.hostId == hostId {
-            hosts[index].directEndpoint = endpoint
-            hosts[index].connectionPreference = .directPreferred
-        }
         hosts[index].installReceipt = AdaptorInstallReceipt(
-            version: version,
-            hostPort: port,
-            attemptId: attemptId,
-            completedAt: completedAt,
-            releaseSource: releaseSource
+            version: commit.version,
+            hostPort: commit.port,
+            attemptId: commit.attemptId,
+            completedAt: Date(),
+            releaseSource: commit.releaseSource.map { $0.isFallback ? .fallback : .latest }
         )
-        return persist()
+        let persisted = persist()
+        if persisted { return .committed }
+        // Never leave an in-memory receipt that the device token was not promoted
+        // for (the caller cleans up this attempt's staging on this outcome).
+        hosts[index] = previousRecord
+        switch BootstrapInstallCompletionPolicy.disposition(
+            persisted: false,
+            saveError: saveError
+        ) {
+        case .succeeded:
+            return .committed
+        case .failed(let reason):
+            return .receiptPersistenceFailed(reason)
+        }
+    }
+
+    /// Read-only identity generation for a frozen install target. Kept in memory
+    /// only: an app restart also terminates the in-flight install attempt.
+    func installIdentityGeneration(forHostID id: UUID) -> Int {
+        installIdentityGenerations[id] ?? 0
+    }
+
+    func installTargetSnapshot(for host: HostRecord) -> InstallTargetSnapshot {
+        InstallTargetSnapshot(
+            record: host,
+            identityGeneration: installIdentityGeneration(forHostID: host.id)
+        )
+    }
+
+    private func bumpInstallIdentityGeneration(_ id: UUID) {
+        installIdentityGenerations[id, default: 0] &+= 1
     }
 
     /// Write a port discovered over SSH back onto the host record (requirement:
@@ -1470,6 +1504,9 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     private func persist() -> Bool {
+#if DEBUG
+        if let persistenceOverrideForTesting { return persistenceOverrideForTesting() }
+#endif
         guard !usesUITestFixture else { return true }
         guard canPersistLoadedState else {
             saveError = "本机状态读取失败且原文件仍在，已暂停保存；请重启应用重试。"

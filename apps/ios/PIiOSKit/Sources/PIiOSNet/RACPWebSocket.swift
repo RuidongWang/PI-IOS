@@ -89,9 +89,15 @@ public final class RACPWebSocket: RACPSocket {
         try await channel.eventLoop.submit {
             try channel.pipeline.syncOperations.addHandler(handler)
         }.get()
-        try await withTimeout(seconds: timeout, phase: "WebSocket 升级") {
-            try await handler.waitUntilUpgraded()
+        do {
+            try await withTimeout(seconds: timeout, phase: "WebSocket 升级") {
+                try await handler.waitUntilUpgraded()
+            }
+        } catch {
+            ConnectionDiagnostics.shared.record(kind: .sshStage, detail: "ws.upgrade-failed")
+            throw error
         }
+        ConnectionDiagnostics.shared.record(kind: .sshStage, detail: "ws.upgraded")
         continuation.onTermination = { _ in
             channel.eventLoop.execute { _ = channel.close() }
         }

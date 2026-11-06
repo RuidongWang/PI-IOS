@@ -1,14 +1,6 @@
 import SwiftUI
 import PIiOSCore
 
-/// Result of a provider deletion, forwarded to the presenting screen so a
-/// partial outcome (secret kept, default model not moved) is shown after the
-/// sheet closes instead of being replaced by a generic "已删除" banner.
-enum ProviderDeletionNotice: Equatable {
-    case success(String)
-    case needsAttention(String)
-}
-
 struct ModelProviderDetailSheet: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var connection: ConnectionModel
@@ -29,9 +21,26 @@ struct ModelProviderDetailSheet: View {
     @State private var editAPIKey = ""
     @State private var editModels: [ProviderModelEditDraft] = []
     @State private var editError: String?
+    @State private var keyWarning: String?
 
     private var canUpdate: Bool {
         provider.hostV2Mirror != false && connection.state.isOnline
+    }
+
+    /// 本机 Keychain 是否还留有这条服务（或它的 legacy 映射）的密钥。
+    private var hasLocalProviderKey: Bool {
+        if KeychainStore.loadProviderKey(hostID: provider.hostID, providerId: provider.providerId) != nil {
+            return true
+        }
+        guard let legacyProviderId = provider.legacyProviderId,
+              legacyProviderId != provider.providerId
+        else { return false }
+        return KeychainStore.loadProviderKey(hostID: provider.hostID, providerId: legacyProviderId) != nil
+    }
+
+    /// v0.0.3 起服务器不保存 api_key 类服务的密钥；这里只反映本机 Keychain。
+    private var keyStatusText: String {
+        ProviderSecretDisplay.localText(hasLocalKey: hasLocalProviderKey)
     }
 
     var body: some View {
@@ -53,6 +62,20 @@ struct ModelProviderDetailSheet: View {
                             Text("\(provider.models.count) 个模型 · 本机记录")
                                 .font(PIFont.meta)
                                 .foregroundStyle(PIColor.text3)
+                            Text(keyStatusText)
+                                .font(PIFont.meta)
+                                .foregroundStyle(hasLocalProviderKey ? PIColor.text3 : PIColor.warning)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("models.provider.keyStatus")
+                        }
+                        if let guidance = ProviderSecretDisplay.missingKeyGuidance(
+                            .localOnly(hasLocalKey: hasLocalProviderKey)
+                        ) {
+                            PIInlineMessage(kind: .warning, text: guidance)
+                        }
+                        if let keyWarning {
+                            PIInlineMessage(kind: .warning, text: keyWarning)
+                                .accessibilityIdentifier("models.provider.keyWarning")
                         }
 
                         PIGroup("模型") {
@@ -88,7 +111,7 @@ struct ModelProviderDetailSheet: View {
                             }
                         }
 
-                        PIGroup("更新模型", footer: "编辑服务信息与完整模型列表，密钥留空保持不变。") {
+                        PIGroup("更新模型", footer: "编辑服务信息与完整模型列表。API Key 只保存在本机 Keychain，留空保持不变。") {
                             PISecondaryButton(
                                 title: "编辑模型",
                                 isEnabled: canUpdate && !isDeleting
@@ -110,7 +133,7 @@ struct ModelProviderDetailSheet: View {
 
                         PIGroup(
                             "删除模型服务",
-                            footer: "删除会移除服务器上的 provider 记录与密钥。正在运行的 turn 可能失败且不会被自动迁移；建议先中止运行中的轮次。"
+                            footer: "删除会移除服务器上的 provider 记录，并清除本机保存的密钥。正在运行的 turn 可能失败且不会被自动迁移；建议先中止运行中的轮次。"
                         ) {
                             PIDangerRow(
                                 title: isDeleting ? "正在删除…" : "删除这条服务",
@@ -150,7 +173,7 @@ struct ModelProviderDetailSheet: View {
                     Task { await deleteProvider() }
                 }
             } message: {
-                Text("将从服务器删除该 provider 及其密钥，并清理本机记录。项目、文件和设备配对不受影响。")
+                Text("将从服务器删除该 provider 记录，并清除本机 Keychain 中的密钥。项目、文件和设备配对不受影响。")
             }
             .piMessageAlert(title: "删除未完成", message: $errorMessage)
             .piMessageAlert(title: "模型服务未更新", message: $editError)
@@ -160,7 +183,7 @@ struct ModelProviderDetailSheet: View {
 
     private var editingForm: some View {
         Group {
-            PIGroup("服务信息", footer: "API Key 留空保留服务器上的原密钥，不会写入本机记录。") {
+            PIGroup("服务信息", footer: "新 API Key 只写入本机 Keychain；留空保持不变。") {
                 VStack(alignment: .leading, spacing: PISpacing.s16) {
                     PIFormField(label: "服务名称") {
                         TextField("服务名称", text: $editName)
@@ -211,6 +234,9 @@ struct ModelProviderDetailSheet: View {
             }
             .disabled(isSaving || editModels.isEmpty)
         }
+        // U14：保存期间禁止继续编辑密钥与相关字段，避免请求值与本机写入分叉，
+        // 也避免保存完成后把「还未提交的修改」无声丢弃。
+        .disabled(isSaving)
     }
 
     private func startEditing() {
@@ -248,17 +274,26 @@ struct ModelProviderDetailSheet: View {
             editError = "当前 PI-adaptor 不支持更新或已切换，请在原 PI-adaptor 上重试。"
             return
         }
+        guard !isSaving else { return }
         // 兼容尚未写入镜像标记的旧 v2 记录：只有 PI-adaptor 确认其存在时才允许更新。
         let requiresV2Confirmation = provider.hostV2Mirror != true
-        let input = ProviderUpdateInput(
+        // U14：请求前冻结提交值。请求与本机 Keychain 写入都只读这份快照，
+        // 不再在回执后回读界面上的实时输入。
+        let intent = ProviderSaveIntent(
+            kind: .update(providerId: provider.providerId),
+            hostID: host.id,
             name: editName,
             baseURL: editBaseURL,
-            apiKey: editAPIKey.isEmpty ? nil : editAPIKey,
             models: editModels.map(\.spec),
+            apiKey: editAPIKey,
+            apiKeyDraft: editAPIKey,
+            legacyProviderId: provider.legacyProviderId,
+            hostV2Mirror: provider.hostV2Mirror,
             defaultModelID: provider.defaultModelId
         )
         isSaving = true
         editError = nil
+        keyWarning = nil
         Task {
             defer { isSaving = false }
             do {
@@ -273,7 +308,10 @@ struct ModelProviderDetailSheet: View {
                         return
                     }
                 }
-                let updated = try await connection.updateAdaptorProvider(id: provider.providerId, input: input)
+                let updated = try await connection.updateAdaptorProvider(
+                    id: provider.providerId,
+                    input: intent.updateInput()
+                )
                 guard model.canApplyProviderOperation(operation) else {
                     editError = "PI-adaptor 在保存过程中已切换：本次修改可能已写入原 PI-adaptor，请到该 PI-adaptor 上核对。"
                     return
@@ -312,12 +350,23 @@ struct ModelProviderDetailSheet: View {
                     editError = "服务器已更新，但本机记录保存失败。请保留此页提示并稍后重新打开详情核对。"
                     return
                 }
-                if !editAPIKey.isEmpty {
-                    _ = KeychainStore.saveProviderKey(
-                        editAPIKey, hostID: host.id, providerId: provider.providerId
-                    )
+                // Keychain 写入同样只用冻结值（服务器实际收到的那份密钥），
+                // 并按提交时的 Host 记录；写入失败必须可见，不能静默丢弃。
+                if let key = intent.keychainAPIKey {
+                    if !KeychainStore.saveProviderKey(
+                        key,
+                        hostID: intent.hostID,
+                        providerId: provider.providerId
+                    ) {
+                        keyWarning = "服务器已更新，但本机密钥保存失败：发送时服务器会拒绝，请在“模型服务”里重新填写 API Key。"
+                    }
                 }
-                editAPIKey = ""
+                // 只有输入框仍是本次提交的值时才清空；否则保留用户后输入的内容。
+                if intent.apiKeyDraftIsUnchanged(editAPIKey) {
+                    editAPIKey = ""
+                } else {
+                    keyWarning = "保存期间 API Key 输入有变化：本次未提交后输入的内容，请核对后再保存一次。"
+                }
                 isEditing = false
                 resultMessage = provider.legacyProviderId == nil
                     ? "已更新 \(updated.models.count) 个模型。"
@@ -327,106 +376,37 @@ struct ModelProviderDetailSheet: View {
             }
         }
     }
+
     private func deleteProvider() async {
         guard provider.hostID == host.id,
               let operation = model.providerOperationContext(for: host) else { return }
+        guard !isDeleting else { return }
         isDeleting = true
         errorMessage = nil
         resultMessage = nil
         defer { isDeleting = false }
-        do {
-            guard model.canApplyProviderOperation(operation) else { return }
-            var summaryText: String?
-            // Set when the server reported an outcome the user must act on, so the
-            // parent screen can surface it as a warning rather than a plain success.
-            var needsAttention = false
-            // 服务端已经查不到这条 provider：删除是幂等的，继续清本机记录并关掉详情页，
-            // 不能停在这里报「删除未完成」（NOT_FOUND 不是失败）。
-            var serverAlreadyAbsent = false
-            // 1) Drop the v2 PI-adaptor mirror, if this record has one. Records written
-            //    before `hostV2Mirror` existed have `nil`; probe the PI-adaptor in that
-            //    case so an old legacy record (whose id the PI-adaptor does not know) is
-            //    not misread as a mirror and its real legacy entry is still cleaned.
-            var v2Removed = false
-            if provider.hostV2Mirror ?? true {
-                guard connection.state.isOnline else {
-                    errorMessage = "服务器离线：无法确认删除 v2 PI-adaptor 上的 provider 镜像，本机记录已保留。请连接后重试。"
-                    return
-                }
-                do {
-                    try await connection.deleteAdaptorProvider(id: provider.providerId)
-                    v2Removed = true
-                } catch let error as RACPV2Error {
-                    if case .server(let code, _) = error, code == "NOT_FOUND" {
-                        // The record may be legacy-only, or already removed elsewhere.
-                        serverAlreadyAbsent = true
-                    } else {
-                        errorMessage = ConnectionErrorText.describe(error)
-                        return
-                    }
-                } catch {
-                    errorMessage = ConnectionErrorText.describe(error)
-                    return
-                }
-                guard model.canApplyProviderOperation(operation) else { return }
-            }
-            // 2) Drop the legacy SSH store entry when one exists (or is implied).
-            var legacyId: String? = provider.legacyProviderId
-            if legacyId == nil, provider.hostV2Mirror != true, !v2Removed {
-                legacyId = provider.providerId
-            }
-            if let legacyProviderId = legacyId {
-                let receipt = try await connection.removeProvider(
-                    record: host,
-                    providerId: legacyProviderId
-                )
-                guard model.canApplyProviderOperation(operation) else { return }
-                switch receipt {
-                case .success(let summary):
-                    summaryText = deleteSummaryText(summary)
-                case .defaultTransferOrderUnknown(_, let secretCleared):
-                    // 契约 §4.2/§8 的四键例外：已删记录，但默认项因 createdAt 不可比未转移。
-                    // 需要人工跟进，必须作为警告展示而不是通用「已删除」。
-                    needsAttention = true
-                    summaryText = secretCleared
-                        ? "服务器已删除记录与密钥，但默认模型因创建时间不可比未转移，请重新选择默认模型。"
-                        : "服务器已删除记录，但密钥未清除且默认模型未转移，请人工在服务器上处理。"
-                case .failure(.notFound):
-                    // 服务端已无此记录：等同 `.absent`，继续清本机记录。
-                    serverAlreadyAbsent = true
-                case .failure(let failure):
-                    errorMessage = failure.displayMessage
-                    return
-                case .unparseable(let reason):
-                    errorMessage = "服务器回执无法解析：\(reason)。本机记录已保留。"
-                    return
-                }
-            }
-            guard model.removeLocalProvider(id: provider.id, context: operation) else { return }
-            // Drop any locally stored key(s) for this provider — both the v2 id
-            // and, when the record was mirrored from a legacy import, the legacy id.
-            _ = KeychainStore.deleteProviderKey(hostID: provider.hostID, providerId: provider.providerId)
-            if let legacyProviderId = provider.legacyProviderId, legacyProviderId != provider.providerId {
-                _ = KeychainStore.deleteProviderKey(hostID: provider.hostID, providerId: legacyProviderId)
-            }
-            let detail = summaryText
-                ?? (v2Removed
-                    ? "已从 v2 PI-adaptor 删除该 provider 及其密钥。"
-                    : (serverAlreadyAbsent
-                        ? "服务器上已不存在该记录；本机残留记录已清理。"
-                        : "已清理本机记录。"))
-            resultMessage = detail
-            // Hand the outcome to the parent: it owns the post-dismiss alert, so a
-            // partial result cannot be hidden behind a generic success message.
-            onDeleted(
-                needsAttention
-                    ? .needsAttention("已删除模型服务「\(provider.name)」：\(detail)")
-                    : .success("已删除模型服务「\(provider.name)」")
-            )
-        } catch {
-            guard model.canApplyProviderOperation(operation) else { return }
-            errorMessage = ConnectionErrorText.describe(error)
+        // U07：与 PI-adaptor Provider 页共用同一套删除分支与文案。
+        let target = ProviderDeletionTarget(
+            host: host,
+            providerId: provider.providerId,
+            legacyProviderId: provider.legacyProviderId,
+            hostV2Mirror: provider.hostV2Mirror,
+            localRecordId: provider.id,
+            displayName: provider.name,
+            keychainProviderIds: [provider.providerId, provider.legacyProviderId].compactMap { $0 }
+        )
+        let report = await ProviderDeletionUseCase(model: model, connection: connection)
+            .delete(target)
+        guard model.canApplyProviderOperation(operation) else { return }
+        if let failure = report.failureMessage {
+            // 失败/结果不确定：本机映射与 Keychain 线索已由用例保留，详情页留在原地。
+            errorMessage = failure
+            return
         }
+        resultMessage = report.message
+        // Hand the outcome to the parent: it owns the post-dismiss alert, so a
+        // partial result cannot be hidden behind a generic success message.
+        onDeleted(report.notice ?? .success(report.message))
     }
 private struct ProviderModelEditDraft: Identifiable, Equatable {
     let id = UUID()
@@ -527,27 +507,6 @@ private struct ProviderModelEditRow: View {
         .onChange(of: draft.supportsImages) { _, _ in draft.compose() }
     }
 }
-
-    private func deleteSummaryText(_ summary: ProviderRemoveSummary) -> String {
-        guard summary.effect == .deleted else {
-            return "服务器上已不存在该记录；本机残留记录已清理，本次没有再次执行删除。"
-        }
-        var parts = ["服务器已删除记录与密钥。"]
-        switch summary.defaultMoved {
-        case .moved(let providerId, let modelId):
-            parts.append("默认模型已转给 \(providerId.prefix(8))… / \(modelId)。")
-        case .notMoved(let reason):
-            parts.append(reason == "no_remaining"
-                ? "已无剩余模型服务，请重新添加。"
-                : "没有合格的候选模型，默认模型未转移，请重新选择。")
-        case nil:
-            break
-        }
-        if summary.remainingEligible == 0 {
-            parts.append("当前已无可用模型服务。")
-        }
-        return parts.joined(separator: " ")
-    }
 
     private func compact(_ value: Int) -> String {
         if value >= 1_000_000, value % 1_000_000 == 0 { return "\(value / 1_000_000)M" }

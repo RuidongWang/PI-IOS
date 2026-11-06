@@ -682,17 +682,24 @@ public struct RACPTurnStartParams: Codable, Equatable, Sendable {
     public var admission: RACPTurnAdmission?
     public var input: RACPTurnInput
     public var context: RACPContext
+    /// 目标会话 provider 为 `authKind:"api_key"` 时逐次提供的密钥。
+    ///
+    /// 服务端不持久化 provider key（只在内存中用于本次 turn），客户端不得把它写进
+    /// 日志/错误文本/幂等结果；`nil` 时 JSON 编码省略该字段，旧调用点行为不变。
+    public var apiKey: String?
 
     public init(
         sessionId: String,
         admission: RACPTurnAdmission? = nil,
         input: RACPTurnInput,
-        context: RACPContext
+        context: RACPContext,
+        apiKey: String? = nil
     ) {
         self.sessionId = sessionId
         self.admission = admission
         self.input = input
         self.context = context
+        self.apiKey = apiKey
     }
 }
 

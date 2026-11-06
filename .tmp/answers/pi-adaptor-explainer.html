@@ -1,0 +1,1291 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PI-adaptor · 架构剖解</title>
+<style>
+  :root{
+    --ink:#09090c;
+    --paper:#e9e4da;
+    --text:#e7e2d8;
+    --muted:#a79e90;
+    --dim:#736a5c;
+    --line:rgba(233,228,218,.10);
+    --line-2:rgba(233,228,218,.18);
+
+    /* 六色语义板：每一层、每一类事件都固定一种颜色 */
+    --c-access:#62b6e8;
+    --c-proto:#f0a93c;
+    --c-event:#3fc8b6;
+    --c-session:#9fc95c;
+    --c-store:#b58cf0;
+    --c-agent:#ef7a72;
+    --c-alert:#e2554d;
+
+    --serif:"Songti SC","STSong","Iowan Old Style","Palatino",serif;
+    --sans:"Hiragino Sans GB","PingFang SC",-apple-system,BlinkMacSystemFont,sans-serif;
+    --mono:"SF Mono",Menlo,"Andale Mono",Consolas,monospace;
+    --cond:"DIN Condensed","DIN Alternate","SF Compact Display",var(--mono);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--ink);color:var(--text);font:16px/1.8 var(--sans);-webkit-font-smoothing:antialiased}
+  body::after{content:"";position:fixed;inset:0;z-index:9;pointer-events:none;opacity:.05;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/></filter><rect width='180' height='180' filter='url(%23n)'/></svg>")}
+  .bg{position:fixed;inset:0;z-index:-1;pointer-events:none;
+    background:
+      radial-gradient(760px 560px at 6% -6%, rgba(98,182,232,.13), transparent 62%),
+      radial-gradient(820px 600px at 94% -4%, rgba(240,169,60,.11), transparent 62%),
+      radial-gradient(700px 520px at 88% 46%, rgba(181,140,240,.07), transparent 62%),
+      radial-gradient(760px 560px at 4% 74%, rgba(63,200,182,.07), transparent 62%),
+      radial-gradient(600px 460px at 52% 104%, rgba(159,201,92,.06), transparent 60%),
+      linear-gradient(#09090c,#08080a 55%,#09090c)}
+  .bg::after{content:"";position:absolute;inset:0;
+    background-image:
+      linear-gradient(rgba(233,228,218,.022) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(233,228,218,.022) 1px,transparent 1px);
+    background-size:52px 52px;
+    -webkit-mask-image:radial-gradient(circle at 50% 6%,#000,transparent 70%);
+            mask-image:radial-gradient(circle at 50% 6%,#000,transparent 70%)}
+  ::selection{background:rgba(240,169,60,.3);color:#fff}
+
+  .topbar{position:sticky;top:0;z-index:50;backdrop-filter:blur(16px);
+    background:linear-gradient(rgba(9,9,12,.94),rgba(9,9,12,.5));border-bottom:1px solid var(--line)}
+  .topbar .in{max-width:1120px;margin:0 auto;padding:12px 28px;display:flex;align-items:center;gap:18px}
+  .brand{font:600 11.5px/1 var(--mono);letter-spacing:.26em;text-transform:uppercase;white-space:nowrap;
+    background:linear-gradient(90deg,var(--c-access),var(--c-proto) 45%,var(--c-event));
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .brand s{text-decoration:none;-webkit-text-fill-color:var(--dim);margin:0 4px}
+  .topbar nav{display:flex;gap:16px;margin-left:auto;overflow:auto}
+  .topbar nav a{color:var(--dim);text-decoration:none;font:11.5px/1 var(--mono);letter-spacing:.08em;
+    white-space:nowrap;padding-bottom:3px;border-bottom:1px solid transparent;transition:.2s}
+  .topbar nav a:hover{color:var(--c);border-bottom-color:var(--c)}
+
+  main{max-width:1120px;margin:0 auto;padding:0 28px 100px}
+
+  section{padding:84px 0 6px;border-top:1px solid var(--line);margin-top:64px;--c:var(--c-proto)}
+  .shead{display:grid;grid-template-columns:56px 1fr;gap:22px;align-items:start;margin-bottom:30px}
+  .snum{font:400 34px/1 var(--cond);color:var(--c);opacity:.55;letter-spacing:.03em;padding-top:4px}
+  .skicker{font:11px/1 var(--mono);letter-spacing:.18em;text-transform:uppercase;color:var(--c);
+    margin-bottom:10px;display:flex;gap:10px;align-items:center}
+  .skicker::after{content:"";height:1px;flex:1;background:linear-gradient(90deg,var(--c),transparent);opacity:.35}
+  h2{font:600 clamp(24px,3vw,34px)/1.28 var(--serif);margin:0 0 12px;letter-spacing:.01em}
+  .lede{color:var(--muted);max-width:72ch;margin:0;font-size:15px;line-height:1.85}
+  .lede code{font-family:var(--mono);font-size:13px;color:var(--c-event)}
+
+  /* ---------- hero ---------- */
+  .hero{padding:78px 0 0;margin:0;border:0}
+  .hero-grid{display:grid;grid-template-columns:1fr 292px;gap:52px;align-items:end}
+  .kicker{font:11px/1 var(--mono);letter-spacing:.2em;text-transform:uppercase;color:var(--dim);margin-bottom:24px}
+  h1{font:600 clamp(38px,5.2vw,62px)/1.08 var(--serif);margin:0 0 22px;letter-spacing:.005em}
+  h1 em{font-style:normal;color:var(--c-proto)}
+  h1 i{font-style:normal;
+    background:linear-gradient(90deg,var(--c-access),var(--c-event));
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero p{font-size:16.5px;color:var(--muted);max-width:50ch;margin:0;line-height:1.9}
+  .hero p b{color:var(--paper);font-weight:500}
+
+  .spec{border-top:1px solid var(--line-2);padding-top:14px;margin:0}
+  .spec div{display:flex;gap:14px;padding:7px 0;border-bottom:1px solid var(--line);align-items:baseline}
+  .spec dt{font:10.5px/1.6 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--dim);min-width:64px}
+  .spec dd{margin:0;font:12px/1.6 var(--mono);color:var(--muted);text-align:right;margin-left:auto}
+
+  .stats{display:grid;grid-template-columns:repeat(5,1fr);margin-top:56px;border-top:1px solid var(--line-2);border-bottom:1px solid var(--line-2)}
+  .stat{padding:20px 6px;border-right:1px solid var(--line);--c:var(--c-proto)}
+  .stat:last-child{border-right:0}
+  .stat b{display:block;font:400 40px/1 var(--cond);color:var(--c);letter-spacing:.02em}
+  .stat span{display:block;margin-top:9px;font:11px/1.4 var(--mono);color:var(--dim);letter-spacing:.08em}
+
+  /* ---------- hero map ---------- */
+  .map{position:relative;margin-top:44px;padding:10px 6px 0;border-top:1px solid var(--line);overflow-x:auto}
+  .map svg{display:block;width:100%;min-width:900px;height:auto}
+  .dg-title{font:600 15px var(--mono)}
+  .dg-name{font:600 12px var(--mono)}
+  .dg-sub{font:9.5px var(--mono)}
+  .dg-micro{font:8.6px var(--mono)}
+  .wire{fill:none;stroke-width:1.5;stroke-linecap:round}
+  .wire.flow{stroke-dasharray:7 7;animation:wire 1.15s linear infinite}
+  @keyframes wire{to{stroke-dashoffset:-14}}
+  .mapl{display:flex;gap:18px;flex-wrap:wrap;margin:16px 0 0;font:10.5px/1 var(--mono);color:var(--dim)}
+  .mapl span{display:flex;align-items:center;gap:7px}
+  .mapl i{width:8px;height:8px;border-radius:2px;display:inline-block}
+
+  /* ---------- panel / code ---------- */
+  .panel{background:rgba(233,228,218,.023);border:1px solid var(--line);border-radius:3px}
+  .code{font:12.5px/1.8 var(--mono);background:#070708;border:1px solid var(--line);border-radius:2px;
+    padding:15px 17px;overflow:auto;color:#c6bfb1;margin:0;white-space:pre}
+
+  /* ---------- layers ---------- */
+  .layers{display:grid;grid-template-columns:322px 1fr;border:1px solid var(--line);border-radius:3px;overflow:hidden}
+  .ly-list{display:flex;flex-direction:column;border-right:1px solid var(--line);background:rgba(0,0,0,.22)}
+  .ly{appearance:none;text-align:left;cursor:pointer;background:transparent;border:0;
+    border-left:2px solid transparent;padding:15px 18px;color:var(--muted);font:inherit;transition:.18s;
+    display:flex;flex-direction:column;gap:3px;border-bottom:1px solid var(--line)}
+  .ly:last-child{border-bottom:0}
+  .ly:hover{background:rgba(233,228,218,.035);color:var(--text)}
+  .ly[aria-selected="true"]{background:rgba(233,228,218,.045);border-left-color:var(--c);color:var(--paper)}
+  .ly b{font:500 13px/1.5 var(--mono);display:flex;align-items:center;gap:9px}
+  .ly small{font:10.5px/1.5 var(--mono);color:var(--dim);letter-spacing:.06em;padding-left:16px}
+  .ly[aria-selected="true"] small{color:var(--c);opacity:.85}
+  .dotc{width:7px;height:7px;border-radius:50%;background:var(--c);display:inline-block;flex:0 0 auto}
+
+  .ly-detail{padding:26px 30px;min-height:452px;--c:var(--c-access)}
+  .ly-head{display:flex;gap:12px;align-items:baseline;font:11.5px/1 var(--mono);margin-bottom:16px;
+    padding-bottom:14px;border-bottom:1px dashed var(--line-2)}
+  .ly-file{color:var(--c)}
+  .ly-lines{color:var(--dim);margin-left:auto;letter-spacing:.08em}
+  .ly-detail h3{margin:0 0 8px;font:600 21px/1.4 var(--serif);display:flex;align-items:center;gap:10px}
+  .ly-detail h3::before{content:"";width:9px;height:9px;background:var(--c);border-radius:2px;flex:0 0 auto}
+  .ly-sub{color:var(--muted);margin:0 0 18px;font-size:14px;line-height:1.85}
+  .ly-items{margin:0 0 20px;padding:0;list-style:none;color:#c0b9ab;font-size:13.8px;line-height:1.85}
+  .ly-items li{position:relative;padding-left:18px;margin-bottom:9px}
+  .ly-items li::before{content:"—";position:absolute;left:0;color:var(--c);opacity:.8}
+
+  /* ---------- method map ---------- */
+  .mmap{margin-top:18px;padding:22px 24px}
+  .mmap h3{margin:0 0 4px;font:600 15px/1.5 var(--serif)}
+  .mmap .hint{color:var(--dim);font:11px/1.6 var(--mono);margin:0 0 16px;letter-spacing:.04em}
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .mchip{font:11.5px/1 var(--mono);padding:8px 11px;display:flex;align-items:center;gap:8px;
+    border:1px solid var(--c);border-radius:2px;color:var(--c);background:transparent;transition:.18s}
+  .mchip:hover{background:var(--bg);color:#fff}
+  .mchip b{font-weight:600}
+
+  /* ---------- pipeline ---------- */
+  .flowgrid{display:grid;grid-template-columns:1fr 292px;gap:16px;align-items:start}
+  .player{padding:20px 22px 22px}
+  .scen{display:flex;margin-bottom:18px;border:1px solid var(--line);border-radius:2px;overflow:hidden;width:fit-content}
+  .scen button{appearance:none;cursor:pointer;border:0;border-right:1px solid var(--line);background:transparent;
+    color:var(--muted);font:11.5px/1 var(--mono);padding:9px 14px;transition:.18s}
+  .scen button:last-child{border-right:0}
+  .scen button:hover{color:var(--paper)}
+  .scen button[aria-pressed="true"]{background:rgba(240,169,60,.13);color:var(--c-proto)}
+
+  .scroll{overflow-x:auto;overflow-y:hidden}
+  .rail{position:relative;min-width:740px;display:grid;grid-template-columns:repeat(7,1fr);gap:6px;padding:32px 2px 4px}
+  .rail::before{content:"";position:absolute;top:19px;left:6%;right:6%;height:1px;
+    background:linear-gradient(90deg,transparent,
+      rgba(98,182,232,.5) 8%,rgba(98,182,232,.5) 24%,
+      rgba(240,169,60,.55) 46%,
+      rgba(239,122,114,.5) 66%,
+      rgba(159,201,92,.5) 90%,transparent)}
+  .st{border:1px solid var(--c);border-radius:2px;padding:10px 5px;text-align:center;
+    font:11px/1.3 var(--mono);transition:.26s;position:relative;z-index:1;
+    color:var(--dim);background:rgba(0,0,0,.28)}
+  .st.on{color:#fff;border-color:var(--c);
+    background:var(--bg);box-shadow:0 0 26px -12px var(--c)}
+  .dot{position:absolute;top:13px;left:0;width:12px;height:12px;border-radius:50%;background:var(--c-proto);
+    box-shadow:0 0 0 3px rgba(240,169,60,.16),0 0 18px rgba(240,169,60,.95);
+    transition:transform .52s cubic-bezier(.45,0,.2,1),background .25s,box-shadow .25s;z-index:2}
+  .dot.evt{background:var(--c-event);box-shadow:0 0 0 3px rgba(63,200,182,.16),0 0 18px rgba(63,200,182,.95)}
+  .dot.pulse{animation:pulse .9s ease-out}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(240,169,60,.55)}100%{box-shadow:0 0 0 18px rgba(240,169,60,0)}}
+
+  .cap{margin-top:16px;border-top:1px dashed var(--line-2);padding-top:16px;min-height:206px}
+  .cap-top{display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap}
+  .cap-n{font:10.5px/1 var(--mono);color:var(--dim);letter-spacing:.14em}
+  .tag{font:10.5px/1 var(--mono);padding:5px 8px;border-radius:2px;letter-spacing:.1em}
+  .tag.req{background:rgba(240,169,60,.15);color:var(--c-proto)}
+  .tag.evt{background:rgba(63,200,182,.15);color:var(--c-event)}
+  .cap h4{margin:0;font:600 15.5px/1.5 var(--serif);flex:1;min-width:180px}
+  .cap .note{color:var(--muted);font-size:13px;margin:11px 0 0;line-height:1.8}
+  .cap .code{margin-top:12px;max-height:146px}
+
+  .ctrl{display:flex;gap:6px;margin-top:16px;align-items:center;flex-wrap:wrap;padding-top:16px;border-top:1px solid var(--line)}
+  .ctrl button{appearance:none;cursor:pointer;background:transparent;border:1px solid var(--line-2);color:var(--text);
+    border-radius:2px;font:11.5px/1 var(--mono);padding:9px 12px;transition:.18s}
+  .ctrl button:hover{border-color:var(--c-proto);color:var(--c-proto)}
+  .ctrl button:disabled{opacity:.3;cursor:not-allowed;border-color:var(--line);color:var(--muted)}
+  .ctrl .sp{margin-left:auto;display:flex;gap:3px}
+  .ctrl .sp button{padding:7px 9px;font-size:10.5px}
+  .ctrl .sp button[aria-pressed="true"]{border-color:var(--c-proto);color:var(--c-proto)}
+
+  .log{padding:18px 16px 12px;max-height:596px;overflow:auto}
+  .log h3{margin:0 0 14px;font:10.5px/1 var(--mono);color:var(--dim);letter-spacing:.18em;text-transform:uppercase}
+  .logline{font:11px/1.6 var(--mono);color:#9c9486;padding:4px 0;border-bottom:1px solid rgba(233,228,218,.04);
+    display:flex;gap:8px;animation:in .32s ease-out}
+  @keyframes in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+  .logline .sq{min-width:30px;color:var(--dim)}
+  .logline.req .sq{color:var(--c-proto)}
+  .logline.evt .sq{color:var(--c-event)}
+
+  /* ---------- event lanes ---------- */
+  .lanes{margin-top:18px;padding:22px 24px 18px}
+  .lanes h3{margin:0 0 4px;font:600 15px/1.5 var(--serif)}
+  .lanes .hint{color:var(--dim);font:11px/1.6 var(--mono);margin:0 0 14px}
+  .lanes svg{display:block;width:100%;min-width:820px;height:auto}
+  .ln-label{font:10.5px var(--mono);letter-spacing:.04em}
+  .ln-ev{font:10px var(--mono)}
+  .fam{display:flex;flex-wrap:wrap;gap:6px;margin-top:16px}
+  .fchip{font:10.5px/1 var(--mono);padding:7px 10px;border:1px solid var(--c);border-radius:2px;color:var(--c)}
+  .fchip b{color:var(--paper);margin-left:6px}
+
+  /* ---------- state machine ---------- */
+  .smwrap{padding:14px 10px 0;overflow:auto}
+  svg.sm{width:100%;height:auto;display:block;min-width:660px}
+  .edge{fill:none;stroke:#2e2b26;stroke-width:1.5;transition:.22s}
+  .edge.hot{stroke:var(--c-proto);stroke-width:2}
+  .node{cursor:pointer}
+  .node .c1{fill:#0c0c0f;stroke:var(--nc);stroke-opacity:.42;stroke-width:1.4;transition:.22s}
+  .node .c2{fill:var(--nc);opacity:0;stroke:none;transition:.22s}
+  .node text{fill:#9c9486;font:11.5px var(--mono);text-anchor:middle;dominant-baseline:middle;transition:.22s;pointer-events:none}
+  .node:hover .c1{stroke-opacity:.85}
+  .node.on .c1{stroke-opacity:1;stroke-width:2}
+  .node.on .c2{opacity:.13}
+  .node.on text{fill:#ffd9a3}
+  .node.dim{opacity:.5}
+  .elabel{fill:#8c8577;font:10px var(--mono);transition:.22s;paint-order:stroke;stroke:#0c0c0f;stroke-width:4px;stroke-linejoin:round}
+  .elabel.hot{fill:var(--c-proto);stroke:#0c0c0f}
+  .elabel.dim{opacity:.3}
+  .smcap{padding:18px 26px 24px;border-top:1px dashed var(--line-2);min-height:104px;--c-proto:#f0a93c}
+  .smcap h4{margin:0 0 7px;font:600 14.5px/1.5 var(--mono);color:var(--c-proto);display:flex;align-items:center;gap:9px}
+  .smcap h4::before{content:"";width:8px;height:8px;border-radius:2px;background:var(--c-proto);flex:0 0 auto}
+  .smcap p{margin:0;color:var(--muted);font-size:13.5px;line-height:1.85;max-width:82ch}
+
+  /* ---------- cursor demo ---------- */
+  .cursor-demo{padding:26px 28px 24px}
+  .ticks{display:flex;gap:2px;align-items:flex-end;height:56px;margin-bottom:12px}
+  .tk{flex:1;border-radius:1px;background:#1b1a17;transition:.2s;height:32px}
+  .tk.evicted{background:rgba(226,85,77,.34);height:15px}
+  .tk.done{background:linear-gradient(180deg,var(--c-event),rgba(63,200,182,.22));height:42px}
+  .tk.cur{background:var(--c-proto);height:56px;box-shadow:0 0 16px rgba(240,169,60,.7)}
+  .axis{display:flex;justify-content:space-between;font:10.5px/1 var(--mono);color:var(--dim);margin-bottom:22px;letter-spacing:.06em}
+  .cctl{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .cctl input[type=range]{flex:1;min-width:200px;accent-color:var(--c-proto);height:2px;background:var(--line-2)}
+  .cctl button{appearance:none;cursor:pointer;background:transparent;border:1px solid var(--line-2);color:var(--text);
+    border-radius:2px;font:11.5px/1 var(--mono);padding:9px 13px;transition:.18s}
+  .cctl button:hover{border-color:var(--c-proto);color:var(--c-proto)}
+  .verdict{margin-top:18px;font:12px/1.8 var(--mono);padding:14px 16px;border-radius:2px;
+    border:1px dashed var(--line-2);color:var(--muted);min-height:56px;white-space:pre-line}
+  .verdict.ok{border-color:rgba(63,200,182,.5);color:var(--c-event);background:rgba(63,200,182,.05)}
+  .verdict.bad{border-color:rgba(226,85,77,.5);color:var(--c-alert);background:rgba(226,85,77,.05)}
+  .legend{display:flex;gap:20px;flex-wrap:wrap;margin-top:16px;font:10.5px/1 var(--mono);color:var(--dim)}
+  .legend i{display:inline-block;width:8px;height:8px;border-radius:1px;margin-right:7px;vertical-align:middle}
+
+  /* ---------- storage ---------- */
+  .ftree{padding:22px 24px}
+  details.folder{border-left:1px solid var(--line);margin-left:5px;padding-left:16px}
+  details.folder>summary{cursor:pointer;list-style:none;font:12px/2.2 var(--mono);color:#c6bfb1;
+    display:flex;gap:9px;align-items:baseline}
+  details.folder>summary::-webkit-details-marker{display:none}
+  details.folder>summary::before{content:"▸";color:var(--c);transition:.2s;display:inline-block;width:10px;opacity:.9}
+  details.folder[open]>summary::before{transform:rotate(90deg)}
+  details.folder>summary:hover{color:#fff}
+  .fname{color:var(--c)}
+  .fnote{color:var(--dim);font:11px/1.6 var(--sans);margin-left:auto;text-align:right;padding-left:20px;max-width:46%}
+  .frow{display:flex;gap:12px;align-items:baseline;font:12px/2.2 var(--mono);padding-left:20px}
+  .frow .fname{display:flex;align-items:center;gap:8px}
+  .frow .fname::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--c);flex:0 0 auto}
+
+  /* ---------- table ---------- */
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th{text-align:left;font:10.5px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--dim);
+    padding:0 14px 12px;border-bottom:1px solid var(--line-2)}
+  td{padding:14px;border-bottom:1px solid var(--line);color:#c0b9ab;vertical-align:top;line-height:1.7}
+  tbody tr{transition:.16s}
+  tbody tr:hover{background:rgba(233,228,218,.03)}
+  td:first-child{color:var(--paper);font-weight:500;white-space:nowrap;--c:var(--c-proto)}
+  td:first-child::before{content:"";display:inline-block;width:7px;height:7px;border-radius:2px;
+    background:var(--c);margin-right:9px;vertical-align:1px}
+  td:last-child{color:var(--dim);font-size:13px}
+
+  footer{border-top:1px solid var(--line);margin-top:72px;padding:24px 0 0;color:var(--dim);font:11.5px/1.9 var(--mono)}
+  footer code{color:var(--muted)}
+
+  .reveal{opacity:0;transform:translateY(22px);transition:opacity .8s cubic-bezier(.2,.75,.2,1),transform .8s cubic-bezier(.2,.75,.2,1)}
+  .reveal.in{opacity:1;transform:none}
+
+  @media (max-width:920px){
+    .hero-grid{grid-template-columns:1fr;gap:34px}
+    .stats{grid-template-columns:repeat(3,1fr)}
+    .stat:nth-child(3){border-right:0}
+    .stat:nth-child(n+4){border-top:1px solid var(--line)}
+    .layers,.flowgrid{grid-template-columns:1fr}
+    .ly-list{border-right:0;border-bottom:1px solid var(--line)}
+    .ly-detail{min-height:0;padding:22px}
+    .log{max-height:260px}
+    .shead{grid-template-columns:1fr;gap:8px}
+    .snum{font-size:22px}
+    section{padding-top:60px;margin-top:44px}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{animation:none!important;transition:none!important}
+    .reveal{opacity:1;transform:none}
+  }
+</style>
+</head>
+<body>
+<div class="bg"></div>
+
+<header class="topbar">
+  <div class="in">
+    <span class="brand">PI<s>—</s>ADAPTOR</span>
+    <nav>
+      <a href="#layers" style="--c:var(--c-access)">01 结构</a>
+      <a href="#flow" style="--c:var(--c-proto)">02 时序</a>
+      <a href="#states" style="--c:var(--c-event)">03 状态</a>
+      <a href="#cursor" style="--c:var(--c-store)">04 游标</a>
+      <a href="#storage" style="--c:var(--c-session)">05 落盘</a>
+      <a href="#tradeoffs" style="--c:var(--c-agent)">06 取舍</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <!-- ================= HERO ================= -->
+  <section class="hero">
+    <div class="hero-grid">
+      <div>
+        <div class="kicker">RACP v2 · 契约 2.0.0 已冻结</div>
+        <h1>把 Pi 编码代理<br>包装成 <em>iOS 可用</em><br>的<i>远端宿主</i></h1>
+        <p>一个单进程，只监听 <b>127.0.0.1</b>。它把 Pi SDK 的会话、工具调用与流式输出，翻译成 <b>48 个 JSON-RPC 方法</b>。客户端永远经 SSH 隧道进来。</p>
+      </div>
+      <dl class="spec">
+        <div><dt>进程</dt><dd>Node 22 × 1</dd></div>
+        <div><dt>监听</dt><dd>127.0.0.1</dd></div>
+        <div><dt>传输</dt><dd>WS / JSON-RPC</dd></div>
+        <div><dt>上游</dt><dd>pi-agent 1.3.0</dd></div>
+        <div><dt>状态根</dt><dd>~/.pi-adaptor</dd></div>
+        <div><dt>源码</dt><dd>4 381 行 / 20 文件</dd></div>
+      </dl>
+    </div>
+
+    <div class="stats">
+      <div class="stat" style="--c:var(--c-proto)"><b data-n="48">0</b><span>RPC 方法</span></div>
+      <div class="stat" style="--c:var(--c-agent)"><b data-n="27">0</b><span>错误码</span></div>
+      <div class="stat" style="--c:var(--c-event)"><b data-n="18">0</b><span>事件类型</span></div>
+      <div class="stat" style="--c:var(--c-session)"><b data-n="20">0</b><span>源文件</span></div>
+      <div class="stat" style="--c:var(--c-access)"><b data-n="1">0</b><span>MiB 帧上限</span></div>
+    </div>
+
+    <div class="map">
+      <svg viewBox="0 0 1120 424" role="img" aria-label="PI-adaptor 系统拓扑图">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="rgba(240,169,60,.9)"/>
+          </marker>
+          <marker id="ae" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="rgba(63,200,182,.9)"/>
+          </marker>
+        </defs>
+
+        <rect x="12" y="118" width="168" height="156" rx="12" fill="rgba(98,182,232,.07)" stroke="rgba(98,182,232,.5)"/>
+        <text class="dg-title" x="96" y="180" text-anchor="middle" fill="#d3e9fa">iOS</text>
+        <text class="dg-sub" x="96" y="202" text-anchor="middle" fill="rgba(211,233,250,.72)">RACP v2 客户端</text>
+        <text class="dg-micro" x="96" y="226" text-anchor="middle" fill="#7d7466">项目 · 会话 · turn</text>
+
+        <path class="wire flow" d="M182,196 H232" stroke="rgba(240,169,60,.8)" marker-end="url(#ar)"/>
+        <text class="dg-micro" x="207" y="188" text-anchor="middle" fill="#a89e8d">WebSocket</text>
+
+        <rect x="238" y="148" width="98" height="96" rx="10" fill="rgba(98,182,232,.045)"
+              stroke="rgba(98,182,232,.48)" stroke-dasharray="5 4"/>
+        <text class="dg-name" x="287" y="188" text-anchor="middle" fill="#9fd0ee">SSH</text>
+        <text class="dg-micro" x="287" y="206" text-anchor="middle" fill="#7d7466">direct-tcpip</text>
+
+        <path class="wire flow" d="M340,196 H390" stroke="rgba(240,169,60,.8)" marker-end="url(#ar)"/>
+        <text class="dg-micro" x="365" y="188" text-anchor="middle" fill="#a89e8d">19445</text>
+
+        <rect x="392" y="52" width="450" height="330" rx="14" fill="rgba(240,169,60,.045)" stroke="rgba(240,169,60,.44)"/>
+        <text class="dg-title" x="412" y="82" fill="#f3c477">PI-adaptor</text>
+        <text class="dg-micro" x="412" y="99" fill="#7d7466">Node 22 · 单进程 · systemd --user</text>
+        <rect x="726" y="65" width="100" height="20" rx="10" fill="rgba(98,182,232,.1)" stroke="rgba(98,182,232,.42)"/>
+        <text class="dg-micro" x="776" y="79" text-anchor="middle" fill="#9fd0ee">bind 127.0.0.1</text>
+
+        <rect x="412" y="116" width="410" height="40" rx="7" fill="rgba(98,182,232,.11)" stroke="rgba(98,182,232,.42)"/>
+        <text class="dg-name" x="426" y="141" fill="#bfe0f5">ws.ts</text>
+        <text class="dg-micro" x="808" y="141" text-anchor="end" fill="#8d8474">帧 · 鉴权 · 投递</text>
+
+        <rect x="412" y="164" width="410" height="48" rx="7" fill="rgba(240,169,60,.12)" stroke="rgba(240,169,60,.46)"/>
+        <text class="dg-name" x="426" y="186" fill="#f6cf92">host-service.ts</text>
+        <text class="dg-micro" x="426" y="202" fill="#a89e8d">48 方法 switch · 幂等 · 会话锁</text>
+
+        <rect x="412" y="222" width="130" height="46" rx="7" fill="rgba(63,200,182,.11)" stroke="rgba(63,200,182,.42)"/>
+        <text class="dg-name" x="477" y="242" text-anchor="middle" fill="#9fe6db">journal</text>
+        <text class="dg-micro" x="477" y="257" text-anchor="middle" fill="#8d8474">事件日志</text>
+
+        <rect x="550" y="222" width="130" height="46" rx="7" fill="rgba(159,201,92,.11)" stroke="rgba(159,201,92,.42)"/>
+        <text class="dg-name" x="615" y="242" text-anchor="middle" fill="#cbe39b">catalog</text>
+        <text class="dg-micro" x="615" y="257" text-anchor="middle" fill="#8d8474">会话索引</text>
+
+        <rect x="688" y="222" width="134" height="46" rx="7" fill="rgba(181,140,240,.11)" stroke="rgba(181,140,240,.42)"/>
+        <text class="dg-name" x="755" y="242" text-anchor="middle" fill="#d8c2f8">资源</text>
+        <text class="dg-micro" x="755" y="257" text-anchor="middle" fill="#8d8474">media · providers</text>
+
+        <rect x="412" y="278" width="410" height="44" rx="7" fill="rgba(239,122,114,.11)" stroke="rgba(239,122,114,.44)"/>
+        <text class="dg-name" x="426" y="305" fill="#f4b3ad">driver.ts</text>
+        <text class="dg-micro" x="808" y="305" text-anchor="end" fill="#8d8474">SDK 适配 · 事件归一化</text>
+
+        <text class="dg-micro" x="412" y="350" fill="#6f6759">data/ · meta/ · media/ · providers/ · skills/</text>
+
+        <path class="wire flow" d="M842,196 H896" stroke="rgba(239,122,114,.8)" marker-start="url(#ae)" marker-end="url(#ar)"/>
+        <text class="dg-micro" x="869" y="188" text-anchor="middle" fill="#a89e8d">OpenAI</text>
+
+        <rect x="900" y="144" width="152" height="84" rx="10" fill="rgba(239,122,114,.07)" stroke="rgba(239,122,114,.5)"/>
+        <text class="dg-name" x="976" y="180" text-anchor="middle" fill="#f4b3ad">Pi SDK</text>
+        <text class="dg-micro" x="976" y="198" text-anchor="middle" fill="#8d8474">模型调用 · 工具</text>
+
+        <path class="wire" d="M976,230 V256" stroke="rgba(63,200,182,.8)" marker-end="url(#ae)"/>
+        <text class="dg-micro" x="986" y="246" fill="#8d8474">落盘</text>
+
+        <path d="M900,272 a76,14 0 0 1 152,0 v40 a76,14 0 0 1 -152,0 z"
+              fill="rgba(159,201,92,.08)" stroke="rgba(159,201,92,.5)"/>
+        <ellipse cx="976" cy="272" rx="76" ry="14" fill="none" stroke="rgba(159,201,92,.35)"/>
+        <text class="dg-name" x="976" y="302" text-anchor="middle" fill="#cbe39b">JSONL v3</text>
+        <text class="dg-micro" x="976" y="318" text-anchor="middle" fill="#8d8474">原生会话文件</text>
+
+      </svg>
+      <div class="mapl">
+        <span><i style="background:var(--c-access)"></i>接入 / 传输</span>
+        <span><i style="background:var(--c-proto)"></i>协议 / turn</span>
+        <span><i style="background:var(--c-event)"></i>事件 / 日志</span>
+        <span><i style="background:var(--c-session)"></i>会话 / 文件</span>
+        <span><i style="background:var(--c-store)"></i>资源 / 索引</span>
+        <span><i style="background:var(--c-agent)"></i>执行 / 模型</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= LAYERS ================= -->
+  <section id="layers" class="reveal" style="--c:var(--c-access)">
+    <div class="shead">
+      <div class="snum">01</div>
+      <div>
+        <div class="skicker">Structure · 结构</div>
+        <h2>六个模块，一条单向依赖链</h2>
+        <p class="lede">左边点一层，右边看它负责什么、守什么规矩、拿哪段代码兜底。每层颜色在整页里固定不变，后面几张图用的是同一套。</p>
+      </div>
+    </div>
+
+    <div class="layers">
+      <div class="ly-list" role="tablist" id="lyList"></div>
+      <div class="ly-detail" id="lyDetail"></div>
+    </div>
+
+    <div class="panel mmap">
+      <h3>48 个方法，十一个命名空间</h3>
+      <p class="hint">颜色按业务族归拢 · 悬停看具体方法名 · 全部落在一个 switch 里</p>
+      <div class="chips" id="mChips"></div>
+    </div>
+  </section>
+
+  <!-- ================= FLOW ================= -->
+  <section id="flow" class="reveal" style="--c:var(--c-proto)">
+    <div class="shead">
+      <div class="snum">02</div>
+      <div>
+        <div class="skicker">Sequence · 时序</div>
+        <h2>一次 turn 的完整生命</h2>
+        <p class="lede">选定剧本，按播放。光点沿七个站位行走：黄色是请求方向，青色是事件回流。每个站位的颜色就是它所属的层。</p>
+      </div>
+    </div>
+
+    <div class="flowgrid">
+      <div class="panel player">
+        <div class="scen" id="scen"></div>
+        <div class="scroll"><div class="rail" id="rail"></div></div>
+        <div class="cap" id="cap"></div>
+        <div class="ctrl">
+          <button id="prev">← 上一步</button>
+          <button id="play">▶ 播放</button>
+          <button id="next">下一步 →</button>
+          <button id="reset">重置</button>
+          <span class="sp" id="speed">
+            <button data-s="1.6" aria-pressed="false">0.5×</button>
+            <button data-s="1" aria-pressed="true">1×</button>
+            <button data-s=".6" aria-pressed="false">2×</button>
+          </span>
+        </div>
+      </div>
+      <div class="panel log"><h3>Event Journal</h3><div id="logBody"></div></div>
+    </div>
+
+    <div class="panel lanes">
+      <h3>事件家族与到达位置</h3>
+      <p class="hint">18 种事件 · 按家族分五条泳道 · 横轴是一个 turn 的时间</p>
+      <svg viewBox="0 0 1080 300" role="img" aria-label="事件泳道图">
+        <rect x="0" y="26" width="1080" height="44" fill="rgba(233,228,218,.012)"/>
+        <rect x="0" y="134" width="1080" height="44" fill="rgba(233,228,218,.012)"/>
+        <rect x="0" y="242" width="1080" height="44" fill="rgba(233,228,218,.012)"/>
+
+        <text class="ln-label" x="12" y="52" fill="#f0b459">turn 生命周期</text>
+        <text class="ln-label" x="12" y="106" fill="#5fd4c4">消息流</text>
+        <text class="ln-label" x="12" y="160" fill="#7cc4ee">工具调用</text>
+        <text class="ln-label" x="12" y="214" fill="#e88d86">审批</text>
+        <text class="ln-label" x="12" y="268" fill="#c3a1f5">宿主 / 会话</text>
+
+        <line x1="130" y1="48" x2="1060" y2="48" stroke="rgba(240,169,60,.18)"/>
+        <line x1="130" y1="102" x2="1060" y2="102" stroke="rgba(63,200,182,.18)"/>
+        <line x1="130" y1="156" x2="1060" y2="156" stroke="rgba(98,182,232,.18)"/>
+        <line x1="130" y1="210" x2="1060" y2="210" stroke="rgba(239,122,114,.18)"/>
+        <line x1="130" y1="264" x2="1060" y2="264" stroke="rgba(181,140,240,.18)"/>
+
+        <g fill="#f0a93c">
+          <circle cx="150" cy="48" r="4.5"/><circle cx="150" cy="48" r="9" opacity=".16"/>
+          <circle cx="990" cy="48" r="4.5"/><circle cx="990" cy="48" r="9" opacity=".16"/>
+        </g>
+        <text class="ln-ev" x="160" y="38" fill="#c9a165">turn.started</text>
+        <text class="ln-ev" x="980" y="38" text-anchor="end" fill="#c9a165">turn.completed</text>
+
+        <g fill="#3fc8b6">
+          <circle cx="250" cy="102" r="4.5"/><circle cx="250" cy="102" r="9" opacity=".16"/>
+          <circle cx="400" cy="102" r="4.5"/><circle cx="400" cy="102" r="9" opacity=".16"/>
+          <circle cx="860" cy="102" r="4.5"/><circle cx="860" cy="102" r="9" opacity=".16"/>
+        </g>
+        <text class="ln-ev" x="260" y="92" fill="#66c9ba">item.delta ×N</text>
+        <text class="ln-ev" x="410" y="92" fill="#66c9ba">item.completed</text>
+        <text class="ln-ev" x="870" y="92" fill="#66c9ba">item.delta</text>
+
+        <g fill="#62b6e8">
+          <circle cx="430" cy="156" r="4.5"/><circle cx="430" cy="156" r="9" opacity=".16"/>
+          <circle cx="548" cy="156" r="4.5"/><circle cx="548" cy="156" r="9" opacity=".16"/>
+          <circle cx="782" cy="156" r="4.5"/><circle cx="782" cy="156" r="9" opacity=".16"/>
+        </g>
+        <text class="ln-ev" x="440" y="146" fill="#8cc7ec">tool.started</text>
+        <text class="ln-ev" x="558" y="146" fill="#8cc7ec">tool.updated</text>
+        <text class="ln-ev" x="792" y="146" fill="#8cc7ec">tool.completed</text>
+
+        <g fill="#ef7a72">
+          <circle cx="600" cy="210" r="4.5"/><circle cx="600" cy="210" r="9" opacity=".16"/>
+          <circle cx="738" cy="210" r="4.5"/><circle cx="738" cy="210" r="9" opacity=".16"/>
+        </g>
+        <text class="ln-ev" x="610" y="200" fill="#e79b95">approval.requested</text>
+        <text class="ln-ev" x="748" y="200" fill="#e79b95">approval.resolved</text>
+
+        <g fill="#b58cf0">
+          <circle cx="930" cy="264" r="4.5"/><circle cx="930" cy="264" r="9" opacity=".16"/>
+        </g>
+        <text class="ln-ev" x="940" y="254" fill="#c3a1f5">session.changed</text>
+
+        <line x1="130" y1="288" x2="1060" y2="288" stroke="rgba(233,228,218,.18)"/>
+        <text class="ln-ev" x="130" y="298" fill="#6d6558">turn 开始</text>
+        <text class="ln-ev" x="1060" y="298" text-anchor="end" fill="#6d6558">turn 结束</text>
+      </svg>
+      <div class="fam" id="fam"></div>
+    </div>
+  </section>
+
+  <!-- ================= STATES ================= -->
+  <section id="states" class="reveal" style="--c:var(--c-event)">
+    <div class="shead">
+      <div class="snum">03</div>
+      <div>
+        <div class="skicker">State · 状态</div>
+        <h2>谁写终态，谁不能</h2>
+        <p class="lede">点任一状态，高亮它的所有出入边，并给出这个状态独有的规矩。最容易踩的三个坑都在图里。</p>
+      </div>
+    </div>
+
+    <div class="panel smwrap">
+      <svg class="sm" viewBox="0 0 880 410" role="img" aria-label="turn 状态机">
+        <defs>
+          <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#2e2b26"/>
+          </marker>
+          <marker id="arwHot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#f0a93c"/>
+          </marker>
+        </defs>
+
+        <g id="edges">
+          <path class="edge" data-e="0" d="M180,88 Q296,112 386,166" marker-end="url(#arw)"/>
+          <path class="edge" data-e="1" d="M140,112 L140,258" marker-end="url(#arw)"/>
+          <path class="edge" data-e="2" d="M470,172 Q602,118 676,80" marker-end="url(#arw)"/>
+          <path class="edge" data-e="3" d="M474,185 L674,185" marker-end="url(#arw)"/>
+          <path class="edge" data-e="4" d="M470,198 Q602,256 676,296" marker-end="url(#arw)"/>
+          <path class="edge" data-e="5" d="M430,226 L430,308" marker-end="url(#arw)"/>
+        </g>
+        <g id="elabels">
+          <text class="elabel" data-e="0" x="228" y="104">drainQueue</text>
+          <text class="elabel" data-e="1" x="152" y="190">turn/cancel</text>
+          <text class="elabel" data-e="2" x="548" y="120">agent_settled</text>
+          <text class="elabel" data-e="3" x="544" y="176">错误</text>
+          <text class="elabel" data-e="4" x="544" y="272">turn/interrupt</text>
+          <text class="elabel" data-e="5" x="444" y="272">进程重启</text>
+        </g>
+        <g id="nodes">
+          <g class="node" data-id="queued" style="--nc:#b58cf0" transform="translate(140,70)">
+            <circle class="c1" r="42"/><circle class="c2" r="42"/><text>queued</text></g>
+          <g class="node" data-id="canceled" style="--nc:#8f74c4" transform="translate(140,300)">
+            <circle class="c1" r="42"/><circle class="c2" r="42"/><text>canceled</text></g>
+          <g class="node" data-id="running" style="--nc:#f0a93c" transform="translate(430,185)">
+            <circle class="c1" r="46"/><circle class="c2" r="46"/><text>running</text></g>
+          <g class="node" data-id="completed" style="--nc:#9fc95c" transform="translate(720,62)">
+            <circle class="c1" r="42"/><circle class="c2" r="42"/><text>completed</text></g>
+          <g class="node" data-id="failed" style="--nc:#e2554d" transform="translate(720,185)">
+            <circle class="c1" r="42"/><circle class="c2" r="42"/><text>failed</text></g>
+          <g class="node" data-id="interrupted" style="--nc:#62b6e8" transform="translate(720,308)">
+            <circle class="c1" r="46"/><circle class="c2" r="46"/><text>interrupted</text></g>
+          <g class="node" data-id="uncertain" style="--nc:#8b8375" transform="translate(430,352)">
+            <circle class="c1" r="44"/><circle class="c2" r="44"/><text>uncertain</text></g>
+        </g>
+      </svg>
+      <div class="smcap" id="smcap"></div>
+    </div>
+  </section>
+
+  <!-- ================= CURSOR ================= -->
+  <section id="cursor" class="reveal" style="--c:var(--c-store)">
+    <div class="shead">
+      <div class="snum">04</div>
+      <div>
+        <div class="skicker">Recovery · 恢复</div>
+        <h2>断线重连只剩一个变量：游标</h2>
+        <p class="lede">拖滑块选一个游标，再点「重连」。服务端只认 <code>epoch</code> 与 <code>sequence</code>，不认时间。水位以下的游标一律拒绝，而不是悄悄返回残缺后缀。</p>
+      </div>
+    </div>
+
+    <div class="panel cursor-demo">
+      <div class="ticks" id="ticks"></div>
+      <div class="axis"><span>seq 1</span><span>内存保留 1 万条 · 这里示意 40 条</span><span>seq 40</span></div>
+      <div class="cctl">
+        <input id="cslider" type="range" min="0" max="40" value="22" aria-label="游标位置">
+        <span class="mchip" id="cval" style="--c:var(--c-proto)">cursor = 22</span>
+        <button id="reconnect">重连</button>
+        <button id="restart">模拟进程重启</button>
+      </div>
+      <div class="verdict" id="verdict">选一个游标位置，然后点「重连」。</div>
+      <div class="legend">
+        <span><i style="background:rgba(226,85,77,.55)"></i>已裁剪（水位以下）</span>
+        <span><i style="background:rgba(63,200,182,.75)"></i>可重放</span>
+        <span><i style="background:var(--c-proto)"></i>当前游标</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= STORAGE ================= -->
+  <section id="storage" class="reveal" style="--c:var(--c-session)">
+    <div class="shead">
+      <div class="snum">05</div>
+      <div>
+        <div class="skicker">State on disk · 落盘</div>
+        <h2>一个目录装下全部状态</h2>
+        <p class="lede">默认 <code>~/.pi-adaptor</code>。目录 0700，文件 0600。每个 JSON 都走「临时文件 → fsync → rename → 目录 fsync」。</p>
+      </div>
+    </div>
+
+    <div class="panel ftree" id="tree"></div>
+  </section>
+
+  <!-- ================= TRADEOFFS ================= -->
+  <section id="tradeoffs" class="reveal" style="--c:var(--c-agent)">
+    <div class="shead">
+      <div class="snum">06</div>
+      <div>
+        <div class="skicker">Tradeoffs · 取舍</div>
+        <h2>每一条捷径都标了价</h2>
+        <p class="lede">这些不是风格偏好，是读过失败路径之后的选择。右列写的是代价，不是好处。</p>
+      </div>
+    </div>
+
+    <div class="panel" style="padding:22px 24px">
+      <table>
+        <thead><tr><th>取舍</th><th>选择</th><th>代价</th></tr></thead>
+        <tbody>
+          <tr><td style="--c:var(--c-session)">会话存储</td><td>复用原生 Pi v3 JSONL，不另建会话库</td><td>必须校验外部写入：比对 inode 与旧字节前缀，不符即转只读</td></tr>
+          <tr><td style="--c:var(--c-proto)">并发</td><td>单进程 + 每会话一把 KeyedMutex</td><td>只能单机部署，多副本要靠外部路由</td></tr>
+          <tr><td style="--c:var(--c-event)">事件</td><td>追加日志 + 内存水位，过期游标报 CURSOR_EXPIRED</td><td>客户端必须实现全量 resync</td></tr>
+          <tr><td style="--c:var(--c-store)">幂等</td><td>服务端持久化写结果，24 小时重放窗口</td><td>结果必须 JSON 可序列化；含令牌的方法被排除</td></tr>
+          <tr><td style="--c:var(--c-agent)">媒体</td><td>sha256 内容寻址 + 扫历史引用做 GC</td><td>GC 前读遍所有会话，任一读取失败就放弃整轮</td></tr>
+          <tr><td style="--c:var(--c-access)">Skill</td><td>内容哈希做版本目录，rename 原子发布</td><td>同名不同内容会累积多个版本目录</td></tr>
+          <tr><td style="--c:var(--c-session)">版本</td><td>唯一来源 package.json，构建脚本拒绝漂移</td><td>发布要同时改 package.json、host-release.json、tag</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    来源 apps/pi-adaptor · 契约 docs/api/pi-adaptor.md（FROZEN）· 上游 pi-coding-agent 1.3.0<br>
+    单文件离线页面，无外部依赖，无网络请求。
+  </footer>
+</main>
+
+<script>
+(function(){
+  "use strict";
+  var $ = function(s,r){ return (r||document).querySelector(s); };
+  var $$ = function(s,r){ return Array.prototype.slice.call((r||document).querySelectorAll(s)); };
+  function rgba(hex, a){
+    var n = parseInt(hex.replace("#",""), 16);
+    return "rgba(" + ((n>>16)&255) + "," + ((n>>8)&255) + "," + (n&255) + "," + a + ")";
+  }
+
+  /* ---------- reveal ---------- */
+  var io = new IntersectionObserver(function(es){
+    es.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add("in"); io.unobserve(e.target); } });
+  }, {threshold:.08});
+  $$(".reveal").forEach(function(el){ io.observe(el); });
+  window.setTimeout(function(){
+    var vh = window.innerHeight || 800;
+    $$(".reveal").forEach(function(el){
+      if(el.getBoundingClientRect().top < vh * 1.15) el.classList.add("in");
+    });
+  }, 1200);
+
+  /* ---------- count up ---------- */
+  function countUp(el){
+    var target = parseInt(el.getAttribute("data-n"),10) || 0;
+    var t0 = performance.now(), dur = 850;
+    function tick(t){
+      var p = Math.min(1,(t-t0)/dur), e = 1-Math.pow(1-p,3);
+      el.textContent = Math.round(target*e);
+      if(p<1) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+  $$(".stat b").forEach(function(el){ el.textContent = el.getAttribute("data-n"); });
+
+  /* ---------- layers ---------- */
+  var C = {access:"#62b6e8", proto:"#f0a93c", event:"#3fc8b6", session:"#9fc95c", store:"#b58cf0", agent:"#ef7a72"};
+  var LAYERS = [
+    {
+      name:"ws.ts", role:"接入层 · 162 行", c:C.access,
+      file:"src/server/ws.ts", lines:"162 LINES",
+      title:"只管三件事：帧、身份、投递",
+      sub:"协议语义一律不在这里，所以换传输不会碰到业务。",
+      items:[
+        "只收文本帧，二进制帧直接 1003 关闭；单帧上限 1 MiB。",
+        "从 Authorization 头取 Bearer 令牌，不读 URL。",
+        "initialize 匿名放行，pair 要配对令牌，其余一律设备令牌。",
+        "撤销设备时先发响应再关 socket，否则确认帧发不出去，客户端只看到断线。"
+      ],
+      snippet:'const token = tokenFrom(request); // Authorization: Bearer <device-token>\nif (isBinary) { socket.close(1003, "text frames only"); return; }\nconst result = await service.handle(frame.method, frame.params, auth);'
+    },
+    {
+      name:"host-service.ts", role:"协议层 · 1457 行", c:C.proto,
+      file:"src/server/host-service.ts", lines:"1457 LINES",
+      title:"一张 switch 表，两层横切",
+      sub:"48 个方法全在这个 switch 里，是仓库里唯一需要整体理解的文件。",
+      items:[
+        "dispatch() 按方法名分发；default 抛 INVALID_ARGUMENT，未知方法不会静默成功。",
+        "横切一：幂等。20 个写方法带 idempotencyKey 时先查表，命中直接重放首次结果。",
+        "横切二：会话单写者。KeyedMutex 按 sessionId 串行化，准入、预约、入队在同一把锁内。",
+        "名字带 confirm 的删除都要二次确认 ID，防止误删。"
+      ],
+      snippet:'const result = await this.idempotency.run(key, method, requestDigest(params),\n  () => this.dispatch(method, params, auth, pairingToken), auth.device.deviceId);'
+    },
+    {
+      name:"events/journal.ts", role:"事件层 · 153 行", c:C.event,
+      file:"src/events/journal.ts", lines:"153 LINES",
+      title:"追加日志 + 两条水位线",
+      sub:"断线恢复的全部依据是 {epoch, sequence}，不看墙钟时间。",
+      items:[
+        "append 串行分配 sequence，先 appendFile 落盘，再进内存缓冲并广播。",
+        "内存只留 1 万条；裁剪时记录 host 与每个 session 的水位。",
+        "游标落在水位以下 → 抛 CURSOR_EXPIRED，绝不返回残缺后缀。",
+        "epoch 每次进程启动换新，任何跨重启的旧游标直接失效。"
+      ],
+      snippet:'if (this.droppedHostSequence > after.sequence)\n  throw new HostError("CURSOR_EXPIRED", "event journal no longer contains cursor");'
+    },
+    {
+      name:"pi/session-catalog.ts", role:"会话层 · 211 行", c:C.session,
+      file:"src/pi/session-catalog.ts", lines:"211 LINES",
+      title:"复用原生 Pi v3 JSONL，不另建库",
+      sub:"好处是 iOS 能看到用户在服务器上用 pi 直接建的会话；代价是必须防外部写入。",
+      items:[
+        "追加前后各读一次文件：inode 必须不变，字节必须增长，旧字节必须是新字节的严格前缀。",
+        "任一条件不符 → SESSION_READ_ONLY，理由是 external_write_conflict 或 append_unverified。",
+        "版本不是 v3 或解析失败，会话照常出现在列表，但标记 readOnlyReason。",
+        "session/list 会先扫盘再合并元数据，外部新建的文件自动进目录。"
+      ],
+      snippet:'if (afterStat.ino !== beforeStat.ino) throw new HostError("SESSION_READ_ONLY", "external_write_conflict");\nif (!afterBytes.subarray(0, beforeBytes.length).equals(beforeBytes))\n  throw new HostError("SESSION_READ_ONLY", "external_write_conflict");'
+    },
+    {
+      name:"meta / media / providers / skills", role:"资源层 · 872 行合计", c:C.store,
+      file:"src/{meta,media,providers,skills}", lines:"4 STORES",
+      title:"四份索引，同一套写法",
+      sub:"每个 store 内部一条 promise 链做串行化，对外只暴露语义方法。",
+      items:[
+        "写入统一走 writeJsonFileAtomic：临时文件 → fsync → rename → 目录 fsync。",
+        "provider 索引与密钥文件分离，响应只回掩码；密钥永不进事件或错误体。",
+        "附件分片上传，校验 offset 连续、总长与 sha256，通过后按内容哈希落 blob。",
+        "Skill 用整个目录的内容哈希做版本目录，rename 原子发布，运行中的 turn 读到稳定副本。"
+      ],
+      snippet:'await writeJsonFileAtomic(this.path, value, 0o600);\n// temp → handle.sync() → rename → dir.sync()'
+    },
+    {
+      name:"agent/driver.ts", role:"执行层 · 363 行", c:C.agent,
+      file:"src/agent/driver.ts", lines:"363 LINES",
+      title:"唯一接触 Pi SDK 的模块",
+      sub:"接口只有 start()，返回 abort 与 wait 两个把手。换 SDK 版本只改这一层。",
+      items:[
+        "PiAgentDriver 每 turn 新建 ModelRuntime，把 provider 注册成 openai-completions。",
+        "DefaultResourceLoader 关掉所有扩展，只注入一个 tool_call 工厂做审批拦截。",
+        "Pi 推累计快照，契约要增量：文本取 text_delta，工具输出用 Tracker 换算后缀。",
+        "DeterministicAgentDriver 供测试用，回答固定 Echo，不启动任何模型。"
+      ],
+      snippet:'const delta = toolOutput.accept(itemId, textFromToolResult(raw.partialResult));\nif (delta) request.onEvent({ kind:"tool.updated", payload:{ itemId, delta } });'
+    }
+  ];
+
+  var lyList = $("#lyList"), lyDetail = $("#lyDetail");
+  LAYERS.forEach(function(l, i){
+    var b = document.createElement("button");
+    b.className = "ly";
+    b.setAttribute("role","tab");
+    b.setAttribute("aria-selected", i===0 ? "true":"false");
+    b.style.setProperty("--c", l.c);
+    b.innerHTML = '<b><span class="dotc"></span>'+l.name+'</b><small>'+l.role+'</small>';
+    b.addEventListener("click", function(){
+      $$(".ly").forEach(function(x){ x.setAttribute("aria-selected","false"); });
+      b.setAttribute("aria-selected","true");
+      renderLayer(l);
+    });
+    lyList.appendChild(b);
+  });
+
+  function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+  function renderLayer(l){
+    var items = l.items.map(function(x){ return "<li>"+x+"</li>"; }).join("");
+    lyDetail.style.setProperty("--c", l.c);
+    lyDetail.innerHTML =
+      '<div class="ly-head"><span class="ly-file">'+l.file+'</span><span class="ly-lines">'+l.lines+'</span></div>'+
+      "<h3>"+l.title+"</h3><p class=\"ly-sub\">"+l.sub+"</p>"+
+      '<ul class="ly-items">'+items+"</ul>"+
+      '<pre class="code">'+esc(l.snippet)+'</pre>';
+  }
+  renderLayer(LAYERS[0]);
+
+  /* ---------- method map ---------- */
+  var NS = [
+    ["connection",6,C.access,"initialize · pair · ping · revoke · rotate-token · confirm-rotation"],
+    ["device",2,C.access,"list · pairing-token"],
+    ["project",5,C.session,"list · browse · register · update · delete"],
+    ["session",11,C.session,"list · search · get · create · attach · history · configure · rename · archive · branch · delete"],
+    ["events",3,C.event,"subscribe · unsubscribe · ack"],
+    ["turn",4,C.proto,"start · get · interrupt · cancel"],
+    ["approval",1,C.proto,"respond"],
+    ["input",1,C.proto,"respond"],
+    ["provider",6,C.store,"list · create · update · delete · test · discover"],
+    ["skill",5,C.store,"list · get · install · update · delete"],
+    ["attachment",4,C.agent,"create · chunk · complete · read"]
+  ];
+  var chips = $("#mChips");
+  NS.forEach(function(n){
+    var d = document.createElement("span");
+    d.className = "mchip";
+    d.title = n[3];
+    d.style.setProperty("--c", n[2]);
+    d.style.setProperty("--bg", rgba(n[2], .14));
+    d.innerHTML = n[0]+"<b>"+n[1]+"</b>";
+    chips.appendChild(d);
+  });
+
+  /* ---------- pipeline ---------- */
+  var STATIONS = [
+    ["iOS", C.access], ["SSH 隧道", C.access], ["ws.ts", C.access],
+    ["HostService", C.proto], ["Driver", C.agent], ["Pi SDK", C.agent], ["JSONL", C.session]
+  ];
+
+  var SCENARIOS = {
+    normal: {
+      label:"普通 turn",
+      steps:[
+        {f:0,t:1,k:"req",h:"turn/start 出发",
+         code:'{"jsonrpc":"2.0","id":7,"method":"turn/start",\n "params":{"sessionId":"s_9","input":{"text":"整理日志"}}}',
+         n:"客户端只带会话 ID 与文本。图片先走 attachment 上传，这里只传 attachmentId 数组。"},
+        {f:1,t:2,k:"req",h:"经 SSH 隧道抵达本机",
+         code:"ssh -L 19445:127.0.0.1:19445 user@srv\n→ WebSocket 127.0.0.1:19445",
+         n:"Host 只 bind 127.0.0.1，公网不可达。安全边界靠隧道，不靠鉴权。"},
+        {f:2,t:3,k:"req",h:"ws.ts 鉴权后分发",
+         code:'Authorization: Bearer <device-token>\nframe.jsonrpc === "2.0"  ✓\n→ service.handle("turn/start", params, {device})',
+         n:"帧形状、1 MiB 上限、文本帧限制都在这一层。业务错误一律转成 JSON-RPC error。"},
+        {f:3,t:4,k:"req",h:"会话锁内准入，交给驱动器",
+         code:'start({ turnId, cwd, sessionFile, provider,\n  modelId, text, images, requestApproval, onEvent })',
+         n:"同一时刻一个会话只有一个 turn。admission 为 queue 时先建 queued 占位，否则直接 SESSION_BUSY。"},
+        {f:4,t:5,k:"req",h:"Pi 会话启动并下发 prompt",
+         code:'await session.prompt(text, { images, streamingBehavior:"followUp" })',
+         n:"每 turn 新建 ModelRuntime，注册 provider 为 openai-completions，会话文件复用原生 JSONL。"},
+        {f:5,t:4,k:"evt",h:"第一条文本增量",
+         code:'{ kind:"item.delta",\n  payload:{ itemId:"i_1", itemType:"message", delta:"日志已" } }',
+         n:"Pi 推的是累计快照；Driver 取 assistantMessageEvent.text_delta，天然就是增量。"},
+        {f:4,t:3,k:"evt",h:"AgentEvent 进入协议层",
+         code:"handleAgentEvent(sessionId, turnId, event)",
+         n:"同 turn 的事件挂在一条 turnEventChains 上，串行处理，顺序不会乱。"},
+        {f:3,t:3,k:"evt",h:"先落盘，再广播",
+         code:'journal.append("session","item.delta",{…})\n→ { epoch:"e7", sequence:42 }',
+         n:"append 内部也是串行 promise 链：appendFile 完成后才进内存缓冲并投给订阅者。"},
+        {f:3,t:0,k:"evt",h:"推给客户端",
+         code:'{"jsonrpc":"2.0","method":"events/event",\n "params":{"event":{"sequence":42,"kind":"item.delta",…}}}',
+         n:"订阅建立时先取 starting 游标再 replay，replay 与实时事件之间没有缝。"},
+        {f:5,t:3,k:"evt",h:"agent_settled 收尾",
+         code:'{ kind:"turn.completed", payload:{ turnId:"t_1" } }',
+         n:"settleTurn 先把状态写成 completed，再序列化 payload，所以事件里的 turn 已经是终态。"},
+        {f:3,t:3,k:"evt",h:"落库并拉下一个",
+         code:"turnStore.upsert(record)\ndrainQueue(sessionId)",
+         n:"排队中的下一个 turn 在此刻启动；没有排队就原地结束。"}
+      ]
+    },
+    approval: {
+      label:"工具审批",
+      steps:[
+        {f:5,t:4,k:"req",h:"Pi 触发 tool_call 扩展点",
+         code:'pi.on("tool_call", async (ev) =>\n  requestApproval(ev.toolName, ev.input))',
+         n:"这是 Driver 注册的唯一扩展工厂，其它扩展全部关闭。"},
+        {f:4,t:3,k:"req",h:"向协议层要一个决定",
+         code:'requestApproval("bash", { cmd:"rm -rf build" })',
+         n:"permissionMode 为 auto 的会话直接返回 true，根本不生成审批。"},
+        {f:3,t:3,k:"req",h:"生成 approvalId 与 revision",
+         code:'{ id:"ap_3", revision:17, kind:"tool",\n  toolName:"bash", input:{…}, expiresAt:null }',
+         n:"revision 单调递增，客户端回传旧 revision 会得到 APPROVAL_STALE。"},
+        {f:3,t:0,k:"evt",h:"approval.requested",
+         code:'{"kind":"approval.requested","params":{"approval":{…}}}',
+         n:"审批不是原生 JSONL 的一部分，重连时必须从内存重放，否则卡片消失、turn 卡死。"},
+        {f:0,t:3,k:"req",h:"用户选择 allow-session",
+         code:'{"method":"approval/respond",\n "params":{"approvalId":"ap_3","decision":"allow-session"}}',
+         n:"同一个工具名会进会话级白名单，后续同名调用不再弹。"},
+        {f:3,t:3,k:"evt",h:"记白名单并回执",
+         code:'allowedSessionTools.add(sessionId, "bash")\nemit("session","approval.resolved",{status:"allowed"})',
+         n:"客户端只按 approval.resolved 收敛卡片，所以这一步不能省。"},
+        {f:3,t:4,k:"req",h:"放行",
+         code:"resolve(true)",
+         n:"promise 解除阻塞，Pi 继续执行工具。"},
+        {f:4,t:5,k:"req",h:"不返回 block",
+         code:"return undefined; // 允许执行",
+         n:"返回 { block:true, reason } 才是拒绝，工具不会运行。"}
+      ]
+    },
+    interrupt: {
+      label:"中断",
+      steps:[
+        {f:0,t:3,k:"req",h:"turn/interrupt",
+         code:'{"method":"turn/interrupt","params":{"turnId":"t_1"}}',
+         n:"重复中断一个已终态的 turn，直接返回同一终态，不产生第二次执行或事件。"},
+        {f:3,t:3,k:"req",h:"先标记，再由 stopTurn 收口",
+         code:"turn.stopRequested = true",
+         n:"这个标记让后面 abort 引发的 turn.failed 被识别为「不是真失败」。"},
+        {f:3,t:4,k:"req",h:"请求驱动中止",
+         code:"await turn.handle.abort()",
+         n:"abort 之后不能立刻等 wait：驱动可能正卡在审批上。"},
+        {f:3,t:3,k:"req",h:"先释放挂起的审批",
+         code:"settleApprovalsForTurn(turnId) // 全部 resolve(false)",
+         n:"不释放，wait 永不 settle，整个 stopTurn 就地死锁。"},
+        {f:4,t:5,k:"req",h:"session.abort()",
+         code:"await session?.abort()",
+         n:"Pi 侧真正的执行终止点。"},
+        {f:5,t:4,k:"evt",h:"abort 引发 turn.failed",
+         code:'{ kind:"turn.failed", payload:{ error:"aborted" } }',
+         n:"看起来像失败，实际是停止的副作用。"},
+        {f:4,t:3,k:"evt",h:"被吞掉",
+         code:"if (stopRequested) return; // 不是真失败",
+         n:"终态由 stopTurn 独占写入，处理器不再插手。"},
+        {f:3,t:0,k:"evt",h:"写 interrupted 并清队列",
+         code:'settleTurn(id,"interrupted")\nemit("turn.interrupted",{turn})\n// 排队中的 turn 一并 canceled',
+         n:"不清理队列，后面的 turn 会永远停在 queued。"}
+      ]
+    }
+  };
+
+  var rail = $("#rail"), cap = $("#cap"), logBody = $("#logBody"), scenBox = $("#scen");
+  var stEls = [], dot, cur = 0, playing = false, timer = null, speed = 1, scenKey = "normal";
+
+  STATIONS.forEach(function(s){
+    var d = document.createElement("div");
+    d.className = "st";
+    d.style.setProperty("--c", s[1]);
+    d.style.setProperty("--bg", rgba(s[1], .16));
+    d.textContent = s[0];
+    rail.appendChild(d);
+    stEls.push(d);
+  });
+  dot = document.createElement("div");
+  dot.className = "dot";
+  rail.appendChild(dot);
+
+  Object.keys(SCENARIOS).forEach(function(k){
+    var b = document.createElement("button");
+    b.textContent = SCENARIOS[k].label;
+    b.setAttribute("aria-pressed", k===scenKey ? "true":"false");
+    b.addEventListener("click", function(){
+      scenKey = k;
+      $$("#scen button").forEach(function(x){ x.setAttribute("aria-pressed","false"); });
+      b.setAttribute("aria-pressed","true");
+      reset();
+    });
+    scenBox.appendChild(b);
+  });
+
+  function steps(){ return SCENARIOS[scenKey].steps; }
+
+  function centerOf(i){
+    var el = stEls[i];
+    return el.offsetLeft + el.offsetWidth/2;
+  }
+
+  function placeDot(i, kind){
+    var x = centerOf(i);
+    dot.style.transform = "translateX(" + (x-6) + "px)";
+    dot.classList.toggle("evt", kind === "evt");
+  }
+
+  function paint(i){
+    var s = steps()[i];
+    stEls.forEach(function(el){ el.classList.remove("on"); });
+    stEls[s.f].classList.add("on");
+    stEls[s.t].classList.add("on");
+    placeDot(s.t, s.k);
+    if(s.f === s.t){ dot.classList.remove("pulse"); void dot.offsetWidth; dot.classList.add("pulse"); }
+
+    cap.innerHTML =
+      '<div class="cap-top"><span class="cap-n">STEP '+(i+1)+" / "+steps().length+"</span>"+
+      '<span class="tag '+s.k+'">'+(s.k==="req"?"REQUEST":"EVENT")+"</span>"+
+      "<h4>"+s.h+"</h4></div>"+
+      '<pre class="code">'+esc(s.code)+"</pre>"+
+      '<p class="note">'+s.n+"</p>";
+  }
+
+  function logLine(i){
+    var s = steps()[i];
+    var d = document.createElement("div");
+    d.className = "logline " + s.k;
+    var arrow = s.k === "req" ? "→" : "←";
+    var sq = "#" + ("0" + (i+1)).slice(-2);
+    d.innerHTML = '<span class="sq">'+sq+"</span>"+
+      "<span>"+arrow+" "+STATIONS[s.f][0]+" → "+STATIONS[s.t][0]+"</span>";
+    logBody.appendChild(d);
+    logBody.scrollTop = logBody.scrollHeight;
+  }
+
+  function reset(){
+    stop();
+    cur = 0;
+    logBody.innerHTML = "";
+    stEls.forEach(function(el){ el.classList.remove("on"); });
+    placeDot(0, "req");
+    paint(0);
+    logLine(0);
+    $("#prev").disabled = true;
+    $("#next").disabled = steps().length <= 1;
+  }
+
+  function go(delta){
+    var next = cur + delta;
+    if(next < 0 || next >= steps().length) return false;
+    cur = next;
+    paint(cur);
+    logLine(cur);
+    $("#prev").disabled = cur === 0;
+    $("#next").disabled = cur === steps().length - 1;
+    return true;
+  }
+
+  function stop(){
+    playing = false;
+    if(timer){ clearTimeout(timer); timer = null; }
+    $("#play").textContent = "▶ 播放";
+  }
+
+  function tick(){
+    if(!playing) return;
+    if(!go(1)){ stop(); return; }
+    timer = setTimeout(tick, 1500 * speed);
+  }
+
+  $("#play").addEventListener("click", function(){
+    if(playing){ stop(); return; }
+    if(cur >= steps().length - 1) reset();
+    playing = true;
+    this.textContent = "❚❚ 暂停";
+    timer = setTimeout(tick, 500);
+  });
+  $("#next").addEventListener("click", function(){ stop(); go(1); });
+  $("#prev").addEventListener("click", function(){ stop(); go(-1); });
+  $("#reset").addEventListener("click", reset);
+  $$("#speed button").forEach(function(b){
+    b.addEventListener("click", function(){
+      speed = parseFloat(b.getAttribute("data-s"));
+      $$("#speed button").forEach(function(x){ x.setAttribute("aria-pressed","false"); });
+      b.setAttribute("aria-pressed","true");
+    });
+  });
+  window.addEventListener("resize", function(){
+    var s = steps()[cur];
+    placeDot(s.t, s.k);
+  });
+
+  reset();
+
+  /* ---------- event families ---------- */
+  var FAMS = [
+    ["turn 生命周期",4,C.proto], ["消息流",2,C.event], ["工具调用",3,C.access],
+    ["审批",2,C.agent], ["输入",2,C.store], ["会话 / 宿主",5,"#8b8375"]
+  ];
+  FAMS.forEach(function(f){
+    var d = document.createElement("span");
+    d.className = "fchip";
+    d.style.setProperty("--c", f[2]);
+    d.innerHTML = f[0]+"<b>"+f[1]+"</b>";
+    $("#fam").appendChild(d);
+  });
+
+  /* ---------- state machine ---------- */
+  var SM = [
+    {e:0, from:"queued", to:"running"},
+    {e:1, from:"queued", to:"canceled"},
+    {e:2, from:"running", to:"completed"},
+    {e:3, from:"running", to:"failed"},
+    {e:4, from:"running", to:"interrupted"},
+    {e:5, from:"running", to:"uncertain"}
+  ];
+  var SC = {queued:"#b58cf0",canceled:"#8f74c4",running:"#f0a93c",completed:"#9fc95c",
+            failed:"#e2554d",interrupted:"#62b6e8",uncertain:"#8b8375"};
+  var RULES = {
+    queued:{ t:"queued · 只在 admission 为 queue 时出现", p:"占位 turn 已经落盘，客户端能看到它排队。turn/cancel 可以直接把它取消；中断前一个 turn 会连带取消它，否则永久停在 queued。" },
+    running:{ t:"running · 唯一持有执行句柄的状态", p:"审批挂起时仍记为 running。stopRequested 一旦置位，处理器就不再接受 abort 引发的 turn.failed —— 终态由 stopTurn 独占写入。" },
+    completed:{ t:"completed · 两个来源", p:"驱动发来 agent_settled，或者 handle.wait() resolve 后由宿主补发。后者是兜底：驱动漏发终态事件时，resolved 的 wait 本身才是权威。" },
+    failed:{ t:"failed · 真的出错", p:"payload 带 error。结算时会清空该 turn 的所有挂起审批，否则工具结果会被一个已经消失的 turn 等待。" },
+    interrupted:{ t:"interrupted · 用户主动停止", p:"abort 后先释放审批，再等 wait 落地。排队中的 turn 一并取消并各自上报，不能留成僵尸队列项。" },
+    canceled:{ t:"canceled · 只能从 queued 进入", p:"turn/cancel 走 stopTurn 的 queued 分支：从队列摘除、结算、发一个 turn.completed 事件 —— 冻结事件表里没有 turn.canceled。" },
+    uncertain:{ t:"uncertain · 重启后的默认答案", p:"进程重启后无法证明旧执行已停，也无法证明它没产出。因此一律降级为 uncertain，settledReason 为 agent_restarted_unconfirmed，从不自动续跑。" }
+  };
+
+  var nodes = $$("#nodes .node");
+  var edges = $$("#edges .edge");
+  var elabels = $$("#elabels .elabel");
+
+  function selectState(id){
+    nodes.forEach(function(n){
+      var on = n.getAttribute("data-id") === id;
+      n.classList.toggle("on", on);
+      n.classList.toggle("dim", !on);
+    });
+    var hot = {};
+    SM.forEach(function(s){ if(s.from === id || s.to === id) hot[s.e] = true; });
+    edges.forEach(function(p){
+      var i = +p.getAttribute("data-e");
+      p.classList.toggle("hot", !!hot[i]);
+      p.setAttribute("marker-end", hot[i] ? "url(#arwHot)" : "url(#arw)");
+    });
+    elabels.forEach(function(t){
+      var i = +t.getAttribute("data-e");
+      t.classList.toggle("hot", !!hot[i]);
+      t.classList.toggle("dim", !hot[i]);
+    });
+    var r = RULES[id];
+    var box = $("#smcap");
+    box.style.setProperty("--c-proto", SC[id]);
+    box.innerHTML = "<h4>"+r.t+"</h4><p>"+r.p+"</p>";
+  }
+  nodes.forEach(function(n){
+    n.addEventListener("click", function(){ selectState(n.getAttribute("data-id")); });
+  });
+  selectState("running");
+
+  /* ---------- cursor demo ---------- */
+  var TOTAL = 40, WATERMARK = 8;
+  var cursor = 22, epochBroken = false;
+  var ticks = $("#ticks"), slider = $("#cslider"), cval = $("#cval"), verdict = $("#verdict");
+
+  for(var i=1;i<=TOTAL;i++){
+    var t = document.createElement("div");
+    t.className = "tk";
+    ticks.appendChild(t);
+  }
+  var tickEls = $$(".tk", ticks);
+
+  function paintTicks(){
+    tickEls.forEach(function(el, idx){
+      var seq = idx + 1;
+      el.className = "tk";
+      if(seq <= WATERMARK) el.classList.add("evicted");
+      else if(seq <= cursor) el.classList.add("done");
+      if(seq === cursor) el.classList.add("cur");
+    });
+    cval.textContent = "cursor = " + cursor;
+  }
+
+  slider.addEventListener("input", function(){
+    cursor = parseInt(slider.value,10);
+    paintTicks();
+    verdict.className = "verdict";
+    verdict.textContent = "游标已设为 " + cursor + "，点「重连」看服务端怎么回答。";
+  });
+
+  $("#reconnect").addEventListener("click", function(){
+    if(epochBroken){
+      verdict.className = "verdict bad";
+      verdict.textContent = "✗ CURSOR_EXPIRED（epoch 已变）\n进程重启后 epoch 换新，跨重启的任何游标都失效，客户端必须全量 resync。";
+      return;
+    }
+    if(cursor < WATERMARK){
+      verdict.className = "verdict bad";
+      verdict.textContent = "✗ CURSOR_EXPIRED（水位以下）\nseq 1.." + WATERMARK + " 已被裁剪。服务端不返回残缺后缀，直接要求 resync。";
+      return;
+    }
+    var n = TOTAL - cursor;
+    verdict.className = "verdict ok";
+    verdict.textContent = "✓ replay " + n + " 条事件，从 seq " + (cursor+1) + " 接上。\n随后 starting 游标与实时事件无缝衔接，客户端不需要自己判新旧。";
+  });
+
+  $("#restart").addEventListener("click", function(){
+    epochBroken = !epochBroken;
+    this.textContent = epochBroken ? "已重启 · epoch 变了" : "模拟进程重启";
+    verdict.className = "verdict";
+    verdict.textContent = epochBroken
+      ? "epoch 已换新。现在任何旧游标都不可能命中。"
+      : "epoch 恢复。再试一次重连。";
+  });
+
+  paintTicks();
+
+  /* ---------- storage tree ---------- */
+  var TREE = [
+    ["config.json","每项可选；CLI > env > 该文件 > 默认","#8b8375"],
+    ["data",[
+      ["meta",[
+        ["catalog.json","项目与会话元数据",C.session],
+        ["events.jsonl","追加式事件日志，进度可回放",C.event],
+        ["turns.json","turn 生命周期，重启据此对账",C.proto],
+        ["tokens.json","设备与配对令牌，只存哈希",C.access],
+        ["idempotency.json","写操作结果，24 小时窗口",C.store]
+      ], C.event],
+      ["media",[
+        ["index.json","附件索引与状态机",C.agent],
+        ["blobs/","按 sha256 命名的内容文件",C.agent]
+      ], C.agent],
+      ["staging/","上传中的 .part，一小时过期",C.agent],
+      ["providers",[
+        ["providers.json","索引，不含密钥",C.store],
+        ["secrets/","每个 provider 一个 0600 文件",C.store]
+      ], C.store],
+      ["skills",[
+        ["versions/{名}/{哈希}/","内容寻址，发布后只读",C.session]
+      ], C.session],
+      ["sessions/","原生 Pi v3 JSONL",C.session]
+    ], C.session],
+    ["agent/","Pi 全局资源与技能搜索路径",C.access],
+    ["logs/","运行日志","#8b8375"],
+    ["run/","host.pid，供 systemd 与运维定位","#8b8375"]
+  ];
+
+  function buildTree(node){
+    var frag = document.createDocumentFragment();
+    node.forEach(function(item){
+      var name = item[0], note = item[1], color = item[2] || "#8b8375";
+      if(Array.isArray(note)){
+        var d = document.createElement("details");
+        d.className = "folder";
+        d.style.setProperty("--c", color);
+        if(name === "data" || name === "meta" || name === "media" || name === "providers" || name === "skills") d.open = true;
+        var s = document.createElement("summary");
+        s.innerHTML = '<span class="fname">'+esc(name)+"</span>";
+        d.appendChild(s);
+        d.appendChild(buildTree(note));
+        frag.appendChild(d);
+      }else{
+        var row = document.createElement("div");
+        row.className = "frow";
+        row.style.setProperty("--c", color);
+        row.innerHTML = '<span class="fname">'+esc(name)+'</span><span class="fnote">'+esc(note)+"</span>";
+        frag.appendChild(row);
+      }
+    });
+    return frag;
+  }
+  $("#tree").appendChild(buildTree(TREE));
+})();
+</script>
+</body>
+</html>

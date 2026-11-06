@@ -29,6 +29,8 @@ struct ServersScreen: View {
     @State private var isDeleting = false
     @State private var pairingToken = ""
     @State private var pairingMessage: String?
+    /// 已有设备令牌时，是否展开「使用新的一次性令牌重新配对」表单（U17）。
+    @State private var isRepairingWithNewToken = false
     @State private var resultMessage: String?
     /// 是否正在打开系统文件选择器。
     @State private var isPickingKey = false
@@ -65,6 +67,9 @@ struct ServersScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: PISpacing.s24) {
                 statusBanner
+                if let host = existingHost, pairingPolicy(for: host).isRepairPromoted {
+                    promotedRepairSection(for: host)
+                }
                 connectionGroup
                 if let host = existingHost {
                     directSection(for: host)
@@ -214,6 +219,9 @@ struct ServersScreen: View {
                 }
             }
         }
+        // U13：保存期间禁止再改连接身份。点击「保存并测试连接」时已冻结整份提交快照，
+        // 再让这些字段变化只会误导用户以为新值属于本次提交。
+        .disabled(isSaving)
     }
 
     private var authGroup: some View {
@@ -321,20 +329,31 @@ struct ServersScreen: View {
                 }
             }
         }
+        // U13：认证方式与凭证同样在保存期间冻结，避免「提交 A、界面显示 B」。
+        .disabled(isSaving)
     }
 
     private var saveButton: some View {
         VStack(alignment: .leading, spacing: PISpacing.s8) {
             PIPrimaryButton(
                 title: isSaving ? "正在测试连接…" : "保存并测试连接",
-                isEnabled: !isSaving && !isPairing && !isDeleting
+                isEnabled: !isSaving && !isPairing && !isDeleting,
+                identifier: "servers.saveAndTest"
             ) {
                 saveAndTest()
             }
-            Text("测试会真实登录一次服务器。")
-                .font(PIFont.caption)
-                .foregroundStyle(PIColor.text3)
-                .fixedSize(horizontal: false, vertical: true)
+            if isSaving {
+                Text("保存中：本次提交使用点击时的地址、端口、用户名、认证方式与凭证；保存完成前以上字段不可编辑，完成后再改属于下一次提交。")
+                    .font(PIFont.caption)
+                    .foregroundStyle(PIColor.text2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("servers.saveFrozenHint")
+            } else {
+                Text("测试会真实登录一次服务器。")
+                    .font(PIFont.caption)
+                    .foregroundStyle(PIColor.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let resultMessage {
                 PIInlineMessage(kind: .info, text: "测试结果：\(resultMessage)")
             }
@@ -456,11 +475,45 @@ struct ServersScreen: View {
 
     // MARK: - PI-adaptor 连接与危险区
 
+    private func pairingPolicy(for host: HostRecord) -> PairingEntryPolicy {
+        PairingEntryPolicy(
+            hasDeviceToken: KeychainStore.loadDeviceToken(hostID: host.id) != nil,
+            isPaired: host.pairedAt != nil,
+            authFailure: pairingAuthFailure(for: host)
+        )
+    }
+
+    /// 认证失败分类只对「当前服务器」有效：连接状态属于当前 RACP 连接。
+    private func pairingAuthFailure(for host: HostRecord) -> PairingAuthFailure {
+        guard connection.currentCatalogHostID == host.id else { return .none }
+        return PairingEntryPolicy.authFailure(from: connection.connectionStatus)
+    }
+
+    /// U17：连接被服务器拒绝（令牌失效 / 设备撤销）时，把就地重新配对入口提到页面最前面并解释。
+    @ViewBuilder
+    private func promotedRepairSection(for host: HostRecord) -> some View {
+        let policy = pairingPolicy(for: host)
+        PIStatusBanner(
+            kind: .danger,
+            text: policy.repairTitle,
+            detail: policy.repairExplanation,
+            actionTitle: isRepairingWithNewToken ? nil : policy.repairActionTitle,
+            action: { isRepairingWithNewToken = true }
+        )
+        .accessibilityIdentifier("servers.pairing.repairBanner")
+        if isRepairingWithNewToken {
+            PIGroup("重新配对") {
+                pairingTokenForm(for: host, actionTitle: repairButtonTitle)
+                    .accessibilityIdentifier("servers.pairing.repairForm")
+            }
+        }
+    }
+
     private func pairingSection(for host: HostRecord) -> some View {
-        let hasDeviceToken = KeychainStore.loadDeviceToken(hostID: host.id) != nil
+        let policy = pairingPolicy(for: host)
         return PIGroup(
             "PI-adaptor 连接",
-            footer: "配对令牌一次性有效；设备令牌只保存在本机 Keychain。"
+            footer: "配对令牌一次性有效；设备令牌只保存在本机 Keychain。重新配对成功前保留现有设备令牌。"
         ) {
             PIListRow(
                 title: "安装或修复 PI-adaptor",
@@ -471,7 +524,7 @@ struct ServersScreen: View {
                 showsDivider: true,
                 action: { push(.installAdaptor(host.id)) }
             )
-            if hasDeviceToken {
+            if policy.hasDeviceToken {
                 PIListRow(
                     title: "已保存设备令牌",
                     subtitle: connection.state.displayText,
@@ -487,26 +540,32 @@ struct ServersScreen: View {
                     iconTint: PIColor.accent,
                     isEnabled: !isSaving && !isPairing && !isDeleting,
                     showsChevron: true,
-                    showsDivider: false,
+                    showsDivider: true,
                     action: { connectExisting(host) }
                 )
-            } else {
-                VStack(alignment: .leading, spacing: PISpacing.s8) {
-                    PIFormField(
-                        label: "一次性配对令牌",
-                        hint: "安装流程会输出 ppt2.… 令牌"
-                    ) {
-                        SecureField("ppt2.…", text: $pairingToken)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
+                // U17：有设备令牌时也提供「使用新的一次性令牌重新配对」。
+                // 失败被拒绝时该入口已在页面顶部展开，这里不再重复一份表单。
+                if policy.showsRepairEntry, !policy.isRepairPromoted {
+                    if isRepairingWithNewToken {
+                        pairingTokenForm(for: host, actionTitle: repairButtonTitle)
+                            .accessibilityIdentifier("servers.pairing.repairForm")
+                    } else {
+                        PIListRow(
+                            title: policy.repairActionTitle,
+                            subtitle: policy.repairRowSubtitle,
+                            icon: "arrow.triangle.2.circlepath",
+                            iconTint: PIColor.warning,
+                            isEnabled: !isSaving && !isPairing && !isDeleting,
+                            showsChevron: true,
+                            showsDivider: false,
+                            action: { isRepairingWithNewToken = true }
+                        )
+                        .accessibilityIdentifier("servers.pairing.repair")
                     }
-                    PIPrimaryButton(title: isPairing ? "正在配对…" : "配对并连接") {
-                        pairAndConnect(host)
-                    }
-                    .disabled(isPairing || isSaving || isDeleting || pairingToken.piTrimmed.isEmpty)
                 }
-                .padding(.horizontal, PISpacing.s16)
-                .padding(.vertical, PISpacing.s12)
+            } else {
+                pairingTokenForm(for: host, actionTitle: "配对并连接")
+                    .accessibilityIdentifier("servers.pairing.form")
             }
             if let pairingMessage {
                 Text(pairingMessage)
@@ -515,8 +574,45 @@ struct ServersScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, PISpacing.s16)
                     .padding(.vertical, PISpacing.s12)
+                    .accessibilityIdentifier("servers.pairing.message")
             }
         }
+    }
+
+    /// 同一套令牌表单：首次配对与「用新令牌重新配对」共用，不新建页面。
+    private func pairingTokenForm(for host: HostRecord, actionTitle: String) -> some View {
+        VStack(alignment: .leading, spacing: PISpacing.s8) {
+            PIFormField(
+                label: "一次性配对令牌",
+                hint: "安装流程会输出 ppt2.… 令牌"
+            ) {
+                SecureField("ppt2.…", text: $pairingToken)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .disabled(isPairing || isSaving)
+                    .accessibilityIdentifier("servers.pairing.token")
+            }
+            PIPrimaryButton(
+                title: actionTitle,
+                isEnabled: !isPairing && !isSaving && !isDeleting,
+                identifier: "servers.pairing.submit"
+            ) {
+                pairAndConnect(host)
+            }
+            .disabled(pairingToken.piTrimmed.isEmpty)
+            if isPairing {
+                Text("正在配对：成功后会保存新设备令牌并自动连接；失败时旧设备令牌与本次输入的令牌都会保留。")
+                    .font(PIFont.caption)
+                    .foregroundStyle(PIColor.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, PISpacing.s16)
+        .padding(.vertical, PISpacing.s12)
+    }
+
+    private var repairButtonTitle: String {
+        isPairing ? "正在配对…" : "重新配对并连接"
     }
 
     private func pairAndConnect(_ host: HostRecord) {
@@ -526,8 +622,13 @@ struct ServersScreen: View {
             pairingMessage = "本机没有可用凭证：请先保存并测试连接"
             return
         }
-        let token = pairingToken
-        pairingToken = ""
+        // U17：令牌在成功前不丢弃——失败时用户不需要重新输入，旧设备令牌也不被覆盖
+        // （`ConnectionModel.pair` 只在服务器确认成功后写 Keychain）。
+        let token = pairingToken.piTrimmed
+        guard !token.isEmpty else {
+            pairingMessage = "请先输入新的一次性配对令牌"
+            return
+        }
         isPairing = true
         pairingMessage = nil
         let operationGeneration = model.beginHostOperation(hostID: host.id)
@@ -540,6 +641,8 @@ struct ServersScreen: View {
                 )
                 model.markHostPaired(id: host.id)
                 await MainActor.run {
+                    pairingToken = ""
+                    isRepairingWithNewToken = false
                     pairingMessage = "配对成功；设备令牌已保存"
                 }
                 if model.canApplyHostOperation(operationGeneration, hostID: host.id) {
@@ -551,7 +654,9 @@ struct ServersScreen: View {
                 }
             } catch {
                 await MainActor.run {
-                    pairingMessage = "配对失败：\(ConnectionErrorText.describe(error))"
+                    // 失败只报原因：旧设备令牌仍保留，本次输入也留在输入框里可重试。
+                    pairingMessage = "配对失败：\(ConnectionErrorText.describe(error))；"
+                        + "旧设备令牌仍保留，可重试；如果令牌已过期，请重启 PI-adaptor 取新令牌"
                 }
                 if model.canApplyHostOperation(operationGeneration, hostID: host.id),
                    let current = model.currentHost {
@@ -719,76 +824,104 @@ struct ServersScreen: View {
 
     private func saveAndTest() {
         guard !isSaving, !isPairing, !isDeleting else { return }
-        errors = validateDraft()
-        guard errors.isValid else { return }
 
-        let trimmedName = draft.name.piTrimmed
-        let displayName = trimmedName.isEmpty ? draft.host.piTrimmed : trimmedName
-        let hostID = activeHostID
-        let newHost = draft.host.piTrimmed
-        let newPort = Int(draft.port.piTrimmed) ?? existingHost?.port ?? 22
-        let account = KeychainStore.account(
-            username: draft.username.piTrimmed,
-            host: newHost,
-            port: newPort
+        // U13：点击瞬间冻结整份提交快照。之后校验、Keychain 账号、凭证、身份变化判断、
+        // 记录更新与连接测试一律只读 `intent`，不再读实时 `draft` / 实时记录。
+        let submittedDraft = draft
+        let submittedExisting = existingHost
+        let submittedIsEditing = isEditing
+        let submittedRequiresSecret = !submittedIsEditing
+            || submittedExisting?.authKind != submittedDraft.authKind
+        let validation = HostValidator.validate(
+            submittedDraft,
+            requiresSecret: submittedRequiresSecret
         )
-        let typed = draft.secret.piTrimmed
+        errors = validation
+        guard validation.isValid else { return }
+
+        let submittedHostID = activeHostID
+        let account = KeychainStore.account(
+            username: submittedDraft.username.piTrimmed,
+            host: submittedDraft.host.piTrimmed,
+            port: Int(submittedDraft.port.piTrimmed) ?? submittedExisting?.port ?? 22
+        )
+        let typed = submittedDraft.secret.piTrimmed
         let credential: SSHCredential?
         if typed.isEmpty {
             credential = KeychainStore.loadCredential(account: account)
         } else {
-            let newCredential: SSHCredential = draft.authKind == .password
-                ? .password(draft.secret)
+            let newCredential: SSHCredential = submittedDraft.authKind == .password
+                ? .password(submittedDraft.secret)
                 : .privateKey(
-                    openSSHText: draft.secret,
-                    passphrase: draft.passphrase.isEmpty ? nil : draft.passphrase
+                    openSSHText: submittedDraft.secret,
+                    passphrase: submittedDraft.passphrase.isEmpty ? nil : submittedDraft.passphrase
                 )
             let writeStatus = KeychainStore.saveCredentialStatus(
                 newCredential,
-                kind: draft.authKind,
+                kind: submittedDraft.authKind,
                 account: account
             )
             guard writeStatus == errSecSuccess else {
+                // 凭证没写进 Keychain 就不继续测试：否则会拿一份本机并不存在的凭证去连。
                 errors.secret = KeychainStore.describe(writeStatus)
+                resultMessage = "凭证未能写入 Keychain：本次没有测试连接"
                 return
             }
             credential = newCredential
         }
         guard let credential else {
-            errors.secret = draft.authKind == .password ? "请填写服务器密码" : "请粘贴私钥内容"
+            errors.secret = submittedDraft.authKind == .password ? "请填写服务器密码" : "请粘贴私钥内容"
             resultMessage = nil
             return
         }
-        let requiresReconnect = isEditing
-            && existingHost?.isCurrent == true
-            && (connectionIdentityChanged(draft) || !draft.secret.piTrimmed.isEmpty)
+
+        let intent = HostSaveIntent.freeze(
+            hostID: submittedHostID,
+            draft: submittedDraft,
+            existing: submittedExisting,
+            account: account,
+            credential: credential
+        )
         isSaving = true
         resultMessage = nil
         Task { @MainActor in
+            defer { isSaving = false }
+
             var identityGeneration: Int?
-            if requiresReconnect, let hostID {
+            if intent.requiresReconnect, let hostID = intent.hostID {
                 identityGeneration = await model.prepareHostIdentityChange(id: hostID)
             }
             defer {
-                if requiresReconnect, let hostID, let identityGeneration {
+                if let hostID = intent.hostID, let identityGeneration {
                     model.finishHostIdentityChange(id: hostID, generation: identityGeneration)
                 }
             }
 
+            // 代次核验之一（记录更新前）：准备阶段丢失代次说明服务器已被切走，不得再写记录。
+            if let hostID = intent.hostID,
+               !intent.canApplyIdentityChange(
+                   identityGeneration: identityGeneration,
+                   isValid: { model.canApplyHostIdentityChange(id: hostID, generation: $0) }
+               ) {
+                resultMessage = "服务器已切换：本次保存未提交，请重新保存一次"
+                return
+            }
+
             let record: HostRecord
-            if let hostID {
-                guard model.updateHost(id: hostID, with: draft),
+            if let hostID = intent.hostID {
+                guard model.updateHost(id: hostID, with: intent.draft),
                       let updated = model.hosts.first(where: { $0.id == hostID })
                 else {
-                    errors = validateDraft()
-                    isSaving = false
+                    // 记录没更新成功就不测试：避免界面、Keychain 与测试结果分属不同记录。
+                    errors = intent.validationErrors
+                    resultMessage = "本机记录更新失败：本次没有测试连接"
                     return
                 }
                 record = updated
             } else {
-                guard let added = model.addHost(draft) else {
-                    errors = validateDraft()
-                    isSaving = false
+                guard let added = model.addHost(intent.draft) else {
+                    errors = intent.validationErrors
+                    resultMessage = "本机记录保存失败：本次没有测试连接"
                     return
                 }
                 // 转入该记录的编辑态：再次保存必须更新它，而不是新建第二条。
@@ -796,36 +929,27 @@ struct ServersScreen: View {
                 record = added
             }
 
-            let message = await connection.testConnection(record: record, credential: credential)
-            if requiresReconnect,
-               let hostID,
+            // 代次核验之二（连接测试前）：记录更新期间服务器被切走就不发起测试连接。
+            if let hostID = intent.hostID,
+               !intent.canApplyIdentityChange(
+                   identityGeneration: identityGeneration,
+                   isValid: { model.canApplyHostIdentityChange(id: hostID, generation: $0) }
+               ) {
+                resultMessage = "服务器已切换：记录已按本次提交保存，但未测试连接"
+                return
+            }
+
+            let message = await connection.testConnection(record: record, credential: intent.credential)
+            if intent.requiresReconnect,
+               let hostID = intent.hostID,
                let identityGeneration,
                message.hasPrefix("SSH 连接成功"),
                model.canApplyHostIdentityChange(id: hostID, generation: identityGeneration) {
                 await model.setCurrentHost(id: hostID)
             }
-            isSaving = false
             resultMessage = message
-            model.showToast("已保存「\(displayName)」")
+            model.showToast("已保存「\(intent.displayName)」")
         }
-    }
-
-    private func connectionIdentityChanged(_ draft: HostDraft) -> Bool {
-        guard let existing = existingHost else { return false }
-        return existing.host != draft.host.piTrimmed
-            || existing.port != (Int(draft.port.piTrimmed) ?? existing.port)
-            || existing.username != draft.username.piTrimmed
-            || existing.authKind != draft.authKind
-            || existing.hostPort != Int(draft.hostPort.piTrimmed)
-            || HostValidator.directConfigurationChanged(existing, draft)
-    }
-
-    private func validateDraft() -> HostDraftErrors {
-        // Changing credential type cannot reuse the previous type's secret.
-        HostValidator.validate(
-            draft,
-            requiresSecret: !isEditing || existingHost?.authKind != draft.authKind
-        )
     }
 }
 
