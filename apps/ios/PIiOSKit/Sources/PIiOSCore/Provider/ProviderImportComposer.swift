@@ -75,26 +75,28 @@ public enum ProviderImportComposer {
         apiKey: String,
         models: [ProviderModelSpec],
         setDefaultModel: Bool,
-        vendorKey requestedVendorKey: String = "custom"
+        vendorKey requestedVendorKey: String = "custom",
+        wireProtocol: String = "openai_compatible"
     ) -> ProviderImportComposition {
         let normalizedBaseURL = ECMAScriptString.trim(baseURL)
         let normalizedName = ECMAScriptString.trim(serviceName)
         let normalizedVendorKey = ECMAScriptString.trim(requestedVendorKey)
         let normalizedModels = models.map(normalize)
         let defaultModelId = setDefaultModel ? normalizedModels.first?.id : nil
+        let normalizedProtocol = ECMAScriptString.trim(wireProtocol)
 
         let input = ProviderCreateInput(
             name: normalizedName.isEmpty
                 ? defaultServiceName(for: normalizedBaseURL)
                 : normalizedName,
             vendorKey: normalizedVendorKey.isEmpty ? "custom" : normalizedVendorKey,
-            type: "openai_compatible",
-            protocol: "openai_compatible",
+            type: isSupportedProtocol(normalizedProtocol) ? "custom" : "openai_compatible",
+            protocol: normalizedProtocol.isEmpty ? "openai_compatible" : normalizedProtocol,
             authKind: "api_key_and_base_url",
             baseUrl: normalizedBaseURL,
             models: normalizedModels,
             secretValue: ECMAScriptString.trim(apiKey),
-            apiStyle: "chat_completions",
+            apiStyle: apiStyle(for: normalizedProtocol),
             defaultModelId: defaultModelId
         )
         let payload = ProviderImportPayload.make(
@@ -108,6 +110,35 @@ public enum ProviderImportComposer {
             payload: payload,
             issues: ProviderImportValidation.issues(in: payload)
         )
+    }
+
+    /// 线路协议对应的上游 `apiStyle`（契约 §4.3 的取值集合）。
+    public static func apiStyle(for wireProtocol: String) -> String {
+        switch ECMAScriptString.trim(wireProtocol) {
+        case "openai-completions": return "chat_completions"
+        case "openai-responses": return "responses"
+        case "anthropic-messages": return "anthropic_messages"
+        case "google-generative-ai": return "google_generative_ai"
+        default: return "chat_completions"
+        }
+    }
+
+    public static func isSupportedProtocol(_ wireProtocol: String) -> Bool {
+        ProviderVendorSchema.supportedProtocols.contains(ECMAScriptString.trim(wireProtocol))
+    }
+
+    /// `vendorKey` 在服务器上必须唯一。四种协议各自一个前缀，再按 Base URL
+    /// 取稳定后缀，同一网关重复导入会得到同一个 key，不同网关不会互相冲突。
+    public static func vendorKey(for wireProtocol: String, baseURL: String) -> String {
+        let normalized = ECMAScriptString.trim(wireProtocol)
+        let prefix = normalized.isEmpty ? "custom" : normalized
+        let url = ECMAScriptString.trim(baseURL)
+        guard !url.isEmpty else { return prefix }
+        var hash: UInt32 = 2_166_136_261
+        for byte in url.utf8 {
+            hash = (hash ^ UInt32(byte)) &* 16_777_619
+        }
+        return "\(prefix)-\(String(hash, radix: 16))"
     }
 
     public static func defaultServiceName(for rawURL: String) -> String {

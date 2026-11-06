@@ -40,6 +40,8 @@ public enum RACPMethod: String, CaseIterable, Sendable {
     case sessionHistory = "session/history"
     case sessionConfigure = "session/configure"
     case sessionRevoke = "session/revoke"
+    case sessionRename = "session/rename"
+    case sessionSuggestTitle = "session/suggest-title"
     case eventsSubscribe = "events/subscribe"
     case eventsUnsubscribe = "events/unsubscribe"
     case eventsAck = "events/ack"

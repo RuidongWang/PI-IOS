@@ -4,7 +4,7 @@ import XCTest
 ///
 /// 夹具 `online-queued-turns` 让 S1 处于运行中，并带两条排队指令：
 /// 一条有正文、一条只有附件数。断言队列区标题、正文/附件数回退、取消按钮
-/// 与输入栏的排队短提示都可见。
+/// 可见；输入框为空且 turn 运行时发送按钮应变为中止按钮，且不再有排队提示。
 final class QueuedTurnUITests: XCTestCase {
     private let app = XCUIApplication()
 
@@ -43,13 +43,19 @@ final class QueuedTurnUITests: XCTestCase {
             XCTAssertFalse(attachmentRow.label.contains("turn-queued-2"))
         }
 
-        // 两条排队项都可以取消；运行中时发送会排队，输入栏上方有一行短提示。
+        // 两条排队项都可以取消。
         let cancelOne = app.buttons["conversation.cancelQueued.turn-queued-1"]
         let cancelTwo = app.buttons["conversation.cancelQueued.turn-queued-2"]
         XCTAssertTrue(cancelOne.exists || app.buttons.matching(identifier: "取消").count >= 2)
         XCTAssertTrue(cancelTwo.exists || app.buttons.matching(identifier: "取消").count >= 2)
-        let hintByIdentifier = app.staticTexts["conversation.queueHint"]
-        let hintByLabel = app.staticTexts["当前 turn 运行中，发送将排队"]
-        XCTAssertTrue(hintByIdentifier.exists || hintByLabel.exists)
+
+        // 输入框为空 + turn 运行中：发送按钮变为中止按钮，排队提示已移除。
+        XCTAssertTrue(
+            app.buttons["conversation.interrupt"].waitForExistence(timeout: 5),
+            "空输入且有 turn 运行时必须显示中止按钮"
+        )
+        XCTAssertFalse(app.buttons["conversation.send"].exists)
+        XCTAssertFalse(app.staticTexts["conversation.queueHint"].exists)
+        XCTAssertFalse(app.staticTexts["当前 turn 运行中，发送将排队"].exists)
     }
 }

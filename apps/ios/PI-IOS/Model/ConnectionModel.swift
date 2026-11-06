@@ -1277,7 +1277,8 @@ final class ConnectionModel: ObservableObject {
     func discoverModels(
         record: HostRecord,
         baseURL: String,
-        apiKey: String
+        apiKey: String,
+        protocol wireProtocol: String? = nil
     ) async throws -> [DiscoveredModel] {
         guard cacheHostID == record.id, state.isOnline, let client else {
             throw RACPV2Error.notConnected
@@ -1292,6 +1293,7 @@ final class ConnectionModel: ObservableObject {
             client: client,
             requestURL: baseURL,
             apiKey: apiKey,
+            protocol: wireProtocol,
             timeout: RemoteProviderOperations.userVisibleTimeout
         )
     }
@@ -1518,6 +1520,32 @@ final class ConnectionModel: ObservableObject {
                 ])
             ])
         )
+    }
+
+    /// 让服务器上的 AI 根据首条指令生成会话标题。
+    func suggestSessionTitle(
+        sessionId: String,
+        instruction: String,
+        providerId: String,
+        modelId: String,
+        apiKey: String?,
+        thinkingLevel: String?
+    ) async throws -> String {
+        guard let client, state.isOnline else { throw RACPV2Error.notConnected }
+        return try await client.suggestSessionTitle(
+            sessionId: sessionId,
+            instruction: instruction,
+            providerId: providerId,
+            modelId: modelId,
+            apiKey: apiKey,
+            thinkingLevel: thinkingLevel
+        )
+    }
+
+    /// 把会话标题写回服务器，保证其他客户端看到同一个名字。
+    func renameSession(sessionId: String, title: String) async throws {
+        guard let client, state.isOnline else { throw RACPV2Error.notConnected }
+        try await client.renameSession(sessionId: sessionId, title: title)
     }
 
     func listAdaptorProviders() async throws -> [RACPV2Provider] {

@@ -71,6 +71,7 @@ struct AdaptorProvidersScreen: View {
                                             .background(PIColor.dangerSoft, in: Capsule())
                                     }
                                     .buttonStyle(.plain)
+                                    .accessibilityIdentifier("providers.delete.\(provider.name)")
                                 }
                             }
                         }
@@ -79,7 +80,7 @@ struct AdaptorProvidersScreen: View {
                 PIGroup("新增 provider") {
                     PIFormRow {
                         PIFormField(label: "名称") {
-                            TextField("DeepSeek", text: $name)
+                            TextField("localhost", text: $name)
                                 .disabled(isCreating)
                         }
                     }
@@ -100,7 +101,7 @@ struct AdaptorProvidersScreen: View {
                     }
                     PIFormRow {
                         PIFormField(label: "模型 ID") {
-                            TextField("deepseek-chat", text: $modelID)
+                            TextField("model-id", text: $modelID)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .disabled(isCreating)
@@ -158,7 +159,9 @@ struct AdaptorProvidersScreen: View {
             Button("删除", role: .destructive) {
                 if let provider = pendingDelete { Task { await delete(provider) } }
             }
+            .accessibilityIdentifier("providers.delete.confirm")
             Button("取消", role: .cancel) {}
+                .accessibilityIdentifier("providers.delete.cancel")
         } message: {
             Text("将从服务器删除该 provider 记录，并清除本机保存的密钥；不会自动把默认项切到其他 provider。")
         }

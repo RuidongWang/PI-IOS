@@ -38,25 +38,41 @@ public enum RemoteProviderOperations {
         client: any RACPV2Requesting,
         requestURL: String,
         apiKey: String,
+        protocol wireProtocol: String? = nil,
         timeout: TimeInterval = userVisibleTimeout
     ) async throws -> [DiscoveredModel] {
         guard !requestURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !apiKey.isEmpty
         else { throw ModelListError.invalidEndpoint }
+        var params: [String: JSONValue] = [
+            "baseUrl": .string(requestURL),
+            "apiKey": .string(apiKey),
+            "context": .object([
+                "requestId": .string("req_\(UUID().uuidString)"),
+            ]),
+        ]
+        if let wireProtocol, !wireProtocol.isEmpty {
+            params["protocol"] = .string(wireProtocol)
+        }
         let envelope: DiscoveryEnvelope
         do {
             envelope = try await client.v2Request(
                 method: RACPV2Method.providerDiscover.rawValue,
-                params: .object([
-                    "baseUrl": .string(requestURL),
-                    "apiKey": .string(apiKey),
-                    "context": .object([
-                        "requestId": .string("req_\(UUID().uuidString)"),
-                    ]),
-                ]),
+                params: .object(params),
                 timeout: timeout
             )
         } catch {
+            // 0.0.4 之前的 Host 不认识 `protocol` 参数，会以 INVALID_ARGUMENT 拒绝整条请求。
+            // 这类 Host 的发现只支持 Bearer 鉴权；退回不带协议的请求，保持旧 Host 可用。
+            if wireProtocol != nil, isRejectedProtocolArgument(error) {
+                return try await discoverModels(
+                    client: client,
+                    requestURL: requestURL,
+                    apiKey: apiKey,
+                    protocol: nil,
+                    timeout: timeout
+                )
+            }
             throw discoveryError(error)
         }
         guard !envelope.models.isEmpty else { throw ModelListError.emptyList }
@@ -73,6 +89,20 @@ public enum RemoteProviderOperations {
                 }
             )
         }.sorted { $0.modelId.localizedStandardCompare($1.modelId) == .orderedAscending }
+    }
+
+    /// 旧版 Host 会把不认识的 `protocol` 参数当作 INVALID_ARGUMENT 拒绝。
+    private static func isRejectedProtocolArgument(_ error: Error) -> Bool {
+        if let error = error as? RACPProviderDiscoveryError {
+            return error.code == "INVALID_ARGUMENT"
+        }
+        if let error = error as? RACPClientError, case let .server(code, _) = error {
+            return code == .invalidArgument
+        }
+        if let error = error as? RACPV2Error, case let .server(code, _) = error {
+            return code == "INVALID_ARGUMENT"
+        }
+        return false
     }
 
     private static func discoveryError(_ error: Error) -> ModelListError {

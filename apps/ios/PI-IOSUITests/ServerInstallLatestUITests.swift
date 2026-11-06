@@ -50,7 +50,7 @@ final class ServerInstallLatestUITests: XCTestCase {
         // 守住（App MARKETING_VERSION == host-release.json == BootstrapRelease）；
         // 跨版本复跑时可用 `PI_IOS_EXPECTED_RELEASE_VERSION` 覆盖。
         let expectedVersion = ProcessInfo.processInfo.environment["PI_IOS_EXPECTED_RELEASE_VERSION"]
-            ?? "0.0.3"
+            ?? "0.0.4"
         XCTAssertTrue(
             resolved.label.contains("PI-adaptor \(expectedVersion)"),
             "本次目标版本应为 PI-adaptor \(expectedVersion)，实际：\(resolved.label)\n\(dumpTexts(app))"

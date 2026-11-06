@@ -10,8 +10,8 @@ struct ModelsScreen: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var connection: ConnectionModel
 
-    @State private var serviceName = ""
-    @State private var baseURL = ""
+    @State private var serviceName = ProviderProtocolPreset.defaultServiceName
+    @State private var baseURL = ProviderProtocolPreset.defaultBaseURL
     @State private var apiKey = ""
     @State private var filter = ""
     @State private var modelDrafts: [EditableModelDraft] = []
@@ -23,43 +23,29 @@ struct ModelsScreen: View {
     @State private var keyWarning: String?
     @State private var selectedProvider: StoredModelProvider?
     @State private var deletionNotice: ProviderDeletionNotice?
-    @State private var authPreset: ProviderAuthPreset = .apiKey
-    @State private var servicePreset: ProviderServicePreset = .openAICompatible
+    @State private var servicePreset: ProviderProtocolPreset = .openAIChatCompletions
     @State private var discoveryFingerprint: String?
     @State private var discoveryOperation: ProviderOperationContext?
     @State private var discoveryRequestID: UUID?
 
-    private enum ProviderAuthPreset: String, CaseIterable, Identifiable {
-        case apiKey = "API Key + Base URL"
-        case subscription = "订阅账号登录"
-
-        var id: String { rawValue }
-    }
-
-    private enum ProviderServicePreset: String, CaseIterable, Identifiable {
-        case openAICompatible = "OpenAI-Compatible"
-        case deepSeek = "DeepSeek 官方"
+    /// 创建模型服务时只选择线路协议；认证统一为 API Key + Base URL。
+    enum ProviderProtocolPreset: String, CaseIterable, Identifiable {
+        case openAIChatCompletions = "OpenAI Chat Completions"
+        case openAIResponses = "OpenAI Responses"
+        case anthropicMessages = "Anthropic Messages"
+        case googleGenerativeAI = "Google Generative AI"
 
         var id: String { rawValue }
 
-        var defaultServiceName: String {
-            switch self {
-            case .openAICompatible: ""
-            case .deepSeek: "DeepSeek"
-            }
-        }
+        static let defaultServiceName = "localhost"
+        static let defaultBaseURL = "http://localhost:8080"
 
-        var defaultBaseURL: String {
+        var protocolName: String {
             switch self {
-            case .openAICompatible: ""
-            case .deepSeek: "https://api.deepseek.com"
-            }
-        }
-
-        var vendorKey: String {
-            switch self {
-            case .openAICompatible: "custom"
-            case .deepSeek: "deepseek"
+            case .openAIChatCompletions: return "openai-completions"
+            case .openAIResponses: return "openai-responses"
+            case .anthropicMessages: return "anthropic-messages"
+            case .googleGenerativeAI: return "google-generative-ai"
             }
         }
     }
@@ -98,7 +84,7 @@ struct ModelsScreen: View {
         var displayName: String
         var contextWindow: String
         var maxTokens: String
-        var thinkingLevels: String
+        var thinkingLevels: [String]
         var defaultThinkingLevel: String
 
         init(candidate: ResolvedModelCandidate) {
@@ -107,7 +93,7 @@ struct ModelsScreen: View {
             displayName = candidate.spec.alias ?? candidate.discovered.displayName
             contextWindow = String(candidate.spec.contextWindow)
             maxTokens = String(candidate.spec.maxTokens)
-            thinkingLevels = candidate.spec.thinkingLevels.joined(separator: ", ")
+            thinkingLevels = candidate.spec.thinkingLevels
             defaultThinkingLevel = candidate.spec.defaultThinkingLevel ?? ""
         }
 
@@ -118,7 +104,7 @@ struct ModelsScreen: View {
                 displayName: displayName,
                 contextWindow: contextWindow,
                 maxTokens: maxTokens,
-                thinkingLevels: thinkingLevels,
+                thinkingLevels: thinkingLevels.joined(separator: ", "),
                 defaultThinkingLevel: defaultThinkingLevel
             ))
         }
@@ -176,13 +162,7 @@ struct ModelsScreen: View {
         .onChange(of: currentHost.flatMap { model.providerOperationContext(for: $0) }) { _, _ in
             invalidateDiscovery()
         }
-        .onChange(of: authPreset) { _, _ in invalidateDiscovery() }
-        .onChange(of: servicePreset) { _, preset in
-            serviceName = preset.defaultServiceName
-            baseURL = preset.defaultBaseURL
-            apiKey = ""
-            invalidateDiscovery()
-        }
+        .onChange(of: servicePreset) { _, _ in invalidateDiscovery() }
         .onChange(of: model.currentModelProviders) { _, providers in
             if let selected = selectedProvider {
                 guard let updated = providers.first(where: { $0.id == selected.id }) else {
@@ -280,49 +260,32 @@ struct ModelsScreen: View {
             footer: "Base URL 填模型请求根地址，发现接口会自动追加 /models。"
         ) {
             VStack(alignment: .leading, spacing: PISpacing.s16) {
-                PIFormField(label: "服务预设", hint: "选择官方服务会自动填入 Base URL") {
-                    Picker("服务预设", selection: $servicePreset) {
-                        ForEach(ProviderServicePreset.allCases) { preset in
+                PIFormField(label: "协议", hint: "四种线路协议：OpenAI Chat Completions / Responses、Anthropic Messages、Google Generative AI") {
+                    Picker("协议", selection: $servicePreset) {
+                        ForEach(ProviderProtocolPreset.allCases) { preset in
                             Text(preset.rawValue).tag(preset)
                         }
                     }
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.menu)
                     .accessibilityIdentifier("models.servicePreset")
                 }
                 PIFormField(label: "服务名称", hint: "用于模型选择器分组") {
-                    TextField("Antigravity", text: $serviceName)
+                    TextField("localhost", text: $serviceName)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .accessibilityIdentifier("models.serviceName")
                 }
-                PIFormField(label: "认证方式", hint: "订阅账号型 provider 不在当前版本支持范围内") {
-                    Picker("认证方式", selection: $authPreset) {
-                        ForEach(ProviderAuthPreset.allCases) { preset in
-                            Text(preset.rawValue).tag(preset)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .accessibilityIdentifier("models.authPreset")
-                }
-                if authPreset == .subscription {
-                    Text("暂不支持订阅账号登录；不会发起 OAuth 或访问账号授权页面。")
-                        .font(PIFont.caption)
-                        .foregroundStyle(PIColor.warning)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                PIFormField(label: "Base URL", hint: "服务器必须能访问该地址") {
-                    TextField("http://203.0.113.10:8080/antigravity", text: $baseURL)
+                PIFormField(label: "Base URL", hint: "服务器必须能访问该地址；默认指向服务器本机的网关") {
+                    TextField(ProviderProtocolPreset.defaultBaseURL, text: $baseURL)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .disabled(authPreset != .apiKey)
                         .accessibilityIdentifier("models.baseURL")
                 }
                 PIFormField(label: "API Key", hint: "只保存在本机 Keychain，发送时经 SSH 传给服务器") {
                     SecureField("API Key", text: $apiKey)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .disabled(authPreset != .apiKey)
                         .accessibilityIdentifier("models.apiKey")
                 }
                 PIPrimaryButton(title: isFetching ? "正在获取…" : "获取模型") {
@@ -331,7 +294,6 @@ struct ModelsScreen: View {
                 .disabled(
                     isFetching
                         || isImporting
-                        || authPreset != .apiKey
                         || currentHost == nil
                         || apiKey.isEmpty
                 )
@@ -455,18 +417,27 @@ struct ModelsScreen: View {
                                 .keyboardType(.numberPad)
                                 .piFieldChrome()
                         }
-                        TextField("思考档位，用逗号分隔", text: binding.thinkingLevels)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .piFieldChrome()
-                        TextField("默认档位（可留空）", text: binding.defaultThinkingLevel)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .piFieldChrome()
+                        PIThinkingLevelsPicker(
+                            title: "思考档位",
+                            selection: binding.thinkingLevels,
+                            identifier: "models.thinkingLevels"
+                        )
+                        PIThinkingLevelPicker(
+                            title: "默认思考档位",
+                            selection: binding.defaultThinkingLevel,
+                            options: draft.thinkingLevels,
+                            identifier: "models.defaultThinkingLevel"
+                        )
                     }
                     .padding(.top, PISpacing.s8)
                 }
                 .font(PIFont.caption)
+            }
+        }
+        .onChange(of: draft.thinkingLevels) { _, levels in
+            // 档位被取消勾选后，默认档位不能继续指向一个不存在的值。
+            if !levels.contains(binding.defaultThinkingLevel.wrappedValue) {
+                binding.defaultThinkingLevel.wrappedValue = ""
             }
         }
     }
@@ -526,10 +497,6 @@ struct ModelsScreen: View {
     }
 
     private func fetchModels() {
-        guard authPreset == .apiKey else {
-            errorMessage = "暂不支持订阅账号登录，未发起任何 OAuth 请求"
-            return
-        }
         guard let host = currentHost,
               let operation = model.providerOperationContext(for: host) else { return }
         let normalizedBaseURL = ECMAScriptString.trim(baseURL)
@@ -555,7 +522,8 @@ struct ModelsScreen: View {
                 let discovered = try await connection.discoverModels(
                     record: host,
                     baseURL: normalizedBaseURL,
-                    apiKey: normalizedAPIKey
+                    apiKey: normalizedAPIKey,
+                    protocol: servicePreset.protocolName
                 )
                 let normalizedModels = discovered.map { discovered in
                     var model = discovered
@@ -593,10 +561,6 @@ struct ModelsScreen: View {
     }
 
     private func importModels() {
-        guard authPreset == .apiKey else {
-            errorMessage = "暂不支持订阅账号登录，未发起任何 OAuth 请求"
-            return
-        }
         guard let host = currentHost,
               let operation = model.providerOperationContext(for: host) else { return }
         if let importBlocker {
@@ -633,7 +597,11 @@ struct ModelsScreen: View {
             apiKey: normalizedAPIKey,
             models: selectedSpecs,
             setDefaultModel: isFirstProvider,
-            vendorKey: servicePreset.vendorKey
+            vendorKey: ProviderImportComposer.vendorKey(
+                for: servicePreset.protocolName,
+                baseURL: normalizedBaseURL
+            ),
+            wireProtocol: servicePreset.protocolName
         )
         guard composition.isValid else {
             errorMessage = composition.issues.map(\.description).joined(separator: "\n")

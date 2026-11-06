@@ -327,57 +327,59 @@ final class ProjectsLaunchUITests: XCTestCase {
         )
     }
 
-    func testModelsAuthenticationPresetsAndSubscriptionDisabledState() throws {
+    func testModelServiceProtocolPresetsDefaultToLocalhost() throws {
         showRoot("设置")
 
         let models = app.buttons
             .matching(NSPredicate(format: "label CONTAINS %@", "模型服务"))
             .firstMatch
-        // 设置里的「模型服务」入口与认证预设不依赖 host；缺失是回归，不是环境跳过。
+        // 设置里的「模型服务」入口与服务协议选择不依赖 host；缺失是回归，不是环境跳过。
         XCTAssertTrue(
             models.waitForExistence(timeout: 10),
             "The model-services entry must exist in Settings."
         )
         models.tap()
 
-        let subscription = segmentedButton(named: "订阅账号登录")
+        let protocolPicker = app.buttons["models.servicePreset"]
         XCTAssertTrue(
-            subscription.waitForExistence(timeout: 10),
-            "The authentication preset control must be reachable on the model-services screen."
+            protocolPicker.waitForExistence(timeout: 10),
+            "The protocol picker must be reachable on the model-services screen."
         )
-        XCTAssertTrue(segmentedButton(named: "API Key + Base URL").exists)
 
-        let deepSeekPreset = segmentedButton(named: "DeepSeek 官方")
-        XCTAssertTrue(
-            deepSeekPreset.waitForExistence(timeout: 5),
-            "The DeepSeek official service preset must be available."
-        )
-        deepSeekPreset.tap()
+        // 订阅账号登录已整体移除。
+        XCTAssertFalse(app.buttons["订阅账号登录"].exists, "Subscription login must be removed.")
+        XCTAssertFalse(app.staticTexts["暂不支持订阅账号登录；不会发起 OAuth 或访问账号授权页面。"].exists)
+
         XCTAssertEqual(
             app.textFields["models.serviceName"].value as? String,
-            "DeepSeek",
-            "Selecting the DeepSeek preset must fill the service name."
+            "localhost",
+            "The service name must default to localhost."
         )
         XCTAssertEqual(
             app.textFields["models.baseURL"].value as? String,
-            "https://api.deepseek.com",
-            "Selecting the DeepSeek preset must fill the official Base URL."
+            "http://localhost:8080",
+            "The Base URL must default to the local gateway."
         )
+        XCTAssertTrue(app.textFields["models.baseURL"].isEnabled)
+        XCTAssertTrue(app.secureTextFields["models.apiKey"].isEnabled)
 
-        subscription.tap()
-        XCTAssertTrue(
-            app.staticTexts["暂不支持订阅账号登录；不会发起 OAuth 或访问账号授权页面。"]
-                .waitForExistence(timeout: 8),
-            "Selecting subscription login must explain that OAuth is not implemented."
-        )
-
-        let baseURL = app.textFields["models.baseURL"]
-        XCTAssertTrue(baseURL.waitForExistence(timeout: 5), "The Base URL field must exist.")
-        XCTAssertFalse(baseURL.isEnabled, "Subscription login must disable Base URL.")
-
-        let apiKey = app.secureTextFields["models.apiKey"]
-        XCTAssertTrue(apiKey.waitForExistence(timeout: 5), "The API Key field must exist.")
-        XCTAssertFalse(apiKey.isEnabled, "Subscription login must disable API Key.")
+        let expectedProtocols = [
+            "OpenAI Chat Completions",
+            "OpenAI Responses",
+            "Anthropic Messages",
+            "Google Generative AI",
+        ]
+        for name in expectedProtocols {
+            protocolPicker.tap()
+            let option = app.buttons[name].firstMatch
+            XCTAssertTrue(option.waitForExistence(timeout: 5), "Protocol option \(name) must exist.")
+            option.tap()
+            XCTAssertEqual(
+                app.textFields["models.baseURL"].value as? String,
+                "http://localhost:8080",
+                "Switching to \(name) must keep the localhost default."
+            )
+        }
     }
 
     func testInstallAdaptorScreenIsReachableWithoutStartingInstallation() throws {
@@ -458,20 +460,12 @@ final class ProjectsLaunchUITests: XCTestCase {
         XCTAssertTrue(app.buttons["设置"].exists, "The sidebar settings root entry must exist.")
     }
 
-    func testDeepSeekOfficialLiveImport() throws {
+    func testLiveProviderImportUsingEnvironment() throws {
         let environment = ProcessInfo.processInfo.environment
-        let apiKey: String
-        if let inline = environment["PI_IOS_DEEPSEEK_API_KEY"], !inline.isEmpty {
-            apiKey = inline
-        } else if let path = environment["PI_IOS_DEEPSEEK_API_KEY_FILE"],
-                  let fileValue = try? String(contentsOfFile: path, encoding: .utf8)
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                  !fileValue.isEmpty {
-            apiKey = fileValue
-        } else {
-            throw XCTSkip(
-                "Provide PI_IOS_DEEPSEEK_API_KEY or PI_IOS_DEEPSEEK_API_KEY_FILE to run the live DeepSeek import."
-            )
+        guard let baseURL = environment["PI_IOS_LIVE_LLM_BASE_URL"], !baseURL.isEmpty,
+              let apiKey = environment["PI_IOS_LIVE_LLM_API_KEY"], !apiKey.isEmpty
+        else {
+            throw XCTSkip("Provide PI_IOS_LIVE_LLM_BASE_URL and PI_IOS_LIVE_LLM_API_KEY to run the live provider import.")
         }
 
         showRoot("设置")
@@ -481,11 +475,14 @@ final class ProjectsLaunchUITests: XCTestCase {
         XCTAssertTrue(models.waitForExistence(timeout: 10))
         models.tap()
 
-        let deepSeekPreset = segmentedButton(named: "DeepSeek 官方")
-        XCTAssertTrue(deepSeekPreset.waitForExistence(timeout: 10))
-        deepSeekPreset.tap()
-        XCTAssertEqual(app.textFields["models.serviceName"].value as? String, "DeepSeek")
-        XCTAssertEqual(app.textFields["models.baseURL"].value as? String, "https://api.deepseek.com")
+        let baseURLField = app.textFields["models.baseURL"]
+        XCTAssertTrue(baseURLField.waitForExistence(timeout: 5))
+        baseURLField.tap()
+        let existingBase = (baseURLField.value as? String) ?? ""
+        if !existingBase.isEmpty {
+            baseURLField.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existingBase.count))
+        }
+        baseURLField.typeText(baseURL)
 
         let keyField = app.secureTextFields["models.apiKey"]
         XCTAssertTrue(keyField.waitForExistence(timeout: 5))
@@ -514,19 +511,12 @@ final class ProjectsLaunchUITests: XCTestCase {
             .firstMatch
         XCTAssertTrue(
             importButton.waitForExistence(timeout: 30),
-            "DeepSeek /models must resolve into importable model rows."
-        )
-        XCTAssertTrue(
-            app.staticTexts
-                .matching(NSPredicate(format: "label CONTAINS %@", "思考 off/low/high/max"))
-                .firstMatch
-                .exists,
-            "Endpoint effort metadata must remain authoritative over the generic catalog."
+            "The configured endpoint's /models must resolve into importable model rows."
         )
         importButton.tap()
         XCTAssertTrue(
             app.staticTexts
-                .matching(NSPredicate(format: "label BEGINSWITH %@", "已导入 2 个模型"))
+                .matching(NSPredicate(format: "label BEGINSWITH %@", "已导入 "))
                 .firstMatch
                 .waitForExistence(timeout: 30),
             "RACP provider/create must return a success receipt for the discovered models."
