@@ -389,6 +389,8 @@ public final class SessionViewModel {
     public private(set) var pendingApprovals: [RACPApprovalRequest] = []
     public private(set) var pendingInputs: [RACPInputRequest] = []
     public private(set) var hasMoreHistory: Bool = false
+    /// 快照/会话边界；历史页只能补入发起请求时的同一视图，不能穿过快照重建。
+    public private(set) var historySnapshotGeneration: UInt64 = 0
     /// 未完成草稿；快照重建后为 `nil`。
     public private(set) var draft: SessionDraft?
     /// 最近一次快照/订阅是否声明重放已完成。
@@ -424,6 +426,7 @@ public final class SessionViewModel {
     /// 切换会话前清空所有归约状态；新会话的快照不能继承旧会话的游标、
     /// 运行中 turn、审批失效集合或草稿。
     public func resetForSession() {
+        historySnapshotGeneration &+= 1
         cursor = nil
         revision = 0
         items = []
@@ -446,6 +449,7 @@ public final class SessionViewModel {
     /// Keep the last good view visible while a CURSOR_EXPIRED rebuild is in flight,
     /// but never resubscribe from the expired cursor if the snapshot request fails.
     public func discardCursorForSnapshotRebuild() {
+        historySnapshotGeneration &+= 1
         cursor = nil
         lastReplayComplete = false
         staleEpochs = []
@@ -476,6 +480,7 @@ public final class SessionViewModel {
     /// `replayComplete=false` 也必须整体替换），两种取值都执行替换；界面可据此显示同步态。
     @discardableResult
     public func applySnapshot(_ snapshot: RACPSnapshot, replayComplete: Bool) -> SessionSnapshotOutcome {
+        historySnapshotGeneration &+= 1
         let previousApprovalIds = Set(pendingApprovals.map(\.id))
         let deduplicated = Self.deduplicatedByID(snapshot.items)
 
@@ -540,6 +545,20 @@ public final class SessionViewModel {
             discardedDraft: discardedDraft,
             newlyExpiredApprovalIds: newlyExpired
         )
+    }
+
+    // MARK: 历史分页
+
+    /// 只补入当前最早条目之前的历史，不覆盖已被实时事件更新的同 id 条目。
+    /// 历史页不是快照：不触碰游标、revision、草稿、运行态或待审批状态。
+    @discardableResult
+    public func prependHistory(_ page: [RACPItem], hasMore: Bool) -> Int {
+        var seen = Set(itemIndexByID.keys)
+        let earlier = page.filter { seen.insert($0.id).inserted }
+        items.insert(contentsOf: earlier, at: 0)
+        itemIndexByID = Self.indexByID(items)
+        hasMoreHistory = hasMore
+        return earlier.count
     }
 
     // MARK: 事件

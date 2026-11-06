@@ -199,7 +199,9 @@ public struct RACPSocketTermination: Error, Equatable, Sendable, CustomStringCon
         case (1008, _): return .protocol
         case (1009, _): return .validation
         case (1003, _): return .protocol
-        case (1000, _): return .canceled
+        // 1000 是 WebSocket 的正常关闭，不代表用户主动 stop。SSH 与 Direct 的主动
+        // 关闭路径都显式使用本地 `.canceled`；远端或中间设备发来的 1000 仍须重连。
+        case (1000, _): return .socketInterrupted
         default: return .socketInterrupted
         }
     }

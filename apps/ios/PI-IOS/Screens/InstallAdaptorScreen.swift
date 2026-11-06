@@ -41,6 +41,19 @@ struct InstallAdaptorScreen: View {
         !directEndpoint.piTrimmed.isEmpty || !directName.piTrimmed.isEmpty
     }
 
+    /// 本机 App 版本（发布门禁要求它等于内置 PI-adaptor 版本）。
+    private var appVersion: String? {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    }
+
+    /// 构建版本与内置回退发布漂移时的提示（DEF：手机端不能静默装回旧版本）。
+    private var bundleVersionWarning: String? {
+        BootstrapBundleVersionPolicy.fallbackWarning(
+            appVersion: appVersion,
+            bundledReleaseVersion: PIAdaptorRelease.patchedReleaseVersion
+        )
+    }
+
     private var canonicalDirectEndpoint: String? {
         wantsDirect ? HostValidator.canonicalDirectEndpoint(directEndpoint) : nil
     }
@@ -92,6 +105,7 @@ struct InstallAdaptorScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: PISpacing.s24) {
                 targetCard
+                bundleVersionWarningCard
                 if let host {
                     receiptCard(host)
                     configurationCard
@@ -258,6 +272,19 @@ struct InstallAdaptorScreen: View {
                     .foregroundStyle(PIColor.text2)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    /// App 版本与内置 PI-adaptor 回退版本不一致：必须显式提示，避免静默装旧版本。
+    @ViewBuilder
+    private var bundleVersionWarningCard: some View {
+        if let warning = bundleVersionWarning {
+            PIStatusBanner(
+                kind: .warning,
+                text: "App 版本与内置 PI-adaptor 不一致",
+                detail: warning
+            )
+            .accessibilityIdentifier("installHost.bundleVersionWarning")
         }
     }
 

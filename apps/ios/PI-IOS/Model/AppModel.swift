@@ -279,7 +279,15 @@ final class AppModel: ObservableObject {
             foregroundNotificationTransitionID = nil
             return
         }
-        if !connection.state.isOnline {
+        let onlineAndAlive: Bool
+        if connection.state.isOnline {
+            onlineAndAlive = await connection.verifyConnectionLiveness()
+        } else {
+            onlineAndAlive = false
+        }
+        if !onlineAndAlive {
+            // 离线，或界面仍显示在线但挂起期间 socket 已被回收/网络已切换：
+            // 主动重建连接，不能继续等 10s 心跳 + 5s 超时 ×2 才暴露断开。
             let generation = hostSwitchGeneration &+ 1
             await setCurrentHost(id: hostID, waitForOnline: false)
             guard hostSwitchGeneration == generation else { return }

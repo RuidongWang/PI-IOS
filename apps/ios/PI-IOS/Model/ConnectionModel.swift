@@ -2336,6 +2336,22 @@ final class ConnectionModel: ObservableObject {
         return state.isOnline
     }
 
+    /// 回到前台时先做一次短预算的认证往返，确认「看起来在线」的隧道真的还能收发。
+    ///
+    /// iOS 挂起进程不会主动改写 `state`，但 socket 可能已被系统回收或网络切换打断。
+    /// 只等 10s 心跳 + 5s 超时 ×2，用户会在「在线」界面下卡住半分钟才看到断开重连；
+    /// 探测失败时调用方应立即重建连接。
+    func verifyConnectionLiveness(timeout: TimeInterval = 4) async -> Bool {
+        if usesUITestFixture { return state.isOnline }
+        guard state.isOnline, let client else { return false }
+        do {
+            try await client.ping(timeout: timeout)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     /// 重新拉取项目与会话列表（只在在线时可用）。
     @discardableResult
     func refreshRemote(timeout: TimeInterval = 30) async -> Bool {
@@ -2374,7 +2390,13 @@ final class ConnectionModel: ObservableObject {
             else { return false }
             let message = ConnectionErrorText.describe(error)
             catalogError = message
-            lastError = ConnectionErrorText.describe(error)
+            // 目录刷新失败常见于「旧 socket 正被替换」的竞态（请求在 teardown 后发出，
+            // 得到 notConnected/channelClosed）。此时隧道可能已经重新在线；把这种
+            // 瞬时失败写进「最近一次错误」会表现为「在线 + 当前离线错误」，和真正的
+            // 断线提示混在一起。只有隧道此刻确实不在线时才记录连接级错误。
+            if !state.isOnline {
+                lastError = message
+            }
             return false
         }
     }
@@ -2486,6 +2508,10 @@ final class ConnectionModel: ObservableObject {
             state = sanitizedState
             session.setOnline(sanitizedState.isOnline)
             if sanitizedState.isOnline {
+                // 新连接已经完成握手 + 身份验证：上一轮退避期间留下的「离线/通道已关闭」
+                // 不能再挂在「最近一次错误」里，否则界面显示在线却同时报离线，用户会以为
+                // 连接建立后立刻断开。真正的失败会在后续 refresh 或下一次状态变化时重新写入。
+                lastError = nil
                 await refreshRemote()
                 await session.refreshView()
                 scheduleCacheSessionState()

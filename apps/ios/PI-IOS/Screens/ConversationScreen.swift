@@ -40,6 +40,10 @@ struct ConversationScreen: View {
     @State private var restoreBaselineCount = 0
     @State private var restoreBaselineLastItemID: String?
     @State private var readingRestoreGeneration = 0
+    @State private var historyPagingID: UUID?
+    @State private var historyPositionRestoreID: UUID?
+    @State private var historyReadingAnchorID: String?
+    @State private var viewportMeasurement = ConversationViewportMeasurement()
     @State private var selectedPhotos: [PhotosPickerItem] = []
     @State private var photoSelectionID = UUID()
     /// U16：最近一次选图的读取失败数 / 成功读取数 / 部分失败是否已确认发送子集。
@@ -104,13 +108,14 @@ struct ConversationScreen: View {
                         .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
                         .id(readingContextKey ?? "unbound-reading-context")
                         .transaction { transaction in
-                            if isRestoringReadingPosition {
+                            if isRestoringReadingPosition || historyPagingID != nil {
                                 transaction.animation = nil
                                 transaction.disablesAnimations = true
                             }
                         }
                         .simultaneousGesture(
                             DragGesture(minimumDistance: 2).onChanged { _ in
+                                cancelHistoryPositionRestore()
                                 guard isRestoringReadingPosition else { return }
                                 readingRestoreTargetItemID = nil
                                 isRestoringReadingPosition = false
@@ -174,8 +179,13 @@ struct ConversationScreen: View {
                             topVisibleItemID = visibleItemID
                             recordReadingPosition()
                         }
-                        .onChange(of: session.view.items) { _, _ in
+                        .onChange(of: session.view.items) { oldItems, newItems in
                             recordVisibleMessageCount()
+                            // 前置旧历史不是新消息，不应把读者拉回底部或显示“新消息”。
+                            if historyPagingID != nil {
+                                if oldItems.last?.id != newItems.last?.id { hasNewBelow = true }
+                                return
+                            }
                             guard !isRestoringReadingPosition else {
                                 if restoreBaselineReady,
                                    session.view.items.count > restoreBaselineCount,
@@ -193,24 +203,25 @@ struct ConversationScreen: View {
                             }
                         }
                         .onChange(of: session.view.runningTurnId) { _, _ in
-                            guard !isRestoringReadingPosition, isNearBottom else { return }
+                            guard !isRestoringReadingPosition, historyPagingID == nil, isNearBottom else { return }
                             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
                                 proxy.scrollTo("thread-bottom", anchor: .bottom)
                             }
                         }
                         .onChange(of: session.view.activeItems) { _, _ in
-                            guard !isRestoringReadingPosition, isNearBottom else { return }
+                            guard !isRestoringReadingPosition, historyPagingID == nil, isNearBottom else { return }
                             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
                                 proxy.scrollTo("thread-bottom", anchor: .bottom)
                             }
                         }
                         .onChange(of: session.view.queuedTurns) { _, _ in
-                            guard !isRestoringReadingPosition, isNearBottom else { return }
+                            guard !isRestoringReadingPosition, historyPagingID == nil, isNearBottom else { return }
                             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
                                 proxy.scrollTo("thread-bottom", anchor: .bottom)
                             }
                         }
                         .onChange(of: scrollToBottomRequest) { _, _ in
+                            cancelHistoryPositionRestore()
                             isNearBottom = true
                             hasNewBelow = false
                             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
@@ -224,6 +235,7 @@ struct ConversationScreen: View {
                         .overlay(alignment: .bottomTrailing) {
                             if !isNearBottom {
                                 Button {
+                                    cancelHistoryPositionRestore()
                                     withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
                                         proxy.scrollTo("thread-bottom", anchor: .bottom)
                                     }
@@ -473,6 +485,33 @@ struct ConversationScreen: View {
 
     private var threadSection: some View {
         VStack(alignment: .leading, spacing: PISpacing.s8) {
+            if session.view.hasMoreHistory || session.historyError != nil {
+                VStack(alignment: .leading, spacing: PISpacing.s8) {
+                    Button {
+                        Task { await loadEarlierHistoryPreservingPosition() }
+                    } label: {
+                        HStack(spacing: PISpacing.s8) {
+                            if session.isLoadingEarlierHistory { ProgressView().controlSize(.small) }
+                            Label(
+                                session.isLoadingEarlierHistory ? "正在加载更早消息…" : "加载更早消息",
+                                systemImage: "clock.arrow.circlepath"
+                            )
+                        }
+                        .font(PIFont.captionStrong)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, PISpacing.s8)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!session.isOnline || session.isBusy || session.isLoadingEarlierHistory || historyPagingID != nil || isRestoringReadingPosition)
+                    .accessibilityIdentifier("conversation.loadEarlierHistory")
+                    if let error = session.historyError {
+                        Text("更早消息加载失败：\(error)")
+                            .font(PIFont.caption)
+                            .foregroundStyle(PIColor.danger)
+                            .accessibilityIdentifier("conversation.historyError")
+                    }
+                }
+            }
             if session.view.items.isEmpty {
                 PIEmptyState(
                     title: "这个会话还没有消息",
@@ -493,7 +532,13 @@ struct ConversationScreen: View {
                                         ToolCallGroupingPolicy.anchorItemID(for: $0, in: rows)
                                     },
                                     requestID: readingRestoreRequestID,
+                                    historyAnchorID: historyReadingAnchorID.map {
+                                        ToolCallGroupingPolicy.anchorItemID(for: $0, in: rows)
+                                    },
+                                    historyRequestID: historyPositionRestoreID,
+                                    viewportMeasurement: viewportMeasurement,
                                     onUserInteraction: {
+                                        cancelHistoryPositionRestore()
                                         guard isRestoringReadingPosition else { return }
                                         readingRestoreTargetItemID = nil
                                         isRestoringReadingPosition = false
@@ -645,8 +690,53 @@ struct ConversationScreen: View {
         "conversation-item:\(itemID)"
     }
 
+    private func cancelHistoryPositionRestore() {
+        historyPositionRestoreID = nil
+        historyReadingAnchorID = nil
+        viewportMeasurement.cancel()
+    }
+
+    /// 只在用户点按钮后读取一页。UIKit 锚点保留原可见条目的像素位置，
+    /// 不借用回到最新的 scrollTo，也不在历史页到达时触发消息追随。
+    @MainActor
+    private func loadEarlierHistoryPreservingPosition() async {
+        guard historyPagingID == nil, !session.isLoadingEarlierHistory,
+              !isRestoringReadingPosition, let contextKey = readingContextKey else { return }
+        let requestID = UUID()
+        historyPagingID = requestID
+        let anchorID = lastMeasuredTopItemID ?? topVisibleItemID ?? session.view.items.first?.id
+        historyReadingAnchorID = anchorID
+        let rowAnchorID = anchorID.map { ToolCallGroupingPolicy.anchorItemID(for: $0, in: threadRows) }
+        viewportMeasurement.begin(requestID: requestID, itemID: rowAnchorID)
+        let previousNearBottom = isNearBottom
+        isNearBottom = false
+        defer {
+            if historyPagingID == requestID {
+                historyPagingID = nil
+                cancelHistoryPositionRestore()
+            }
+        }
+        let inserted = await session.loadEarlierHistory()
+        guard !Task.isCancelled, readingContextKey == contextKey,
+              historyPagingID == requestID else { return }
+        // 分页跨过工具分组边界时行身份可能变化，像素基准存放在共享测量器中。
+        // 只在响应归约后启动补偿；等待期间用户拖动/点回到最新会取消它。
+        if inserted, viewportMeasurement.requestID == requestID {
+            historyPositionRestoreID = requestID
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        guard !Task.isCancelled, readingContextKey == contextKey,
+              historyPagingID == requestID else { return }
+        if !inserted, viewportMeasurement.requestID == requestID {
+            isNearBottom = previousNearBottom
+        }
+        recordReadingPosition()
+    }
+
     @MainActor
     private func restoreReadingPosition(proxy: ScrollViewProxy) async {
+        historyPagingID = nil
+        cancelHistoryPositionRestore()
         readingRestoreGeneration &+= 1
         let generation = readingRestoreGeneration
         defer {
@@ -2301,6 +2391,45 @@ private struct SessionConfigSheet: View {
     }
 }
 
+/// 在发出历史请求前同步记录旧行位置；工具分组跨页重组时，新行也能沿用同一像素基准。
+@MainActor
+private final class ConversationViewportMeasurement {
+    private final class WeakAnchor {
+        weak var view: UIView?
+        init(_ view: UIView) { self.view = view }
+    }
+
+    private var anchors: [String: WeakAnchor] = [:]
+    private(set) var requestID: UUID?
+    private(set) var viewportY: CGFloat?
+    private(set) var appliedRequestID: UUID?
+
+    func register(_ view: UIView, itemID: String) {
+        anchors[itemID] = WeakAnchor(view)
+    }
+
+    func begin(requestID: UUID, itemID: String?) {
+        anchors = anchors.filter { $0.value.view != nil }
+        self.requestID = requestID
+        viewportY = nil
+        appliedRequestID = nil
+        guard let itemID, let view = anchors[itemID]?.view,
+              view.window != nil, let scrollView = view.enclosingScrollView else { return }
+        viewportY = view.convert(view.bounds, to: scrollView).minY - scrollView.contentOffset.y
+    }
+
+    func markApplied(_ requestID: UUID) {
+        guard self.requestID == requestID else { return }
+        appliedRequestID = requestID
+    }
+
+    func cancel() {
+        requestID = nil
+        viewportY = nil
+        appliedRequestID = nil
+    }
+}
+
 /// SwiftUI's item-level `ScrollViewReader.scrollTo`/`scrollPosition` can keep the
 /// previous offset when session content is swapped in place. This anchor applies
 /// the restore directly to the enclosing UIScrollView, then the measured frame is
@@ -2309,10 +2438,14 @@ private struct ReadingRestoreAnchor: UIViewRepresentable {
     let itemID: String
     let targetID: String?
     let requestID: Int
+    let historyAnchorID: String?
+    let historyRequestID: UUID?
+    let viewportMeasurement: ConversationViewportMeasurement
     let onUserInteraction: () -> Void
 
     final class Coordinator {
         var appliedRequestID = 0
+        var historyRequestID: UUID?
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -2326,6 +2459,8 @@ private struct ReadingRestoreAnchor: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
+        viewportMeasurement.register(uiView, itemID: itemID)
+        updateHistoryPosition(uiView, coordinator: context.coordinator)
         guard targetID == itemID,
               requestID > 0,
               context.coordinator.appliedRequestID != requestID
@@ -2363,6 +2498,42 @@ private struct ReadingRestoreAnchor: UIViewRepresentable {
                 ),
                 animated: false
             )
+        }
+    }
+
+    private func updateHistoryPosition(_ uiView: UIView, coordinator: Coordinator) {
+        guard let historyRequestID, historyAnchorID == itemID,
+              viewportMeasurement.requestID == historyRequestID,
+              viewportMeasurement.appliedRequestID != historyRequestID,
+              let viewportY = viewportMeasurement.viewportY else {
+            coordinator.historyRequestID = nil
+            return
+        }
+        guard coordinator.historyRequestID != historyRequestID else { return }
+        coordinator.historyRequestID = historyRequestID
+        DispatchQueue.main.async {
+            guard coordinator.historyRequestID == historyRequestID,
+                  viewportMeasurement.requestID == historyRequestID,
+                  viewportMeasurement.appliedRequestID != historyRequestID else { return }
+            guard uiView.window != nil,
+                  let scrollView = uiView.enclosingScrollView else {
+                coordinator.historyRequestID = nil
+                return
+            }
+            guard !scrollView.isDragging, !scrollView.isTracking, !scrollView.isDecelerating else {
+                onUserInteraction()
+                return
+            }
+            scrollView.layoutIfNeeded()
+            let inset = scrollView.adjustedContentInset
+            let minimumY = -inset.top
+            let maximumY = max(minimumY, scrollView.contentSize.height - scrollView.bounds.height + inset.bottom)
+            let targetY = uiView.convert(uiView.bounds, to: scrollView).minY - viewportY
+            scrollView.setContentOffset(
+                CGPoint(x: scrollView.contentOffset.x, y: min(max(targetY, minimumY), maximumY)),
+                animated: false
+            )
+            viewportMeasurement.markApplied(historyRequestID)
         }
     }
 }

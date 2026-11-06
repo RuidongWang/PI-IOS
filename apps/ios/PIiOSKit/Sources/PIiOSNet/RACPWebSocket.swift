@@ -27,6 +27,8 @@ public enum RACPWebSocketError: Error, Equatable, CustomStringConvertible {
 /// §2.3：设备令牌放 `Authorization: Bearer <token>` 请求头（不进 URL、不进日志）。
 protocol RACPSocket: AnyObject {
     var inbound: AsyncStream<Data> { get }
+    /// SSH 可报告完整消息之前的入站字节进度；不支持分块观测的通路保持 nil。
+    var receiveProgress: RACPReceiveProgress? { get }
     /// 可等待的单次结构化终态；旧测试 socket 由默认实现兼容。
     var terminationError: RACPSocketTermination { get async }
     func send(text: String) async throws
@@ -34,7 +36,35 @@ protocol RACPSocket: AnyObject {
     func waitUntilClosed() async
 }
 
+/// 仅保存字节计数和单调时钟，不保存报文或凭证。NIO 与 actor 通过锁内快照共享。
+final class RACPReceiveProgress: @unchecked Sendable {
+    struct Snapshot: Sendable {
+        let bytes: UInt64
+        let lastReceivedAt: ContinuousClock.Instant?
+    }
+
+    private let lock = NSLock()
+    private var bytes: UInt64 = 0
+    private var lastReceivedAt: ContinuousClock.Instant?
+
+    func record(bytes count: Int) {
+        guard count > 0 else { return }
+        lock.lock()
+        bytes &+= UInt64(count)
+        lastReceivedAt = .now
+        lock.unlock()
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(bytes: bytes, lastReceivedAt: lastReceivedAt)
+    }
+}
+
 extension RACPSocket {
+    var receiveProgress: RACPReceiveProgress? { nil }
+
     var terminationError: RACPSocketTermination {
         get async {
             await waitUntilClosed()
@@ -52,6 +82,7 @@ public final class RACPWebSocket: RACPSocket {
     private let handler: WebSocketClientHandler
     private let continuation: AsyncStream<Data>.Continuation
     private let terminationState: RACPSocketTerminationState
+    let receiveProgress: RACPReceiveProgress?
     /// 入站文本消息（已按帧拼回完整消息）。
     public let inbound: AsyncStream<Data>
 
@@ -75,10 +106,12 @@ public final class RACPWebSocket: RACPSocket {
         var continuation: AsyncStream<Data>.Continuation!
         let stream = AsyncStream<Data> { continuation = $0 }
         let terminationState = RACPSocketTerminationState()
+        let receiveProgress = RACPReceiveProgress()
         let handler = WebSocketClientHandler(
             request: request,
             expectedAccept: expectedAccept,
             expectedSubprotocol: subprotocol,
+            receiveProgress: receiveProgress,
             onText: { continuation.yield($0) },
             onClosed: { termination in
                 terminationState.finish(termination)
@@ -106,7 +139,8 @@ public final class RACPWebSocket: RACPSocket {
             handler: handler,
             inbound: stream,
             continuation: continuation,
-            terminationState: terminationState
+            terminationState: terminationState,
+            receiveProgress: receiveProgress
         )
     }
 
@@ -115,13 +149,15 @@ public final class RACPWebSocket: RACPSocket {
         handler: WebSocketClientHandler,
         inbound: AsyncStream<Data>,
         continuation: AsyncStream<Data>.Continuation,
-        terminationState: RACPSocketTerminationState
+        terminationState: RACPSocketTerminationState,
+        receiveProgress: RACPReceiveProgress
     ) {
         self.channel = channel
         self.handler = handler
         self.inbound = inbound
         self.continuation = continuation
         self.terminationState = terminationState
+        self.receiveProgress = receiveProgress
     }
 
     public var terminationError: RACPSocketTermination {
@@ -139,7 +175,7 @@ public final class RACPWebSocket: RACPSocket {
 
     /// 主动关闭（先发 close 帧再关通道）。
     public func close() async {
-        terminationState.finish(RACPSocketTermination(closeCode: 1000, reason: ""))
+        terminationState.finish(RACPSocketTermination(closeCode: 1000, reason: "", category: .canceled))
         let frame = WebSocketFrame(opcode: .close, payload: Data())
         if let bytes = try? WebSocketFrameEncoder.encode(frame, maskKey: WebSocketFrameEncoder.randomMaskKey()) {
             var buffer = channel.allocator.buffer(capacity: bytes.count)
@@ -234,6 +270,7 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
     private let request: String
     private let expectedAccept: String
     private let expectedSubprotocol: String
+    private let receiveProgress: RACPReceiveProgress
     private let onText: @Sendable (Data) -> Void
     private let onClosed: @Sendable (RACPSocketTermination) -> Void
     private let ready: EventLoopPromise<Void>
@@ -247,6 +284,7 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
         request: String,
         expectedAccept: String,
         expectedSubprotocol: String,
+        receiveProgress: RACPReceiveProgress,
         onText: @escaping @Sendable (Data) -> Void,
         onClosed: @escaping @Sendable (RACPSocketTermination) -> Void,
         ready: EventLoopPromise<Void>
@@ -254,6 +292,7 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
         self.request = request
         self.expectedAccept = expectedAccept
         self.expectedSubprotocol = expectedSubprotocol
+        self.receiveProgress = receiveProgress
         self.onText = onText
         self.onClosed = onClosed
         self.ready = ready
@@ -273,6 +312,7 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let buffer = unwrapInboundIn(data)
+        if upgraded { receiveProgress.record(bytes: buffer.readableBytes) }
         buffered.append(Data(buffer.readableBytesView))
         if !upgraded {
             guard let response = WebSocketHandshake.parse(buffered) else { return }

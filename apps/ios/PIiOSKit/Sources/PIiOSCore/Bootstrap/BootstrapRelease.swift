@@ -23,8 +23,8 @@ public struct PIAdaptorRelease: Equatable, Sendable {
         "https://github.com/\(patchedRepository)/releases/download/\(patchedReleaseTag)"
     }
     public static let patchedChecksums: [BootstrapArtifactTarget: String] = [
-        .linuxX64: "e843dacb8fcd4f8f90fd0f7743724f84c67e8819bdb9ad3f9c53277aa053d9ad",
-        .linuxArm64: "7c4c4151fe9a7b86836f12a9a3975123b6700594385c89736cdbbc809bf1e7fa",
+        .linuxX64: "3b9c159d6494f20efc4a3711119b666e32286764606a692042d2bb3de68f11cf",
+        .linuxArm64: "4fe89dd6585774e78ee72cb19fef3a3ef79b45abd8265a313f1e54e6b20bfe1e",
     ]
 
     public let repository: String

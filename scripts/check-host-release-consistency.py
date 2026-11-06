@@ -27,6 +27,7 @@ SWIFT_PATH = os.path.join(
     ROOT,
     "apps/ios/PIiOSKit/Sources/PIiOSCore/Bootstrap/BootstrapRelease.swift",
 )
+APP_PROJECT_PATH = os.path.join(ROOT, "apps/ios/PI-IOS.xcodeproj/project.pbxproj")
 BUILD_SCRIPT_PATH = os.path.join(ROOT, "apps/pi-adaptor/scripts/build-release.sh")
 INSTALL_SCRIPT_PATH = os.path.join(ROOT, "apps/pi-adaptor/scripts/install.sh")
 SERVICE_PATH = os.path.join(ROOT, "apps/pi-adaptor/deploy/pi-adaptor.service")
@@ -160,6 +161,36 @@ def validate_archive(
                     return
     except (OSError, tarfile.TarError, json.JSONDecodeError) as error:
         fail(f"{os.path.basename(path)} could not be validated: {error}")
+
+
+def app_marketing_versions(pbxproj: str) -> set[str]:
+    return set(re.findall(r"MARKETING_VERSION = ([^;]+);", pbxproj))
+
+
+def app_build_versions(pbxproj: str) -> set[str]:
+    return set(re.findall(r"CURRENT_PROJECT_VERSION = ([^;]+);", pbxproj))
+
+
+def validate_app_bundle_version(pbxproj: str, version: str) -> None:
+    """The shipped iOS app must pin the same PI-adaptor release it was released with.
+
+    事故现场（2026-11-06）：App 版本先升到 0.0.3 并构建了 IPA，`BootstrapRelease`
+    还停在 0.0.2。GitHub API 被限流时 App 会回退到内置发布，于是“安装 0.0.3”实际
+    给服务器下发的是 0.0.2。发布门禁必须让这种版本坐标漂移在构建/发布前失败。
+    """
+    marketing = {value.strip().strip('"') for value in app_marketing_versions(pbxproj)}
+    if not marketing:
+        fail("apps/ios/PI-IOS.xcodeproj/project.pbxproj is missing MARKETING_VERSION")
+        return
+    if marketing != {version}:
+        fail(
+            "iOS App MARKETING_VERSION"
+            f"({','.join(sorted(marketing))}) != PI-adaptor release version({version})"
+            "：App 版本与内置 PI-adaptor 发布坐标漂移"
+        )
+    for value in app_build_versions(pbxproj):
+        if not value.strip().isdigit() or int(value.strip()) <= 0:
+            fail(f"iOS App CURRENT_PROJECT_VERSION({value.strip()}) must be a positive integer")
 
 
 def validate_local_artifacts(
@@ -402,6 +433,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     if checksums != expected_checksums:
         fail(f"Swift patchedChecksums({checksums}) != manifest({expected_checksums})")
+
+    with open(APP_PROJECT_PATH, encoding="utf-8") as handle:
+        pbxproj = handle.read()
+    validate_app_bundle_version(pbxproj, version)
 
     if "pi-adaptor-$VERSION-$target" not in build_script:
         fail("build-release.sh does not name architecture-specific PI-adaptor assets")

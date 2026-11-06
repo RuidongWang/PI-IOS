@@ -457,7 +457,7 @@ public final class DirectRACPWebSocket: RACPSocket, @unchecked Sendable {
         task.cancel(with: .normalClosure, reason: nil)
         reader?.cancel()
         continuation.finish()
-        terminationState.finish(RACPSocketTermination(closeCode: 1000, reason: ""))
+        terminationState.finish(RACPSocketTermination(closeCode: 1000, reason: "", category: .canceled))
         session.finishTasksAndInvalidate()
     }
 

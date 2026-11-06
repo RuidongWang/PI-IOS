@@ -74,7 +74,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("SET-01", text("外观") && text("离线缓存上限") && text("撤销本机配对"), "本机三行")
         expect("SET-07", text("PI-adaptor 版本") && text("fixture-only"), "PI-adaptor 版本行显示实际版本")
         expect("SET-07", textContaining("运行版本不匹配"), "隧道分组内版本不匹配提示")
-        expect("SET-07", app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "期望 pi-adaptor 0.0.1")).firstMatch.exists, "版本不匹配展示期望版本")
+        expect("SET-07", app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "期望 pi-adaptor 0.0.3")).firstMatch.exists, "版本不匹配展示 App 内置期望版本")
         expect("SET-07", app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "实际 Fixture Lifecycle fixture-only")).firstMatch.exists, "版本不匹配展示实际版本")
         expect("SET-07", textContaining("请重新安装 PI-adaptor"), "版本不匹配提供修复指引")
         expect("SET-07", app.descendants(matching: .any)["settings.runtimeVersionMismatch"].exists, "版本不匹配稳定标识")

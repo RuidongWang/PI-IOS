@@ -58,7 +58,11 @@ final class DirectRACPWebSocketTests: XCTestCase {
         XCTAssertEqual(RACPSocketTermination(closeCode: 1003, reason: "text only").category, .protocol)
         XCTAssertEqual(RACPSocketTermination(closeCode: 1006, reason: "").category, .socketInterrupted)
         XCTAssertEqual(RACPSocketTermination(closeCode: 1008, reason: "unrecognized private text").category, .protocol)
-        XCTAssertEqual(RACPSocketTermination(closeCode: 1000, reason: "").category, .canceled)
+        XCTAssertEqual(RACPSocketTermination(closeCode: 1000, reason: "").category, .socketInterrupted)
+        XCTAssertEqual(
+            RACPSocketTermination(closeCode: 1000, reason: "", category: .canceled).category,
+            .canceled
+        )
     }
 
     func testClosePayloadParsesCodeAndUTF8Reason() {

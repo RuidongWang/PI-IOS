@@ -38,6 +38,8 @@ final class SessionController: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var notice: String?
     @Published private(set) var isBusy = false
+    @Published private(set) var isLoadingEarlierHistory = false
+    @Published private(set) var historyError: String?
     @Published private(set) var isOnline = false
     @Published private(set) var runningTurnId: String?
     @Published private(set) var permissionMode: RACPPermissionMode = .ask
@@ -72,6 +74,7 @@ final class SessionController: ObservableObject {
     var attachmentSelectionGeneration: Int { sessionSelectionGeneration }
     private var configurationGeneration = 0
     private var attachTask: Task<Void, Never>?
+    private var historyLoadID: UUID?
     private var busyTokens: Set<UUID> = []
     private var attachmentUploads: Set<UUID> = []
     private var draftSessionID: String?
@@ -183,6 +186,7 @@ final class SessionController: ObservableObject {
     func bind(client: RACPClient?, online: Bool) {
         bindGeneration &+= 1
         sessionSelectionGeneration &+= 1
+        resetHistoryLoad()
         attachTask?.cancel()
         attachTask = nil
         self.client = client
@@ -209,6 +213,7 @@ final class SessionController: ObservableObject {
 
     func setOnline(_ online: Bool) {
         isOnline = online
+        if !online { resetHistoryLoad() }
     }
 
     /// 拉取客户端当前的会话视图（事件到达后由 `ConnectionModel` 触发）。
@@ -220,7 +225,10 @@ final class SessionController: ObservableObject {
         let hostID = await client.info()?.hostId
         guard isCurrent(client, generation: generation, selection: selection) else { return }
         if attachedHostID != hostID {
-            if attachedHostID != nil { sessionSelectionGeneration &+= 1 }
+            if attachedHostID != nil {
+                sessionSelectionGeneration &+= 1
+                resetHistoryLoad()
+            }
             attachedHostID = hostID
             draftSessionID = nil
             if let sessionID = attachedSessionId { prepareDraft(for: sessionID) }
@@ -252,6 +260,7 @@ final class SessionController: ObservableObject {
             return
         }
         sessionSelectionGeneration &+= 1
+        resetHistoryLoad()
         let selection = sessionSelectionGeneration
         let generation = bindGeneration
         await onSessionWillChange?()
@@ -295,8 +304,51 @@ final class SessionController: ObservableObject {
         await task.value
     }
 
+    /// 只读历史加载独立于发送/配置的 busy 状态；失败不会断开隧道或覆盖连接错误。
+    @discardableResult
+    func loadEarlierHistory() async -> Bool {
+        guard isOnline, !isBusy, !isLoadingEarlierHistory, view.hasMoreHistory,
+              let sessionID = attachedSessionId, view.sessionId == sessionID,
+              let client else { return false }
+        let generation = bindGeneration
+        let selection = sessionSelectionGeneration
+        let loadID = UUID()
+        historyLoadID = loadID
+        isLoadingEarlierHistory = true
+        historyError = nil
+        defer {
+            if historyLoadID == loadID {
+                historyLoadID = nil
+                isLoadingEarlierHistory = false
+            }
+        }
+        do {
+            let inserted = try await client.loadEarlierHistory()
+            guard isCurrent(client, generation: generation, selection: selection),
+                  attachedSessionId == sessionID, historyLoadID == loadID else { return false }
+            await refreshView()
+            guard isCurrent(client, generation: generation, selection: selection),
+                  attachedSessionId == sessionID, historyLoadID == loadID else { return false }
+            return inserted > 0
+        } catch is CancellationError {
+            return false
+        } catch {
+            guard isCurrent(client, generation: generation, selection: selection),
+                  attachedSessionId == sessionID, historyLoadID == loadID else { return false }
+            historyError = ConnectionErrorText.describe(error)
+            return false
+        }
+    }
+
+    private func resetHistoryLoad() {
+        historyLoadID = nil
+        isLoadingEarlierHistory = false
+        historyError = nil
+    }
+
     func detach() {
         sessionSelectionGeneration &+= 1
+        resetHistoryLoad()
         attachTask?.cancel()
         attachTask = nil
         busyTokens.removeAll()

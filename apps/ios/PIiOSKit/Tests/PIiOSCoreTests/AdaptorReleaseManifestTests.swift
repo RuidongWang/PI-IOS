@@ -80,4 +80,40 @@ final class AdaptorReleaseManifestTests: XCTestCase {
         XCTAssertEqual(version, package["version"] as? String)
         XCTAssertEqual(package["name"] as? String, "@pi-ios/pi-adaptor")
     }
+
+    /// App 版本与内置 PI-adaptor 发布坐标必须同步：发布用的 IPA 里 App 显示 0.0.3、
+    /// 内置发布却还是 0.0.2 时，GitHub API 限流会让“安装 0.0.3”实际下发 0.0.2。
+    func testAppBundleVersionMatchesBundledAdaptorRelease() throws {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { url.deleteLastPathComponent() }
+        url.appendPathComponent("apps/ios/PI-IOS.xcodeproj/project.pbxproj")
+        let pbxproj = try String(contentsOf: url, encoding: .utf8)
+
+        let marketing = Self.pbxprojValues("MARKETING_VERSION", in: pbxproj)
+        XCTAssertFalse(marketing.isEmpty, "project.pbxproj 必须声明 MARKETING_VERSION")
+        XCTAssertEqual(
+            marketing,
+            [PIAdaptorRelease.patchedReleaseVersion],
+            "App MARKETING_VERSION 必须等于内置 PI-adaptor 版本（host-release.json / BootstrapRelease）"
+        )
+
+        let buildNumbers = Self.pbxprojValues("CURRENT_PROJECT_VERSION", in: pbxproj)
+        XCTAssertFalse(buildNumbers.isEmpty, "project.pbxproj 必须声明 CURRENT_PROJECT_VERSION")
+        for value in buildNumbers {
+            let number = Int(value)
+            XCTAssertNotNil(number, "CURRENT_PROJECT_VERSION 必须是整数，实际：\(value)")
+            XCTAssertGreaterThan(number ?? 0, 0)
+        }
+    }
+
+    private static func pbxprojValues(_ key: String, in source: String) -> Set<String> {
+        let pattern = "(?m)^\\s*" + key + " = ([^;]+);"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(source.startIndex..<source.endIndex, in: source)
+        let values = regex.matches(in: source, range: range).compactMap { match -> String? in
+            guard let capture = Range(match.range(at: 1), in: source) else { return nil }
+            return source[capture].trimmingCharacters(in: CharacterSet(charactersIn: " \"")).description
+        }
+        return Set(values)
+    }
 }

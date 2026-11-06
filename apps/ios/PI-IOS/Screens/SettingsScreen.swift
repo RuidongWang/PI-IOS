@@ -342,14 +342,18 @@ struct SettingsScreen: View {
                 }
                 if connection.state.isOnline,
                    let info = connection.info,
-                   let expected = model.currentHost?.installReceipt?.version,
-                   !expected.isEmpty,
-                   info.serverName != PIAdaptorRelease.runtimeServerName
-                    || !PIAdaptorRelease.versionsMatch(info.serverVersion, expected) {
+                   !AdaptorRuntimeVersionPolicy.isCompatible(
+                       serverName: info.serverName,
+                       serverVersion: info.serverVersion
+                   ) {
+                    // 期望值取 App 内置版本，而不是本机安装回执：服务器被另一台设备
+                    // 升级到更高版本时，回执会一直停在旧版本，误报「请重新安装」。
                     PIInlineMessage(
                         kind: .danger,
-                        text: "运行版本不匹配：期望 \(PIAdaptorRelease.runtimeServerName) \(expected)，"
-                            + "实际 \(info.serverName) \(info.serverVersion)。请重新安装 PI-adaptor。"
+                        text: AdaptorRuntimeVersionPolicy.mismatchMessage(
+                            serverName: info.serverName,
+                            serverVersion: info.serverVersion
+                        )
                     )
                     .accessibilityIdentifier("settings.runtimeVersionMismatch")
                 }

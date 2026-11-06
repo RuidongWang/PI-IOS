@@ -513,6 +513,7 @@ public actor RACPClient {
     private var subscriptionId: String?
     private var subscribedSessionId: String?
     private var sessionAttachGeneration = 0
+    private var historyRequest: (id: UUID, attach: Int, snapshot: UInt64, socket: ObjectIdentifier)?
     private var sessionEventsSuspended = false
     private var pendingSessionSubscriptionAttempt: UUID?
     private var pendingSessionSubscriptionSessionId: String?
@@ -984,6 +985,62 @@ public actor RACPClient {
         return result.snapshot != nil
     }
 
+    /// 手动补取更早历史；返回实际前置的条数。历史页不参与实时游标/快照恢复。
+    /// 被会话切换、快照替换或换 socket 取代时丢弃响应，绝不关闭活动连接。
+    @discardableResult
+    public func loadEarlierHistory(limit: Int = RACPSessionHistoryParams.defaultLimit) async throws -> Int {
+        guard state.isOnline, !promotionFenced, let socket, let sessionId,
+              !sessionEventsSuspended, !isRebuildingSnapshot else {
+            throw RACPClientError.notConnected
+        }
+        guard viewModel.hasMoreHistory else { return 0 }
+        let attach = sessionAttachGeneration
+        let snapshot = viewModel.historySnapshotGeneration
+        let socketID = ObjectIdentifier(socket)
+        if let current = historyRequest,
+           current.attach == attach, current.snapshot == snapshot, current.socket == socketID {
+            return 0
+        }
+        let requestID = UUID()
+        historyRequest = (requestID, attach, snapshot, socketID)
+        defer {
+            if historyRequest?.id == requestID { historyRequest = nil }
+        }
+        let beforeItemID = viewModel.items.first?.id
+        // 先保留成功/失败结果，统一检查代次；旧快照的错误也不能污染新视图。
+        let response: Result<RACPSessionHistoryResult, Error>
+        do {
+            response = .success(try await request(
+                .sessionHistory,
+                params: RACPSessionHistoryParams(
+                    sessionId: sessionId,
+                    beforeItemId: beforeItemID,
+                    limit: max(1, min(limit, RACPSessionHistoryParams.maxLimit))
+                )
+            ))
+        } catch {
+            response = .failure(error)
+        }
+        try Task.checkCancellation()
+        guard self.socket === socket, self.sessionId == sessionId,
+              state.isOnline, !promotionFenced, !sessionEventsSuspended, !isRebuildingSnapshot,
+              sessionAttachGeneration == attach,
+              viewModel.historySnapshotGeneration == snapshot,
+              viewModel.items.first?.id == beforeItemID,
+              historyRequest?.id == requestID else { throw CancellationError() }
+        let result = try response.get()
+        let hasMore = result.hasMore ?? false
+        if hasMore {
+            let existing = Set(viewModel.items.map(\.id))
+            guard result.items.contains(where: { !existing.contains($0.id) }) else {
+                throw RACPClientError.malformedFrame("历史分页没有向前推进，请重试打开会话")
+            }
+        }
+        let inserted = viewModel.prependHistory(result.items, hasMore: hasMore)
+        await emit(.sessionChanged)
+        return inserted
+    }
+
     /// 用会话**当前游标**重新订阅（重连后补齐缺失事件，AC-14.1）。
     public func subscribeSession(sessionId: String, after: RACPCursor?) async throws {
         let attachGeneration = sessionAttachGeneration
@@ -1271,8 +1328,9 @@ public actor RACPClient {
         return result.projects
     }
 
-    public func ping() async throws {
-        let _: RACPJSONObject = try await request(.ping, params: RACPEmptyParams())
+    /// 认证往返探测。默认沿用普通请求预算；前台恢复的存活检查会传更短的预算。
+    public func ping(timeout: TimeInterval = 20) async throws {
+        let _: RACPJSONObject = try await request(.ping, params: RACPEmptyParams(), timeout: timeout)
     }
 
     // MARK: - 发送 / 中止 / 排队（AC-08 / AC-09 / AC-13）
@@ -1714,7 +1772,8 @@ public actor RACPClient {
         _ method: RACPMethod,
         params: P,
         timeout: TimeInterval,
-        recoveryScope: RequestRecoveryScope? = nil
+        recoveryScope: RequestRecoveryScope? = nil,
+        allowReceiveProgress: Bool = false
     ) async throws -> JSONValue {
         if (configuration.deviceToken?.hasPrefix("ppt1.") == true
             || configuration.deviceToken?.hasPrefix("ppt2.") == true),
@@ -1734,7 +1793,16 @@ public actor RACPClient {
         pending[id] = box
         do {
             try await socket.send(text: text)
-            let value = try await box.wait(timeout: timeout, method: method.rawValue)
+            // SSH 的同一字节流中，大响应会把后面的 pong 一起挡住。仅历史读取与
+            // 内部心跳按真实入站进度延续空闲预算，写操作/握手期限保持不变。
+            let progress = (allowReceiveProgress || method == .sessionAttach || method == .sessionHistory)
+                ? socket.receiveProgress : nil
+            let value = try await box.wait(
+                timeout: timeout,
+                method: method.rawValue,
+                receiveProgress: progress,
+                maximumDuration: allowReceiveProgress ? 60 : 120
+            )
             pending.removeValue(forKey: id)
             return value
         } catch {
@@ -1928,7 +1996,8 @@ public actor RACPClient {
                 _ = try await requestJSON(
                     .ping,
                     params: RACPEmptyParams(),
-                    timeout: 5
+                    timeout: 5,
+                    allowReceiveProgress: true
                 )
                 consecutiveFailures = 0
             } catch {
@@ -2184,7 +2253,10 @@ public actor RACPClient {
                 } else {
                     waiter.resolve(.failure(RACPClientError.server(code: code, message: error.message)))
                 }
-                await emit(.error(code: code, message: error.message))
+                // 历史读取的 NOT_FOUND/页预算错误由分页入口展示，不能冒充隧道故障。
+                if waiter.method != RACPMethod.sessionHistory.rawValue {
+                    await emit(.error(code: code, message: error.message))
+                }
             } else {
                 waiter.resolve(.success(envelope.result ?? .null))
             }
@@ -2898,22 +2970,27 @@ final class PendingRequest: @unchecked Sendable {
 
     func resolve(_ result: Result<JSONValue, Error>) {
         lock.lock()
+        guard settled == nil else { lock.unlock(); return }
+        settled = result
         timeoutTask?.cancel()
         timeoutTask = nil
-        if let continuation {
-            self.continuation = nil
-            lock.unlock()
-            continuation.resume(with: result)
-            return
-        }
-        if settled == nil {
-            settled = result
-        }
+        let continuation = self.continuation
+        self.continuation = nil
         lock.unlock()
+        continuation?.resume(with: result)
     }
 
-    func wait(timeout: TimeInterval, method: String) async throws -> JSONValue {
-        try await withTaskCancellationHandler {
+    /// 默认仍为固定期限。可观测 SSH 分块时，允许持续推进的只读大响应延续
+    /// 空闲期限，但 absolute deadline 始终不变；任何停止入站的连接仍及时超时。
+    func wait(
+        timeout: TimeInterval,
+        method: String,
+        receiveProgress: RACPReceiveProgress? = nil,
+        maximumDuration: TimeInterval = 120
+    ) async throws -> JSONValue {
+        let started = ContinuousClock.now
+        let initialBytes = receiveProgress?.snapshot().bytes
+        return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 lock.lock()
                 if let settled {
@@ -2924,13 +3001,34 @@ final class PendingRequest: @unchecked Sendable {
                 self.continuation = continuation
                 lock.unlock()
                 let task = Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                    guard !Task.isCancelled else { return }
-                    self?.resolve(.failure(RACPClientError.timedOut(method)))
+                    let absoluteDeadline = started + .seconds(
+                        receiveProgress == nil ? timeout : max(timeout, maximumDuration)
+                    )
+                    var lastProgressAt = started
+                    var observedBytes = initialBytes
+                    while !Task.isCancelled {
+                        if let progress = receiveProgress?.snapshot(), progress.bytes != observedBytes {
+                            observedBytes = progress.bytes
+                            lastProgressAt = max(started, progress.lastReceivedAt ?? started)
+                        }
+                        let deadline = min(absoluteDeadline, lastProgressAt + .seconds(timeout))
+                        if ContinuousClock.now >= deadline {
+                            self?.resolve(.failure(RACPClientError.timedOut(method)))
+                            return
+                        }
+                        do {
+                            try await Task.sleep(until: deadline, clock: .continuous)
+                        } catch { return }
+                    }
                 }
                 lock.lock()
-                timeoutTask = task
-                lock.unlock()
+                if settled == nil {
+                    timeoutTask = task
+                    lock.unlock()
+                } else {
+                    lock.unlock()
+                    task.cancel()
+                }
             }
         } onCancel: {
             self.resolve(.failure(CancellationError()))

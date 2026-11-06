@@ -297,6 +297,42 @@ final class RACPRouteFallbackTests: XCTestCase {
         await client.stop()
     }
 
+    func testSSHGracefulPeerCloseReconnectsInsteadOfStopping() async throws {
+        let first = ScriptedSocket()
+        let second = ScriptedSocket()
+        let factory = ScriptedFactory(results: [
+            .success(RACPConnection(socket: first, route: .ssh)),
+            .success(RACPConnection(socket: second, route: .ssh)),
+        ])
+        let client = makeClient(factory: factory, preference: .sshOnly)
+        await client.start()
+        let firstStatus = try await waitForStatus(client) { $0.phase == .online(.ssh) }
+        let firstGeneration = try XCTUnwrap(firstStatus.activeGeneration)
+
+        // 代理、sshd 或服务进程都可以用 1000 正常结束一条 WebSocket；
+        // 这不是用户主动 stop，必须保留同一个连接意图并自动恢复。
+        first.terminate(closeCode: 1000, reason: "")
+
+        // 状态流与锁保护的路由记录分别跨 actor 读取；online 快照到达时，
+        // 同代 establish 的调用方可能尚未把新连接记录同步给测试线程。
+        // 把两个条件放在同一个轮询中，避免成功重连后的瞬时 [.ssh] 造成假失败。
+        var status = await client.connectionStatus()
+        var routes = factory.routes()
+        let deadline = ContinuousClock.now + .seconds(2)
+        while (status.phase != .online(.ssh)
+               || status.activeGeneration == firstGeneration
+               || routes != [.ssh, .ssh]), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+            status = await client.connectionStatus()
+            routes = factory.routes()
+        }
+        XCTAssertEqual(status.activeGeneration != firstGeneration, true, "最后状态：\(status)")
+        XCTAssertEqual(status.phase, .online(.ssh))
+        XCTAssertEqual(routes, [.ssh, .ssh])
+        XCTAssertEqual(status.sshFailure?.category, .socketInterrupted)
+        await client.stop()
+    }
+
     func testSSHOnlySkipsDirect() async throws {
         let ssh = ScriptedSocket()
         let factory = ScriptedFactory(results: [.success(RACPConnection(socket: ssh, route: .ssh))])
@@ -562,7 +598,7 @@ private final class ScriptedSocket: RACPSocket, @unchecked Sendable {
         closeCalls += 1
         lock.unlock()
         continuation.finish()
-        termination.finish(RACPSocketTermination(closeCode: 1000, reason: ""))
+        termination.finish(RACPSocketTermination(closeCode: 1000, reason: "", category: .canceled))
     }
 
     func waitUntilClosed() async {

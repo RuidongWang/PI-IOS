@@ -45,7 +45,16 @@ final class ServerInstallLatestUITests: XCTestCase {
         // 解析完成后界面必须显示本次目标版本与来源。
         let resolved = app.staticTexts["installHost.resolvedRelease"]
         XCTAssertTrue(resolved.waitForExistence(timeout: 120), "未显示解析到的目标版本")
-        XCTAssertTrue(resolved.label.contains("0.0.2"), resolved.label)
+        // 目标版本必须等于本次发布内置的 PI-adaptor 版本。三者一致性由
+        // `scripts/check-host-release-consistency.py` 与 `AdaptorReleaseManifestTests`
+        // 守住（App MARKETING_VERSION == host-release.json == BootstrapRelease）；
+        // 跨版本复跑时可用 `PI_IOS_EXPECTED_RELEASE_VERSION` 覆盖。
+        let expectedVersion = ProcessInfo.processInfo.environment["PI_IOS_EXPECTED_RELEASE_VERSION"]
+            ?? "0.0.3"
+        XCTAssertTrue(
+            resolved.label.contains("PI-adaptor \(expectedVersion)"),
+            "本次目标版本应为 PI-adaptor \(expectedVersion)，实际：\(resolved.label)\n\(dumpTexts(app))"
+        )
         if resolved.label.contains("GitHub 最新稳定发布") {
             print("LIVE_RELEASE_SOURCE=latest label=\(resolved.label)")
         } else {
@@ -63,8 +72,7 @@ final class ServerInstallLatestUITests: XCTestCase {
         while Date() < deadline {
             if success.exists { return }
             if failure.exists {
-                let texts = app.staticTexts.allElementsBoundByIndex.map(\.label).joined(separator: "\n")
-                XCTFail("真实服务器安装失败：\n\(texts)")
+                XCTFail("真实服务器安装失败：\n\(dumpTexts(app))")
                 return
             }
             RunLoop.current.run(until: Date().addingTimeInterval(2))
@@ -87,5 +95,16 @@ final class ServerInstallLatestUITests: XCTestCase {
         for _ in 0..<6 where !element.isHittable {
             app.swipeUp()
         }
+    }
+    /// 失败时打印可见文案与按钮状态：安装链路按步骤推进，失败定位主要靠这里。
+    private func dumpTexts(_ app: XCUIApplication) -> String {
+        var lines: [String] = []
+        for element in app.staticTexts.allElementsBoundByIndex where !element.label.isEmpty {
+            lines.append("T: \(element.label)")
+        }
+        for element in app.buttons.allElementsBoundByIndex {
+            lines.append("B: \(element.label) hittable=\(element.isHittable) enabled=\(element.isEnabled)")
+        }
+        return lines.joined(separator: "\n")
     }
 }
