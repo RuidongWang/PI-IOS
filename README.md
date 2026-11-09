@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="PI-IOS" width="180">
+</p>
+
 # PI-IOS
 
 > **手机是遥控器，服务器是工作台。**
