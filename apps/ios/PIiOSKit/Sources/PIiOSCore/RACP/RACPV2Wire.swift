@@ -22,6 +22,7 @@ public enum RACPV2Method: String, CaseIterable, Sendable {
     case sessionHistory = "session/history"
     case sessionConfigure = "session/configure"
     case sessionRename = "session/rename"
+    case sessionSuggestTitle = "session/suggest-title"
     case sessionArchive = "session/archive"
     case sessionBranch = "session/branch"
     case sessionDelete = "session/delete"
@@ -69,6 +70,16 @@ public struct RACPV2ServerInfo: Codable, Equatable, Sendable {
     public var roles: [String]
     public var policy: JSONValue
     public var capabilities: JSONValue
+}
+
+/// `session/suggest-title` 的回执：服务器用当前模型根据首条指令生成标题。
+public struct RACPV2SuggestTitleResult: Codable, Equatable, Sendable {
+    public var title: String
+}
+
+/// `session/rename` 等会话变更方法的回执。
+public struct RACPV2SessionResult: Codable, Equatable, Sendable {
+    public var session: RACPSessionSummary
 }
 
 public struct RACPV2ProviderModel: Codable, Equatable, Sendable {

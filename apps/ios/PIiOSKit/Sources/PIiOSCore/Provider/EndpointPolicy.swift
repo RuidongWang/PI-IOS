@@ -94,15 +94,18 @@ public enum EndpointPolicy {
         if let groups = ipv6Groups(host) {
             return ipv6Rejection(groups: groups, host: host)
         }
+        // 本机网关（localhost / 127.0.0.0/8 / ::1）是产品默认的模型服务地址：
+        // 请求由服务器上的 PI-adaptor 发出，回环地址只可能落在服务器自身。
+        // 链路本地与云元数据地址仍然拒绝。
         if host == "localhost" || host.hasSuffix(".localhost") {
-            return .loopbackHost(host)
+            return nil
         }
         if host.hasSuffix(".local") {
             return .localHostname(host)
         }
         if let octets = ipv4Octets(host) {
             if octets[0] == 127 {
-                return .loopbackHost(host)
+                return nil
             }
             if octets[0] == 0 {
                 return .wildcardHost(host)
@@ -119,12 +122,13 @@ public enum EndpointPolicy {
         if groups.allSatisfy({ $0 == 0 }) {
             return .ipv6Unspecified(host)
         }
+        // 回环地址与回环的 IPv4 映射形式按产品默认放行，其它映射形式保持拒绝。
         if groups.prefix(7).allSatisfy({ $0 == 0 }), groups[7] == 1 {
-            return .ipv6Loopback(host)
+            return nil
         }
-        // `::ffff:a.b.c.d` / `::ffff:xxxx:yyyy`：任何 IPv4 映射都可能指向本机/链路本地，整体拒绝。
         if groups.prefix(5).allSatisfy({ $0 == 0 }), groups[5] == 0xFFFF {
-            return .ipv4MappedIPv6(host)
+            let mappedLoopback = (groups[6] >> 8) == 127
+            return mappedLoopback ? nil : .ipv4MappedIPv6(host)
         }
         return nil
     }

@@ -47,7 +47,13 @@ public enum ECMAScriptString {
 /// 契约 §4.3 / §4.4 冻结的取值集合。客户端只使用这里列出的取值，其余一律判为非法。
 public enum ProviderVendorSchema {
     public static let types: [String] = ["native", "openai_compatible", "custom"]
+    /// 四种受支持的线路协议。取值与 pi-ai 的 `api` 标识一致，
+    /// PI-adaptor 直接用它选择请求实现；旧值仍保留以兼容既有记录。
+    public static let supportedProtocols: [String] = [
+        "openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai",
+    ]
     public static let protocols: [String] = ["openai", "anthropic", "google", "openai_compatible", "custom_http"]
+        + supportedProtocols
     /// P0 只开放三种（spec D-07）；`none` / `azure_api_key` 不在 P0 范围，
     /// 因此 `secretValue` 恒为必填（AC-04.2）。
     public static let p0AuthKinds: [String] = ["api_key", "api_key_and_base_url", "bearer"]

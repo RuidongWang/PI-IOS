@@ -364,55 +364,22 @@ struct ConversationScreen: View {
         }
     }
 
-    /// 运行中的 turn id 只留前 8 位：完整 UUID 会换行占两行，把真正的状态信息挤下去。
-    /// UI 测试用的 fixture id（如 `turn-s2`）短于 8 位，保持原样。
-    private var runningTurnLabel: String {
-        guard let id = session.runningTurnId else { return "正在运行" }
-        let short = id.count > 8 ? String(id.prefix(8)) + "…" : id
-        return "正在运行 \(short)"
-    }
-
     private var header: some View {
         VStack(alignment: .leading, spacing: PISpacing.s4) {
             HStack(spacing: PISpacing.s8) {
-                PIPermissionBadge(mode: session.permissionMode)
-                Text(session.sessionMode.title)
-                    .font(PIFont.captionStrong)
-                    .foregroundStyle(PIColor.text2)
-                    .lineLimit(1)
-                    .layoutPriority(1)
+                // 权限模式与会话模式只在「会话配置」里展示；页头保持一条
+                // 连接状态，避免同一信息在输入框上方重复出现。
                 Spacer(minLength: PISpacing.s4)
-                if session.isTurnRunning {
-                    Text(runningTurnLabel)
-                        .font(PIFont.captionStrong)
-                        .foregroundStyle(PIColor.text2)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .layoutPriority(1)
-                        .accessibilityIdentifier("conversation.runningTurn")
-                    Button(role: .destructive) {
-                        Task { await session.interrupt() }
-                    } label: {
-                        Label("中止", systemImage: "stop.circle.fill")
-                            .font(PIFont.captionStrong)
-                            .lineLimit(1)
-                            .padding(.horizontal, PISpacing.s8)
-                            .padding(.vertical, 5)
-                            .background(PIColor.dangerSoft, in: Capsule())
-                    }
-                    .frame(minHeight: 32)
-                    .accessibilityIdentifier("conversation.interrupt")
-                    .disabled(!session.canInterrupt || session.isBusy)
-                } else {
-                    Circle()
-                        .fill(connection.state.isOnline ? PIColor.success : PIColor.warning)
-                        .frame(width: 7, height: 7)
-                        .accessibilityHidden(true)
-                    Text(connection.state.displayText)
-                        .font(PIFont.captionStrong)
-                        .foregroundStyle(connection.state.isOnline ? PIColor.success : PIColor.warning)
-                        .lineLimit(1)
-                }
+                // 运行状态与中止入口不再占用页头：输入框右侧的发送按钮在
+                // 输入为空且 turn 运行中会切换成中止按钮。
+                Circle()
+                    .fill(connection.state.isOnline ? PIColor.success : PIColor.warning)
+                    .frame(width: 7, height: 7)
+                    .accessibilityHidden(true)
+                Text(connection.state.displayText)
+                    .font(PIFont.captionStrong)
+                    .foregroundStyle(connection.state.isOnline ? PIColor.success : PIColor.warning)
+                    .lineLimit(1)
             }
             if !secondaryLine.isEmpty {
                 Text(secondaryLine)
@@ -1304,13 +1271,6 @@ struct ConversationScreen: View {
                     .font(PIFont.meta)
                     .foregroundStyle(PIColor.warning)
             }
-            if session.sendAdmission.isQueueing {
-                // 只保留一行短提示；运行状态仍由页面顶部状态行表达，不恢复旧的长提示。
-                Text("当前 turn 运行中，发送将排队")
-                    .font(PIFont.meta)
-                    .foregroundStyle(PIColor.text2)
-                    .accessibilityIdentifier("conversation.queueHint")
-            }
             if let notice = photoReadFailureNotice {
                 HStack(alignment: .top, spacing: PISpacing.s8) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -1446,28 +1406,41 @@ struct ConversationScreen: View {
                     .accessibilityLabel("给 Agent 的指令")
                     .accessibilityIdentifier("conversation.composer")
                 Button {
-                    scrollToBottomRequest &+= 1
-                    // U11：点击瞬间冻结发送意图；模型可用性检查可能等待网络，
-                    // 期间切换会话/模型或继续编辑都由 send(expected:) 拒绝，不会误发。
-                    let intent = session.makeSendIntent()
-                    Task {
-                        let check = await refreshModelAvailability()
-                        guard check != .superseded else { return }
-                        await session.send(expected: intent)
+                    if showsAbortButton {
+                        Task { await session.interrupt() }
+                    } else {
+                        scrollToBottomRequest &+= 1
+                        // U11：点击瞬间冻结发送意图；模型可用性检查可能等待网络，
+                        // 期间切换会话/模型或继续编辑都由 send(expected:) 拒绝，不会误发。
+                        let intent = session.makeSendIntent()
+                        let instruction = session.trimmedDraft
+                        let isFirstInstruction = session.view.items.isEmpty
+                        Task {
+                            let check = await refreshModelAvailability()
+                            guard check != .superseded else { return }
+                            await session.send(expected: intent)
+                            // 新建会话不再预填标题：首条指令成功发出后由 AI 生成。
+                            if isFirstInstruction, session.trimmedDraft.isEmpty {
+                                await generateTitleIfNeeded(instruction: instruction)
+                            }
+                        }
                     }
                 } label: {
-                    Image(systemName: "arrow.up")
+                    Image(systemName: showsAbortButton ? "stop.fill" : "arrow.up")
                         .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(canTapSend ? PIColor.onAccent : PIColor.text3)
+                        .foregroundStyle(sendButtonEnabled ? PIColor.onAccent : PIColor.text3)
                         .frame(width: 36, height: 36)
                         .background(
-                            canTapSend ? PIColor.accent : PIColor.surface3,
+                            sendButtonEnabled
+                                ? (showsAbortButton ? PIColor.danger : PIColor.accent)
+                                : PIColor.surface3,
                             in: Circle()
                         )
                         .contentShape(Circle())
                 }
-                .disabled(!canTapSend)
-                .accessibilityLabel("发送")
+                .disabled(!sendButtonEnabled)
+                .accessibilityIdentifier(showsAbortButton ? "conversation.interrupt" : "conversation.send")
+                .accessibilityLabel(showsAbortButton ? "中止" : "发送")
             }
             .padding(.leading, 6)
             .padding(.trailing, 6)
@@ -1503,6 +1476,20 @@ struct ConversationScreen: View {
         session.canSend && !session.isBusy && !photoReadNeedsConfirmation
     }
 
+    /// 输入框为空且会话有任务正在执行时，发送按钮切换成中止按钮；
+    /// 一旦输入了内容（文字或附件），仍然保留发送按钮，点击即排队。
+    private var showsAbortButton: Bool {
+        session.isTurnRunning
+            && session.trimmedDraft.isEmpty
+            && session.pendingAttachments.isEmpty
+    }
+
+    private var sendButtonEnabled: Bool {
+        showsAbortButton
+            ? session.canInterrupt && !session.isBusy
+            : canTapSend
+    }
+
     /// 最近一次选图的读取失败提示；`nil` 表示没有失败。
     private var photoReadFailureNotice: String? {
         guard photoReadFailureCount > 0 else { return nil }
@@ -1519,18 +1506,8 @@ struct ConversationScreen: View {
 
     private var composerConfigurationChips: some View {
         HStack(spacing: PISpacing.s8) {
-            configurationChip(
-                title: session.sessionMode.title,
-                tint: PIColor.text2,
-                identifier: "composer.modeChip",
-                systemImage: "slider.horizontal.3"
-            )
-            configurationChip(
-                title: session.permissionMode.title,
-                tint: session.permissionMode.tint,
-                identifier: "composer.permissionChip",
-                systemImage: "lock.shield"
-            )
+            // 会话模式 / 权限模式不再压在输入框上方：它们仍可在「会话操作 →
+            // 会话配置」里查看与切换，输入区只保留与本次发送直接相关的模型信息。
             Spacer(minLength: PISpacing.s4)
             configurationChip(
                 title: selectedModelLabel,
@@ -1623,6 +1600,66 @@ struct ConversationScreen: View {
             }
         }
         return false
+    }
+
+    /// 新建会话的首条指令发出后，让服务器用当前模型生成一个短标题。
+    ///
+    /// 已经是用户命名 / 已生成过标题的会话不会再调用；旧版 PI-adaptor 没有
+    /// `session/suggest-title` 时会退回指令首行，避免会话一直叫「New session」。
+    private func generateTitleIfNeeded(instruction: String) async {
+        guard let sessionID = session.attachedSessionId,
+              let hostID = model.currentHost?.id
+        else { return }
+        let current = model.sessionDisplayTitle(
+            hostID: hostID,
+            sessionID: sessionID,
+            fallback: session.attachedSummary?.title ?? ""
+        )
+        let normalizedCurrent = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedCurrent.isEmpty
+            || normalizedCurrent == "New session"
+            || normalizedCurrent == "新会话"
+        else { return }
+
+        // 没有绑定的 provider/model 时不调用服务器：直接用指令首行兜底，
+        // 不让新会话一直停留在「新会话」。
+        var title: String?
+        if let providerID = session.selectedProviderId,
+           let modelID = session.selectedModelId {
+            do {
+                title = try await connection.suggestSessionTitle(
+                    sessionId: sessionID,
+                    instruction: instruction,
+                    providerId: providerID,
+                    modelId: modelID,
+                    apiKey: session.providerAPIKey?(providerID),
+                    thinkingLevel: session.thinkingLevel?.rawValue
+                )
+            } catch {
+                title = nil
+            }
+        }
+        let cleaned = sanitizedTitle(title) ?? localFallbackTitle(instruction)
+        guard !cleaned.isEmpty else { return }
+        guard model.renameSession(hostID: hostID, sessionID: sessionID, title: cleaned) else { return }
+        // 本机标题先生效；服务器写入失败不回滚本机名称，下次打开仍能看到。
+        try? await connection.renameSession(sessionId: sessionID, title: cleaned)
+    }
+
+    private func sanitizedTitle(_ raw: String?) -> String? {
+        guard var value = raw?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’。.，,：:；;"))
+        value = value.replacingOccurrences(of: "\n", with: " ")
+        let collapsed = value.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard !collapsed.isEmpty else { return nil }
+        return collapsed.count <= 30 ? collapsed : String(collapsed.prefix(30)) + "…"
+    }
+
+    private func localFallbackTitle(_ instruction: String) -> String {
+        let firstLine = instruction.split(whereSeparator: \.isNewline).first.map(String.init) ?? instruction
+        let collapsed = firstLine.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard !collapsed.isEmpty else { return "" }
+        return collapsed.count <= 24 ? collapsed : String(collapsed.prefix(24)) + "…"
     }
 
     /// 检查当前会话模型的可用性，并返回显式结果（U11）：`superseded` 表示检查期间

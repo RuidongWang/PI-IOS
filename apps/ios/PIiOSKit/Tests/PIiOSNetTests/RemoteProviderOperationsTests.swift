@@ -29,6 +29,34 @@ final class RemoteProviderOperationsTests: XCTestCase {
         XCTAssertEqual(request.timeout, 10)
     }
 
+    func testDiscoveryForwardsWireProtocol() async throws {
+        let client = RecordingProviderV2Client()
+        _ = try await RemoteProviderOperations.discoverModels(
+            client: client,
+            requestURL: "https://api.anthropic.com",
+            apiKey: "sk-ant-test",
+            protocol: "anthropic-messages"
+        )
+        let recorded = await client.request(named: "provider/discover")
+        let request = try XCTUnwrap(recorded)
+        XCTAssertEqual(request.params.value(at: ["protocol"])?.stringValue, "anthropic-messages")
+    }
+
+    func testDiscoveryRetriesWithoutProtocolWhenOldHostRejectsTheParameter() async throws {
+        let client = RecordingProviderV2Client(rejectProtocolParam: true)
+        let models = try await RemoteProviderOperations.discoverModels(
+            client: client,
+            requestURL: "https://api.anthropic.com",
+            apiKey: "sk-ant-test",
+            protocol: "anthropic-messages"
+        )
+        XCTAssertEqual(models.map(\.modelId), ["model_1", "model_2"])
+        let requests = await client.requests()
+        XCTAssertEqual(requests.count, 2, "旧 Host 拒绝后应只重试一次")
+        XCTAssertEqual(requests.first?.params.value(at: ["protocol"])?.stringValue, "anthropic-messages")
+        XCTAssertNil(requests.last?.params.value(at: ["protocol"]), "重试必须去掉旧 Host 不认识的参数")
+    }
+
     func testImportUsesProviderCreateWithWriteContext() async throws {
         let client = RecordingProviderV2Client()
         let payload = ProviderImportPayload.make(
@@ -243,13 +271,16 @@ private actor RecordingProviderV2Client: RACPV2Requesting {
     private var records: [RecordedV2Request] = []
     private let delays: [String: TimeInterval]
     private let createError: RACPV2Error?
+    private let rejectProtocolParam: Bool
 
     init(
         delays: [String: TimeInterval] = [:],
-        createError: RACPV2Error? = nil
+        createError: RACPV2Error? = nil,
+        rejectProtocolParam: Bool = false
     ) {
         self.delays = delays
         self.createError = createError
+        self.rejectProtocolParam = rejectProtocolParam
     }
 
     func v2Request<R: Decodable & Sendable>(
@@ -271,6 +302,10 @@ private actor RecordingProviderV2Client: RACPV2Requesting {
         }
         if method == "provider/create", let createError {
             throw createError
+        }
+        if method == "provider/discover", rejectProtocolParam,
+           params.value(at: ["protocol"]) != nil {
+            throw RACPV2Error.server(code: "INVALID_ARGUMENT", message: "unexpected protocol")
         }
         let requestedModelId = params.value(
             at: ["provider", "models"]

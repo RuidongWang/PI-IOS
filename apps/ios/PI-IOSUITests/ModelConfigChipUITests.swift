@@ -34,10 +34,10 @@ final class ModelConfigChipUITests: XCTestCase {
         app.buttons["打开侧边栏"].tap()
         app.buttons["sidebar.session.S2"].tap()
         XCTAssertTrue(app.navigationBars["Alpha Two"].waitForExistence(timeout: 5))
-        // 运行状态在顶部状态行显示；输入栏不再重复「当前 turn 运行中，发送会排队」。
-        XCTAssertTrue(
-            app.staticTexts["conversation.runningTurn"].waitForExistence(timeout: 5)
-        )
+        // 顶部运行文案已移除；S2 运行中且输入为空时，发送按钮显示为中止按钮。
+        XCTAssertTrue(app.buttons["conversation.interrupt"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["conversation.runningTurn"].exists)
+        XCTAssertFalse(app.staticTexts["conversation.queueHint"].exists)
         XCTAssertTrue(modelChip.waitForExistence(timeout: 5))
         XCTAssertTrue(modelChip.label.contains("Beta Basic"))
         XCTAssertFalse(app.buttons["composer.thinkingChip"].exists, "无档位模型不得显示档位 chip")

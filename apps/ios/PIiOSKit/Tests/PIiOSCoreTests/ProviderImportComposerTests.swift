@@ -172,31 +172,44 @@ final class ProviderImportComposerTests: XCTestCase {
         XCTAssertEqual(composition.payload.defaultModel?.modelId, "gemini-3-pro")
     }
 
-    func testDeepSeekPresetPreservesOfficialVendorKey() throws {
+    func testSupportedProtocolsComposeWithStableVendorKey() throws {
         let spec = ProviderModelSpec(
-            id: "deepseek-flash",
-            contextWindow: 1_048_576,
-            maxTokens: 393_216,
-            thinkingLevels: ["off", "low", "medium", "high", "max"],
-            defaultThinkingLevel: "medium",
-            supportsReasoningEffort: true,
-            supportsImages: true
+            id: "model-1",
+            contextWindow: 128_000,
+            maxTokens: 8_192,
+            thinkingLevels: ["off", "low", "high"],
+            defaultThinkingLevel: "low"
         )
 
-        let composition = ProviderImportComposer.compose(
-            serviceName: "DeepSeek",
-            baseURL: "https://api.deepseek.com",
-            apiKey: "test-key",
-            models: [spec],
-            setDefaultModel: true,
-            vendorKey: "deepseek"
-        )
+        for wireProtocol in ProviderVendorSchema.supportedProtocols {
+            let vendorKey = ProviderImportComposer.vendorKey(
+                for: wireProtocol,
+                baseURL: "http://localhost:8080"
+            )
+            XCTAssertTrue(vendorKey.hasPrefix("\(wireProtocol)-"), "vendorKey 应带协议前缀：\(vendorKey)")
+            XCTAssertEqual(
+                vendorKey,
+                ProviderImportComposer.vendorKey(for: wireProtocol, baseURL: " http://localhost:8080 "),
+                "同一网关重复导入必须得到同一个 vendorKey"
+            )
 
-        XCTAssertEqual(composition.input.vendorKey, "deepseek")
-        XCTAssertEqual(composition.input.baseUrl, "https://api.deepseek.com")
-        XCTAssertTrue(composition.isValid, "\(composition.issues)")
-        let encoded = try ProviderImportEncoder.encodeToString(composition.payload)
-        XCTAssertTrue(encoded.contains("\"vendorKey\":\"deepseek\""))
+            let composition = ProviderImportComposer.compose(
+                serviceName: "localhost",
+                baseURL: "http://localhost:8080",
+                apiKey: "test-key",
+                models: [spec],
+                setDefaultModel: true,
+                vendorKey: vendorKey,
+                wireProtocol: wireProtocol
+            )
+
+            XCTAssertTrue(composition.isValid, "\(composition.issues)")
+            XCTAssertEqual(composition.input.type, "custom")
+            XCTAssertEqual(composition.input.protocol, wireProtocol)
+            XCTAssertEqual(composition.input.apiStyle, ProviderImportComposer.apiStyle(for: wireProtocol))
+            let encoded = try ProviderImportEncoder.encodeToString(composition.payload)
+            XCTAssertTrue(encoded.contains("\"vendorKey\":\"\(vendorKey)\""))
+        }
     }
 
     private static var plainSpec: ProviderModelSpec {

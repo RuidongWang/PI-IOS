@@ -1461,6 +1461,52 @@ public actor RACPClient {
         return result
     }
 
+    /// 让 AI 根据首条指令生成会话标题（0.0.4 起支持）。
+    ///
+    /// 旧版 PI-adaptor 没有这个方法，调用方应把 `METHOD_NOT_FOUND` 当成
+    /// 「不支持」并退回本地标题，而不是把它当成会话失败。
+    public func suggestSessionTitle(
+        sessionId: String,
+        instruction: String,
+        providerId: String,
+        modelId: String,
+        apiKey: String?,
+        thinkingLevel: String? = nil,
+        timeout: TimeInterval = 30
+    ) async throws -> String {
+        var fields: [String: JSONValue] = [
+            "context": .object([
+                "requestId": .string(UUID().uuidString),
+            ]),
+            "sessionId": .string(sessionId),
+            "instruction": .string(instruction),
+            "providerId": .string(providerId),
+            "modelId": .string(modelId),
+        ]
+        if let apiKey, !apiKey.isEmpty { fields["apiKey"] = .string(apiKey) }
+        if let thinkingLevel, !thinkingLevel.isEmpty { fields["thinkingLevel"] = .string(thinkingLevel) }
+        let params: JSONValue = .object(fields)
+        let result: RACPV2SuggestTitleResult = try await request(
+            .sessionSuggestTitle,
+            params: params,
+            timeout: timeout
+        )
+        return result.title
+    }
+
+    /// 把服务器上的会话改名（AI 标题确认后写入）。
+    public func renameSession(sessionId: String, title: String) async throws {
+        let params: JSONValue = .object([
+            "context": .object(["requestId": .string(UUID().uuidString)]),
+            "sessionId": .string(sessionId),
+            "title": .string(title),
+        ])
+        let _: RACPV2SessionResult = try await request(
+            .sessionRename,
+            params: params
+        )
+    }
+
     /// 中止正在运行的 turn（AC-09.1）。
     public func interruptTurn(turnId: String) async throws {
         let _: RACPTurnResult = try await request(

@@ -74,7 +74,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("SET-01", text("外观") && text("离线缓存上限") && text("撤销本机配对"), "本机三行")
         expect("SET-07", text("PI-adaptor 版本") && text("fixture-only"), "PI-adaptor 版本行显示实际版本")
         expect("SET-07", textContaining("运行版本不匹配"), "隧道分组内版本不匹配提示")
-        expect("SET-07", app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "期望 pi-adaptor 0.0.3")).firstMatch.exists, "版本不匹配展示 App 内置期望版本")
+        expect("SET-07", app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "期望 pi-adaptor 0.0.4")).firstMatch.exists, "版本不匹配展示 App 内置期望版本")
         expect("SET-07", app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "实际 Fixture Lifecycle fixture-only")).firstMatch.exists, "版本不匹配展示实际版本")
         expect("SET-07", textContaining("请重新安装 PI-adaptor"), "版本不匹配提供修复指引")
         expect("SET-07", app.descendants(matching: .any)["settings.runtimeVersionMismatch"].exists, "版本不匹配稳定标识")
@@ -349,31 +349,43 @@ final class UIRegressionSuiteTests: XCTestCase {
         openListRow("模型服务", requireExact: false)
         app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Alpha Models")).firstMatch.tap()
         expect("MDL-08", app.navigationBars["模型服务详情"].waitForExistence(timeout: 5), "已配置服务详情")
-        app.buttons["编辑模型"].tap()
-        expect("MDL-08", app.navigationBars["编辑模型服务"].waitForExistence(timeout: 5), "模型编辑表单")
-        expect("MDL-08", app.secureTextFields["models.provider.editAPIKey"].value as? String == "新 API Key", "密钥不回填")
-        let modelID = app.textFields["models.provider.modelID"].firstMatch
-        replaceText(modelID, with: "alpha-next")
-        app.buttons["添加模型"].tap()
-        expect("MDL-08", app.textFields.matching(identifier: "models.provider.modelID").count == 2, "可添加多个模型")
-        let lastRemoveButton = app.buttons.matching(identifier: "移除模型").element(boundBy: 1)
-        scrollUntilHittable(lastRemoveButton)
-        lastRemoveButton.tap()
-        expect("MDL-08", app.textFields.matching(identifier: "models.provider.modelID").count == 1, "新增后可移除模型且不崩溃")
-        app.buttons["添加模型"].tap()
-        expect("MDL-08", app.textFields.matching(identifier: "models.provider.modelID").count == 2, "移除后可再次添加")
-        scrollUntilHittable(app.buttons["models.provider.save"])
-        app.buttons["models.provider.save"].tap()
-        expect("MDL-08", app.alerts["模型服务未更新"].waitForExistence(timeout: 5), "新增模型 ID 必填且不发成功回执")
-        app.alerts["模型服务未更新"].buttons["知道了"].tap()
-        replaceText(app.textFields.matching(identifier: "models.provider.modelID").element(boundBy: 1), with: "alpha-mini")
-        app.buttons["models.provider.save"].tap()
-        expect("MDL-08", app.alerts["模型服务已更新"].waitForExistence(timeout: 5), "更新成功提示")
-        snapshot("MDL-08", step: 1)
+        expect("MDL-08", textContaining("2 个模型 · 本机记录"), "详情模型计数")
+        expect("MDL-08", text("Alpha Pro") && text("Alpha Mini"), "每个模型独立成行")
+
+        // 单个模型编辑：只改这一个模型，模型 ID 不可改。
+        let editMini = app.buttons["models.provider.editModel.alpha-mini"]
+        scrollUntilHittable(editMini)
+        editMini.tap()
+        expect("MDL-08", app.navigationBars["编辑模型"].waitForExistence(timeout: 5), "单模型编辑表单")
+        expect("MDL-08", text("alpha-mini"), "模型 ID 只读展示")
+        let displayName = app.textFields["模型显示名"].firstMatch
+        expect("MDL-08", displayName.waitForExistence(timeout: 5), "显示名字段")
+        replaceText(displayName, with: "Alpha Mini Next")
+        let contextWindow = app.textFields["models.provider.contextWindow"]
+        replaceText(contextWindow, with: "64000")
+        app.buttons["models.provider.thinkingLevels"].tap()
+        let highLevel = app.buttons["high"].firstMatch
+        expect("MDL-08", highLevel.waitForExistence(timeout: 5), "思考档位下拉复选")
+        highLevel.tap()
+        app.buttons["保存这个模型"].tap()
+        expect("MDL-08", app.alerts["模型服务已更新"].waitForExistence(timeout: 8), "更新成功提示")
         app.alerts["模型服务已更新"].buttons["知道了"].tap()
-        expect("MDL-08", textContaining("2 个模型 · 本机记录"), "本机镜像同步更新")
-        expect("MDL-08", text("alpha-next") && text("alpha-mini"), "完整模型列表刷新")
-        expect("MDL-08", !text("alpha-pro"), "旧默认模型移除后不保留")
+        snapshot("MDL-08", step: 1)
+        expect("MDL-08", text("Alpha Mini Next"), "只更新被编辑的模型")
+        expect("MDL-08", textContaining("64K ctx"), "上下文上限写入")
+
+        // 设为模型：默认标记从 alpha-pro 切到 alpha-mini。
+        let setDefault = app.buttons["models.provider.setDefault.alpha-mini"]
+        scrollUntilHittable(setDefault)
+        setDefault.tap()
+        expect("MDL-08", app.alerts["模型服务已更新"].waitForExistence(timeout: 8), "设为模型成功提示")
+        app.alerts["模型服务已更新"].buttons["知道了"].tap()
+        expect(
+            "MDL-08",
+            app.buttons["models.provider.setDefault.alpha-pro"].waitForExistence(timeout: 5)
+                && !app.buttons["models.provider.setDefault.alpha-mini"].exists,
+            "默认模型切换后按钮随之切换"
+        )
     }
 
     func testModelsProvidersAndSkills() {
@@ -389,27 +401,31 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("MDL-01", textContaining("点一条服务可查看详情并删除"), "清单 footer")
         snapshot("MDL-01", step: 1)
 
-        let openAI = segmentedButton("OpenAI-Compatible")
-        let deepSeek = segmentedButton("DeepSeek 官方")
-        scrollUntilHittable(openAI)
-        openAI.tap()
         let nameField = app.textFields["models.serviceName"]
         let baseField = app.textFields["models.baseURL"]
         let keyField = app.secureTextFields["models.apiKey"]
-        expect("MDL-02", nameField.value as? String == "" || nameField.value as? String == "Antigravity", "OpenAI 服务名为空")
-        expect("MDL-02", baseField.value as? String == "" || baseField.value as? String == "http://203.0.113.10:8080/antigravity", "OpenAI Base URL 为空")
-        keyField.tap()
-        keyField.typeText("not-submitted")
-        deepSeek.tap()
-        expect("MDL-02", nameField.value as? String == "DeepSeek", "DeepSeek 服务名联动")
-        expect("MDL-02", baseField.value as? String == "https://api.deepseek.com", "DeepSeek Base URL 联动")
+        scrollUntilHittable(app.buttons["models.servicePreset"])
+        expect("MDL-02", nameField.value as? String == "localhost", "服务名默认 localhost")
+        expect("MDL-02", baseField.value as? String == "http://localhost:8080", "Base URL 默认指向本机")
+        expect("MDL-02", baseField.isEnabled && keyField.isEnabled, "API Key 与 Base URL 始终可编辑")
         expect("MDL-02", !app.buttons["获取模型"].isEnabled, "空 Key 禁用获取")
 
-        segmentedButton("订阅账号登录").tap()
-        expect("MDL-03", text("暂不支持订阅账号登录；不会发起 OAuth 或访问账号授权页面。"), "订阅登录警告")
-        expect("MDL-03", !baseField.isEnabled && !keyField.isEnabled && !app.buttons["获取模型"].isEnabled, "订阅登录禁用字段")
-        segmentedButton("API Key + Base URL").tap()
-        expect("MDL-03", !text("暂不支持订阅账号登录；不会发起 OAuth 或访问账号授权页面。"), "切回 API Key 警告消失")
+        // MDL-03：只保留四种线路协议，没有订阅登录入口。
+        expect("MDL-03", !segmentedButton("订阅账号登录").exists, "订阅账号登录已移除")
+        expect("MDL-03", !textContaining("订阅"), "页面不再出现订阅相关文案")
+        for protocolName in [
+            "OpenAI Chat Completions",
+            "OpenAI Responses",
+            "Anthropic Messages",
+            "Google Generative AI",
+        ] {
+            app.buttons["models.servicePreset"].tap()
+            let option = app.buttons[protocolName].firstMatch
+            expect("MDL-03", option.waitForExistence(timeout: 5), "协议选项 \(protocolName)")
+            option.tap()
+            expect("MDL-03", nameField.value as? String == "localhost", "\(protocolName) 下服务名保持 localhost")
+            expect("MDL-03", baseField.value as? String == "http://localhost:8080", "\(protocolName) 下 Base URL 保持本机地址")
+        }
 
         for _ in 0..<8 { app.swipeDown() }
         let alphaRow = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Alpha Models")).firstMatch
@@ -420,13 +436,13 @@ final class UIRegressionSuiteTests: XCTestCase {
         }
         expect("MDL-04", app.navigationBars["模型服务详情"].waitForExistence(timeout: 5), "模型服务详情")
         expect("MDL-04", text("1 个模型 · 本机记录"), "详情摘要")
-        scrollUntil(textContaining: "200K ctx · 8K output · off/low/high")
+        scrollUntil(textContaining: "200K ctx · 8192 output · 思考 off/low/high")
         expect(
             "MDL-04",
-            textContaining("alpha-pro") && textContaining("200K ctx · 8192 output · off/low/high"),
+            textContaining("alpha-pro") && textContaining("200K ctx · 8192 output · 思考 off/low/high"),
             "模型参数"
         )
-        expect("MDL-04", text("默认"), "默认标记")
+        expect("MDL-04", text("当前"), "默认标记")
         scrollUntilHittable(app.buttons["删除这条服务"])
         expect(
             "MDL-04",
@@ -455,10 +471,10 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect(
             "HPR-01",
             text("新增 provider")
-                && app.textFields["DeepSeek"].exists
+                && app.textFields["localhost"].exists
                 && app.textFields["https://api.example.com/v1"].exists
                 && app.secureTextFields["sk-…"].exists
-                && app.textFields["deepseek-chat"].exists,
+                && app.textFields["model-id"].exists,
             "新增 provider 四字段"
         )
         let saveProvider = app.buttons["保存到 PI-adaptor"]
@@ -633,7 +649,12 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("SID-05", text("Fixture Online PI-adaptor · fixture@fixture-online.invalid:22 · 模型未绑定"), "会话副信息")
         app.buttons["打开侧边栏"].tap()
         app.buttons["sidebar.session.S2"].tap()
-        expect("SID-05", app.navigationBars["Fixture S2 Beta"].waitForExistence(timeout: 5) && text("正在运行 turn-s2"), "S2 运行状态")
+        expect(
+            "SID-05",
+            app.navigationBars["Fixture S2 Beta"].waitForExistence(timeout: 5)
+                && app.buttons["conversation.interrupt"].exists,
+            "S2 运行状态（空输入时显示中止按钮）"
+        )
         snapshot("SID-05", step: 1)
 
         launch("online-two-hosts", closeSidebar: false)
@@ -687,7 +708,8 @@ final class UIRegressionSuiteTests: XCTestCase {
         launch("online-model-config")
         openSession("S2", title: "Alpha Two")
         let interrupt = app.buttons["conversation.interrupt"]
-        expect("CNV-04", text("正在运行 turn-s2") && interrupt.exists && interrupt.isEnabled, "运行中和中止")
+        expect("CNV-04", interrupt.waitForExistence(timeout: 5) && interrupt.isEnabled, "运行中和中止")
+        expect("CNV-04", !text("正在运行 turn-s2"), "顶部不再显示运行文案")
         expect("CNV-04", text("正在生成 N 条内容…") || app.staticTexts["conversation.streamingCount"].exists, "生成内容提示")
         interrupt.tap()
         expect("CNV-04", text("已中止"), "中止结果")
@@ -717,7 +739,8 @@ final class UIRegressionSuiteTests: XCTestCase {
 
         launch("online-model-config")
         openSession("S1", title: "Alpha One")
-        expect("CNV-11", text("Agent") && text("每次询问") && text("Alpha Models · Alpha Pro") && text("low"), "四个 chips")
+        expect("CNV-11", text("Alpha Models · Alpha Pro") && text("low"), "模型与思考档位 chips")
+        expect("CNV-11", !app.buttons["composer.permissionChip"].exists, "权限 chip 已从输入栏移除")
         app.buttons["composer.modelChip"].tap()
         expect("CNV-11", app.navigationBars["会话配置"].waitForExistence(timeout: 5), "模型 chip 打开配置")
         expect("CNV-11", text("权限模式") && text("会话模式") && text("模型") && text("思考档位"), "四个配置分组")
@@ -725,11 +748,11 @@ final class UIRegressionSuiteTests: XCTestCase {
         app.buttons["打开侧边栏"].tap()
         app.buttons["sidebar.session.S2"].tap()
         expect("CNV-11", app.navigationBars["Alpha Two"].waitForExistence(timeout: 5), "切到运行中的 S2")
-        let chip = app.buttons["composer.permissionChip"]
-        expect("CNV-11", chip.waitForExistence(timeout: 5), "运行中仍显示权限 chip")
-        // 旧断言 `!chip.isEnabled || !配置页.exists` 中后一项在没点 chip 时恒为真：
-        // 生产里去掉运行中禁用也能通过。这里直接断言禁用本身。
-        expect("CNV-11", !chip.isEnabled, "运行中 chips 必须禁用")
+        // 空输入 + 运行中：发送按钮变成中止按钮；模型 chip 仍可见但不可编辑。
+        expect("CNV-11", app.buttons["conversation.interrupt"].waitForExistence(timeout: 5), "运行中显示中止按钮")
+        let chip = app.buttons["composer.modelChip"]
+        expect("CNV-11", chip.exists && !chip.isEnabled, "运行中模型 chip 必须禁用")
+        expect("CNV-11", !app.buttons["composer.permissionChip"].exists, "权限 chip 不再出现在输入栏")
         snapshot("CNV-11", step: 1)
 
         launch("online-model-config")
@@ -865,12 +888,23 @@ final class UIRegressionSuiteTests: XCTestCase {
             "首次指纹核对"
         )
         expect("SRV-02", textContaining("SHA256:"), "显示服务器 SHA256 指纹")
+        // 真实服务器的 SSH 握手可能慢到几十秒：指纹弹层和测试结果都要给足时间，
+        // 否则会把「还在连接」误判成「没有确认入口」。
         let trustHost = app.buttons["指纹一致，信任这台服务器"]
         let cancelTrust = app.buttons["取消（不建立连接）"]
-        let hasTrustPrompt = trustHost.waitForExistence(timeout: 5)
-        expect("SRV-02", hasTrustPrompt ? cancelTrust.exists : text("正在测试连接…"), "指纹确认按钮或已固定指纹")
+        let hasTrustPrompt = trustHost.waitForExistence(timeout: 45)
+        expect(
+            "SRV-02",
+            hasTrustPrompt ? cancelTrust.exists : textContaining("测试结果") || text("在线"),
+            "指纹确认按钮或已固定指纹"
+        )
         if hasTrustPrompt { trustHost.tap() }
-        expect("SRV-02", app.staticTexts["正在测试连接"].waitForExistence(timeout: 15) || text("测试结果"), "连接测试反馈")
+        expect(
+            "SRV-02",
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "测试结果"))
+                .firstMatch.waitForExistence(timeout: 90),
+            "连接测试反馈"
+        )
         expect("SRV-02", app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "测试结果")).firstMatch.waitForExistence(timeout: 20), "连接测试结果")
 
         let token = app.secureTextFields["ppt2.…"]
@@ -882,7 +916,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("SRV-02", app.staticTexts["配对成功；设备令牌已保存"].waitForExistence(timeout: 30), "配对成功")
         goBack()
         expect("SRV-02", app.navigationBars["设置"].waitForExistence(timeout: 8), "返回设置")
-        expect("SRV-02", text("在线"), "配对后在线")
+        expect("SRV-02", waitForLabel("在线", timeout: 30), "配对后在线")
         expect("SRV-02", hostRow("UI Regression PI-adaptor").label.contains("已配对"), "主机行已配对")
 
         // MDL-06: unreachable endpoint must fail closed.
@@ -895,34 +929,56 @@ final class UIRegressionSuiteTests: XCTestCase {
         apiKey.tap()
         apiKey.typeText("sk-ui-regression-invalid")
         app.buttons["获取模型"].tap()
-        expect("MDL-06", text("正在获取模型"), "获取模型进度")
-        expect("MDL-06", app.staticTexts["模型配置未完成"].waitForExistence(timeout: 25), "获取模型失败横幅")
+        // 公网 http 地址会在服务器侧被拒绝；进度提示可能一闪而过，
+        // 只要最终出现固定错误文案且不生成清单，就是 fail-closed。
+        expect(
+            "MDL-06",
+            text("正在获取模型") || app.staticTexts["模型请求地址不合法"].waitForExistence(timeout: 25),
+            "获取模型进度或失败提示"
+        )
+        expect("MDL-06", app.staticTexts["模型请求地址不合法"].waitForExistence(timeout: 25), "获取模型失败提示")
         expect("MDL-06", !app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "可用模型")).firstMatch.exists, "失败不生成模型清单")
         goBack()
 
         // HPR-02/HPR-03.
         openListRow("PI-adaptor v2 Provider", requireExact: false)
-        expect("HPR-02", app.navigationBars["PI-adaptor Provider"].waitForExistence(timeout: 8), "PI-adaptor Provider")
+        if !app.navigationBars["PI-adaptor Provider"].waitForExistence(timeout: 8) {
+            // 滚动惯性会把第一次点击当作「停止滚动」；重试一次再断言。
+            openListRow("PI-adaptor v2 Provider", requireExact: false)
+        }
+        expect("HPR-02", app.navigationBars["PI-adaptor Provider"].waitForExistence(timeout: 10), "PI-adaptor Provider")
         let providerName = "ui-regression-openai"
-        replace(app.textFields["DeepSeek"], with: providerName)
+        replace(app.textFields["localhost"], with: providerName)
         replace(app.textFields["https://api.example.com/v1"], with: environment["PI_IOS_LIVE_LLM_BASE_URL"] ?? "")
         replace(app.secureTextFields["sk-…"], with: environment["PI_IOS_LIVE_LLM_API_KEY"] ?? "")
-        replace(app.textFields["deepseek-chat"], with: environment["PI_IOS_LIVE_LLM_MODEL"] ?? "")
+        replace(app.textFields["model-id"], with: environment["PI_IOS_LIVE_LLM_MODEL"] ?? "")
         let saveProvider = app.buttons["保存到 PI-adaptor"]
         scrollUntilHittable(saveProvider)
         expect("HPR-02", saveProvider.isEnabled, "provider 四字段已填")
         saveProvider.tap()
         let providerRow = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", providerName)).firstMatch
         expect("HPR-02", providerRow.waitForExistence(timeout: 30) || text("Provider 操作失败"), "provider 创建结果")
-        expect("HPR-02", (app.textFields["DeepSeek"].value as? String ?? "").isEmpty, "创建后表单清空")
+        expect(
+            "HPR-02",
+            app.textFields["localhost"].waitForExistence(timeout: 5)
+                && (app.textFields["localhost"].value as? String ?? "") != providerName,
+            "创建后表单清空"
+        )
         if providerRow.exists {
-            let delete = providerRow.buttons["删除"].firstMatch
-            if delete.exists { delete.tap() } else { app.buttons["删除"].firstMatch.tap() }
-            expect("HPR-03", text("删除 provider？") && text("不会自动把默认项切到其他 provider"), "删除 provider 确认")
-            app.buttons["取消"].firstMatch.tap()
-            expect("HPR-03", providerRow.exists, "取消保留 provider")
-            app.buttons["删除"].firstMatch.tap()
-            app.buttons["删除"].firstMatch.tap()
+            // 服务器上可能还有其他 provider：按名称锁定这一行的删除按钮，避免删错。
+            tapProviderRowDelete(providerName)
+            let dialog = app.staticTexts["删除 provider？"]
+            expect(
+                "HPR-03",
+                dialog.waitForExistence(timeout: 8) && textContaining("不会自动把默认项切到其他 provider"),
+                "删除 provider 确认"
+            )
+            // 同 SRV-06：iOS 26 的 confirmationDialog 是 popover，取消靠点击外部。
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.92)).tap()
+            expect("HPR-03", app.staticTexts["删除 provider？"].waitForNonExistence(timeout: 5), "取消关闭确认")
+            expect("HPR-03", providerRow.waitForExistence(timeout: 10), "取消保留 provider")
+            tapProviderRowDelete(providerName)
+            tapProviderDeleteConfirm()
             expect("HPR-03", providerRow.waitForNonExistence(timeout: 20), "确认后 provider 消失")
         } else {
             expect("HPR-03", false, "HPR-02 失败，无法执行删除")
@@ -933,7 +989,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         openListRow("全局 Skill", requireExact: false)
         segmentedButton("服务器目录").tap()
         let skillSource = app.textFields["/home/user/skills/demo"]
-        replace(skillSource, with: "/home/ubuntu/pi-regression-skills/sample")
+        replace(skillSource, with: "/home/ubuntu/.pi-adaptor/pi-fixtures/ui-regression-sample")
         app.buttons["安装 Skill"].tap()
         let skillRow = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "ui-regression-sample")).firstMatch
         expect("SKL-02", skillRow.waitForExistence(timeout: 30) || text("Skill 操作失败"), "Skill 安装结果")
@@ -953,16 +1009,28 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("PRJ-04", addProject.waitForExistence(timeout: 10) && addProject.isEnabled, "项目加号可用")
         addProject.tap()
         expect("PRJ-04", app.navigationBars["选择服务器目录"].waitForExistence(timeout: 8), "目录浏览器")
-        let entry = app.buttons["projectBrowser.entry./home/ubuntu/pi-regression-project"]
-        scrollUntilHittable(entry)
-        expect("PRJ-04", entry.waitForExistence(timeout: 10), "目标目录")
-        entry.tap()
+        openProjectDirectory("/home/ubuntu/pi-regression-project")
         expect("PRJ-04", app.staticTexts["projectBrowser.currentPath"].label == "/home/ubuntu/pi-regression-project", "完整路径")
         let projectName = app.textFields["projectBrowser.name"]
         replace(projectName, with: "UI Regression Project")
         app.buttons["用当前目录注册项目"].tap()
+        // toast 是合并后的无障碍元素（不是 StaticText）；服务器上已存在该目录时
+        // 文案是「该项目已存在，已切换为当前项目」，两条都算注册成功。
+        expect(
+            "PRJ-04",
+            app.descendants(matching: .any)
+                .matching(
+                    NSPredicate(
+                        format: "label CONTAINS %@ OR label CONTAINS %@ OR label CONTAINS %@",
+                        "已注册项目",
+                        "该项目已存在",
+                        "已更新项目名称"
+                    )
+                )
+                .firstMatch.waitForExistence(timeout: 10),
+            "注册成功 toast"
+        )
         expect("PRJ-04", app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "UI Regression Project")).firstMatch.waitForExistence(timeout: 20), "注册项目出现在列表")
-        expect("PRJ-04", text("已注册项目「UI Regression Project」"), "注册成功 toast")
     }
 
     func testLiveHostManagementContinuation() throws {
@@ -994,16 +1062,16 @@ final class UIRegressionSuiteTests: XCTestCase {
         }
         goBack()
         expect("SRV-02", app.navigationBars["设置"].waitForExistence(timeout: 8), "续跑：返回设置")
-        expect("SRV-02", text("在线"), "续跑：配对后在线")
+        expect("SRV-02", waitForLabel("在线", timeout: 30), "续跑：配对后在线")
         expect("SRV-02", hostRow("UI Regression PI-adaptor").label.contains("已配对"), "续跑：主机行已配对")
 
         openListRow("PI-adaptor v2 Provider", requireExact: false)
         expect("HPR-02", app.navigationBars["PI-adaptor Provider"].waitForExistence(timeout: 8), "PI-adaptor Provider")
         let providerName = "ui-regression-openai"
-        replace(app.textFields["DeepSeek"], with: providerName)
+        replace(app.textFields["localhost"], with: providerName)
         replace(app.textFields["https://api.example.com/v1"], with: environment["PI_IOS_LIVE_LLM_BASE_URL"] ?? "")
         replace(app.secureTextFields["sk-…"], with: environment["PI_IOS_LIVE_LLM_API_KEY"] ?? "")
-        replace(app.textFields["deepseek-chat"], with: environment["PI_IOS_LIVE_LLM_MODEL"] ?? "")
+        replace(app.textFields["model-id"], with: environment["PI_IOS_LIVE_LLM_MODEL"] ?? "")
         let saveProvider = app.buttons["保存到 PI-adaptor"]
         scrollUntilHittable(saveProvider)
         expect("HPR-02", saveProvider.isEnabled, "provider 四字段已填")
@@ -1012,16 +1080,32 @@ final class UIRegressionSuiteTests: XCTestCase {
             .matching(NSPredicate(format: "label CONTAINS %@", providerName))
             .firstMatch
         expect("HPR-02", providerRow.waitForExistence(timeout: 30) || text("Provider 操作失败"), "provider 创建结果")
-        expect("HPR-02", (app.textFields["DeepSeek"].value as? String ?? "").isEmpty, "创建后表单清空")
+        expect(
+            "HPR-02",
+            app.textFields["localhost"].waitForExistence(timeout: 5)
+                && (app.textFields["localhost"].value as? String ?? "") != providerName,
+            "创建后表单清空"
+        )
         if providerRow.exists {
-            let delete = app.buttons["删除"].firstMatch
-            expect("HPR-03", delete.waitForExistence(timeout: 5), "provider 删除入口")
-            delete.tap()
-            expect("HPR-03", text("删除 provider？") && textContaining("不会自动把默认项切到其他 provider"), "删除 provider 确认")
+            // 服务器上可能还有其他 provider：按名称锁定这一行的删除按钮，避免删错。
+            expect(
+                "HPR-03",
+                app.buttons.matching(identifier: "providers.delete.\(providerName)").firstMatch.waitForExistence(timeout: 10),
+                "provider 删除入口"
+            )
+            tapProviderRowDelete(providerName)
+            expect(
+                "HPR-03",
+                app.staticTexts["删除 provider？"].waitForExistence(timeout: 8)
+                    && textContaining("不会自动把默认项切到其他 provider"),
+                "删除 provider 确认"
+            )
+            // 同 SRV-06：iOS 26 的 confirmationDialog 是 popover，取消靠点击外部。
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.92)).tap()
-            expect("HPR-03", providerRow.exists, "取消保留 provider")
-            app.buttons["删除"].firstMatch.tap()
-            app.buttons["删除"].firstMatch.tap()
+            expect("HPR-03", app.staticTexts["删除 provider？"].waitForNonExistence(timeout: 5), "取消关闭确认")
+            expect("HPR-03", providerRow.waitForExistence(timeout: 10), "取消保留 provider")
+            tapProviderRowDelete(providerName)
+            tapProviderDeleteConfirm()
             expect("HPR-03", providerRow.waitForNonExistence(timeout: 20), "确认后 provider 消失")
         } else {
             expect("HPR-03", false, "HPR-02 失败，无法执行删除")
@@ -1030,7 +1114,7 @@ final class UIRegressionSuiteTests: XCTestCase {
 
         openListRow("全局 Skill", requireExact: false)
         segmentedButton("服务器目录").tap()
-        replace(app.textFields["/home/user/skills/demo"], with: "/home/ubuntu/pi-regression-skills/sample")
+        replace(app.textFields["/home/user/skills/demo"], with: "/home/ubuntu/.pi-adaptor/pi-fixtures/ui-regression-sample")
         app.buttons["安装 Skill"].tap()
         let skillRow = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS %@", "ui-regression-sample"))
@@ -1055,10 +1139,8 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("PRJ-04", addProject.waitForExistence(timeout: 10) && addProject.isEnabled, "项目加号可用")
         addProject.tap()
         expect("PRJ-04", app.navigationBars["选择服务器目录"].waitForExistence(timeout: 8), "目录浏览器")
-        let entry = app.buttons["projectBrowser.entry./home/ubuntu/pi-regression-project"]
-        scrollUntilHittable(entry)
-        expect("PRJ-04", entry.waitForExistence(timeout: 10), "目标目录")
-        entry.tap()
+        openProjectDirectory("/home/ubuntu/pi-regression-project")
+        expect("PRJ-04", app.staticTexts["projectBrowser.currentPath"].label == "/home/ubuntu/pi-regression-project", "目标目录")
         let projectName = app.textFields["projectBrowser.name"]
         replace(projectName, with: "UI Regression Project")
         app.buttons["用当前目录注册项目"].tap()
@@ -1197,8 +1279,62 @@ final class UIRegressionSuiteTests: XCTestCase {
         app.buttons.matching(NSPredicate(format: "label CONTAINS %@", name)).firstMatch
     }
 
+    /// 目录浏览器会记住上次位置；如果已经站在目标目录，就不再去找同名的子目录行。
+    private func openProjectDirectory(_ path: String) {
+        let current = app.staticTexts["projectBrowser.currentPath"]
+        if current.waitForExistence(timeout: 10), current.label == path { return }
+        let entry = app.buttons["projectBrowser.entry.\(path)"]
+        scrollUntilHittable(entry)
+        if entry.waitForExistence(timeout: 10) { entry.tap() }
+    }
+
+    /// 点某一行 provider 的「删除」。行内容的 `.accessibilityElement(children: .combine)`
+    /// 会让同一个标识出现两次（合并行 + 内部按钮），逐个尝试可命中的那个，
+    /// 并确认删除确认框真的出现，避免命中无效副本后静默跳过。
+    private func tapProviderRowDelete(_ name: String) {
+        let query = app.buttons.matching(identifier: "providers.delete.\(name)")
+        let dialog = app.staticTexts["删除 provider？"]
+        for _ in 0..<12 where !dialog.exists {
+            for index in 0..<query.count {
+                let element = query.element(boundBy: index)
+                if element.isHittable {
+                    element.tap()
+                    if dialog.waitForExistence(timeout: 3) { return }
+                }
+            }
+            app.swipeUp()
+        }
+    }
+
+    /// iOS 26 的 confirmationDialog 是 popover：行内与对话框里都有「删除」按钮时，
+    /// `firstMatch` 会先命中被 popover 遮住的行内按钮（hit point 为 -1,-1）。
+    /// 用无障碍标识锁定对话框内的确认按钮；标识不可用时退回最后一个同名按钮。
+    private func tapProviderDeleteConfirm() {
+        let identified = app.buttons.matching(identifier: "providers.delete.confirm").firstMatch
+        if identified.waitForExistence(timeout: 8) {
+            // popover 会把同一个按钮渲染两次（模板 + 实际弹出层），只点可命中的那个。
+            let matches = app.buttons.matching(identifier: "providers.delete.confirm")
+            for index in 0..<matches.count {
+                let element = matches.element(boundBy: index)
+                if element.isHittable { element.tap(); return }
+            }
+            matches.firstMatch.tap()
+            return
+        }
+        let matches = app.buttons.matching(NSPredicate(format: "label == %@", "删除"))
+        matches.element(boundBy: max(matches.count - 1, 0)).tap()
+    }
+
     private func text(_ value: String) -> Bool {
         app.staticTexts[value].exists || app.buttons[value].exists || app.otherElements[value].exists
+    }
+
+    /// 连接状态在配对回执之后由 WebSocket 推送更新，需要等它到达而不是立刻断言。
+    private func waitForLabel(_ value: String, timeout: TimeInterval) -> Bool {
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", value))
+            .firstMatch
+            .waitForExistence(timeout: timeout)
     }
 
     private func textContaining(_ value: String) -> Bool {

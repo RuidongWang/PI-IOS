@@ -554,14 +554,13 @@ final class ProviderImportPayloadTests: XCTestCase {
         XCTAssertTrue(issues.contains { $0.kind == .undecodablePayload }, "\(issues)")
     }
 
-    func testAC04_5_validationRejectsLoopbackEndpointWithChineseReason() {
+    func testAC04_5_validationAcceptsLoopbackEndpoint() {
+        // 回环地址是默认的本机模型网关（服务名/Base URL 默认 localhost），
+        // provider-import 由服务器上的 PI-adaptor 发起，回环只指向服务器自身。
         var input = Self.validInput()
         input.baseUrl = "http://127.0.0.1:11434/v1"
         let issues = ProviderImportValidation.issues(in: ProviderImportPayload.make(inputs: [input]))
-        guard let issue = issues.first(where: { $0.kind == .endpointRejected }) else {
-            return XCTFail("回环端点必须在提交前被拦下：\(issues)")
-        }
-        XCTAssertTrue(issue.message.contains("回环"))
+        XCTAssertFalse(issues.contains { $0.kind == .endpointRejected }, "\(issues)")
     }
 
     func testAC04_5_validationRejectsExcludedVendorKey() {

@@ -4,7 +4,7 @@ import XCTest
 /// AC-08（RACP 握手 + `item.delta` 流式 + `turn.completed` 清除运行态）、
 /// AC-09（运行中 `turn/interrupt` 中止并清除运行态）。
 ///
-/// 前提：模拟器已配对的真实 PI-adaptor 处于在线状态（与 `LiveDeepSeekChatUITests` 相同）。
+/// 前提：模拟器已配对的真实 PI-adaptor 处于在线状态（与 `LiveChatUITests` 相同）。
 /// 默认跳过；显式设置 `PI_IOS_CODE_FIX_E2E=1` 才运行，避免污染常规测试运行。
 final class ConnectionCodefixE2ETests: XCTestCase {
     private var app: XCUIApplication!
@@ -69,12 +69,14 @@ final class ConnectionCodefixE2ETests: XCTestCase {
         XCTAssertTrue(chip.waitForExistence(timeout: 10), "会话配置入口（模型 chip）必须存在")
         chip.tap()
         XCTAssertTrue(app.navigationBars["会话配置"].waitForExistence(timeout: 10))
+        // 具体模型名由已导入的 provider 决定；这里只要求清单里至少有一个可选项，
+        // 不能用「未绑定模型」这类说明行代替。
         let model = app.buttons
-            .matching(NSPredicate(format: "label CONTAINS %@", "DeepSeek"))
+            .matching(NSPredicate(format: "NOT (label CONTAINS %@) AND NOT (label CONTAINS %@)", "未绑定", "选择模型"))
             .firstMatch
         let hasModel = model.waitForExistence(timeout: 10)
         attach("05-session-config")
-        XCTAssertTrue(hasModel, "本机模型清单必须至少含一个 DeepSeek 模型")
+        XCTAssertTrue(hasModel, "本机模型清单必须至少含一个可选模型")
         model.tap()
         if app.buttons["完成"].exists { app.buttons["完成"].tap() }
         _ = app.navigationBars["会话配置"].waitForNonExistence(timeout: 10)
@@ -130,29 +132,23 @@ final class ConnectionCodefixE2ETests: XCTestCase {
     func testAC08StreamingThenRunStateClearedOnCompletion() throws {
         openLiveSession()
 
-        let running = app.staticTexts["conversation.runningTurn"]
         let streaming = app.staticTexts["conversation.streamingCount"]
+        let interrupt = app.buttons["conversation.interrupt"]
 
         send("\(marker) 请只回复一句：收到。")
 
-        // 流式进行中：运行态指示必须出现（`turn/start` 解码 + 归约生效）。
-        let sawRunning = running.waitForExistence(timeout: 90) || streaming.waitForExistence(timeout: 5)
+        // 流式进行中：空输入 + 运行中必须出现中止按钮，或至少出现流式计数
+        //（`turn/start` 解码 + 归约生效）。顶部运行文案已移除。
+        let sawRunning = interrupt.waitForExistence(timeout: 90) || streaming.waitForExistence(timeout: 5)
         attach("01-streaming")
-        XCTAssertTrue(sawRunning, "发送后应出现运行中/流式指示")
-        if running.exists || streaming.exists {
-            XCTAssertTrue(
-                running.exists || streaming.exists,
-                "活动期间必须能读到运行态或流式计数"
-            )
-        }
+        XCTAssertTrue(sawRunning, "发送后应出现中止按钮/流式指示")
+        XCTAssertFalse(app.staticTexts["conversation.runningTurn"].exists)
 
         // 终态：`turn.completed` 之后运行态与流式计数都必须清除（turnId 回退相关）。
-        let interrupt = app.buttons["conversation.interrupt"]
-        let cleared = running.waitForNonExistence(timeout: 180)
-            && streaming.waitForNonExistence(timeout: 5)
+        let cleared = streaming.waitForNonExistence(timeout: 180)
             && interrupt.waitForNonExistence(timeout: 10)
         attach("02-completed")
-        XCTAssertTrue(cleared, "turn 终态后运行态、流式计数与中止入口都必须消失")
+        XCTAssertTrue(cleared, "turn 终态后流式计数与中止入口都必须消失")
     }
 
     // MARK: - AC-09

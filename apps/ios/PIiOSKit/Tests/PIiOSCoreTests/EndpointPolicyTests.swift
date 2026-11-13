@@ -33,34 +33,28 @@ final class EndpointPolicyTests: XCTestCase {
 
     // MARK: 回环 / 局域网 / 通配 / 链路本地
 
-    func testAC04_5_rejectsLocalhost() {
-        let result = EndpointPolicy.validate(baseUrl: "http://localhost:11434/v1", vendorKey: "custom")
-        XCTAssertEqual(result.rejection, .loopbackHost("localhost"))
-        XCTAssertTrue(result.displayReason?.contains("回环") ?? false)
-    }
-
-    func testAC04_5_rejectsLocalhostSubdomain() {
-        XCTAssertEqual(
-            EndpointPolicy.validate(baseUrl: "https://api.localhost/v1", vendorKey: "custom").rejection,
-            .loopbackHost("api.localhost")
-        )
+    /// 回环地址是产品默认的模型网关（服务名与 Base URL 默认 localhost），必须放行。
+    func testAcceptsLocalhostAndLoopbackLiterals() {
+        let accepted = [
+            "http://localhost:8080/v1",
+            "http://localhost:11434/v1",
+            "https://api.localhost/v1",
+            "http://127.0.0.1:8080/v1",
+            "https://127.3.2.1/v1",
+            "https://[::1]:8443/v1",
+            "https://[::ffff:127.0.0.1]/v1",
+        ]
+        for baseUrl in accepted {
+            let result = EndpointPolicy.validate(baseUrl: baseUrl, vendorKey: "custom")
+            XCTAssertTrue(result.isValid, "\(baseUrl) 应被放行，实际：\(String(describing: result.rejection))")
+            XCTAssertNil(result.displayReason)
+        }
     }
 
     func testAC04_5_rejectsDotLocalHostname() {
         XCTAssertEqual(
             EndpointPolicy.validate(baseUrl: "https://box.local/v1", vendorKey: "custom").rejection,
             .localHostname("box.local")
-        )
-    }
-
-    func testAC04_5_rejectsLoopbackIPv4() {
-        XCTAssertEqual(
-            EndpointPolicy.validate(baseUrl: "http://127.0.0.1:8080/v1", vendorKey: "custom").rejection,
-            .loopbackHost("127.0.0.1")
-        )
-        XCTAssertEqual(
-            EndpointPolicy.validate(baseUrl: "https://127.3.2.1/v1", vendorKey: "custom").rejection,
-            .loopbackHost("127.3.2.1")
         )
     }
 
@@ -96,40 +90,31 @@ final class EndpointPolicyTests: XCTestCase {
         )
     }
 
-    func testAC04_5_rejectsIPv6Loopback() {
+    func testAC04_5_rejectsNonLoopbackIPv4MappedIPv6() {
         XCTAssertEqual(
-            EndpointPolicy.validate(baseUrl: "https://[::1]:8443/v1", vendorKey: "custom").rejection,
-            .ipv6Loopback("::1")
+            EndpointPolicy.validate(baseUrl: "https://[::ffff:10.0.0.1]/v1", vendorKey: "custom").rejection,
+            .ipv4MappedIPv6("::ffff:10.0.0.1")
         )
     }
 
-    func testAC04_5_rejectsIPv4MappedIPv6() {
-        XCTAssertEqual(
-            EndpointPolicy.validate(baseUrl: "https://[::ffff:127.0.0.1]/v1", vendorKey: "custom").rejection,
-            .ipv4MappedIPv6("::ffff:127.0.0.1")
-        )
-    }
+    // MARK: - 字面量写法按规范形态解析
 
-    // MARK: - 字面量写法不能绕过回环判定（审查 fix 3）
-
-    func testFix3_rejectsLoopbackWrittenAsNonCanonicalIPLiteral() {
-        let cases: [(String, EndpointRejection)] = [
+    func testLoopbackWrittenAsNonCanonicalIPLiteralIsAccepted() {
+        let cases = [
             // WHATWG IPv4：十进制整体值、0x 十六进制、省略段、以 0 开头的八进制。
-            ("http://2130706433/v1", .loopbackHost("2130706433")),
-            ("http://0x7f000001/v1", .loopbackHost("0x7f000001")),
-            ("http://127.1/v1", .loopbackHost("127.1")),
-            ("http://0177.0.0.1/v1", .loopbackHost("0177.0.0.1")),
+            "http://2130706433/v1",
+            "http://0x7f000001/v1",
+            "http://127.1/v1",
+            "http://0177.0.0.1/v1",
             // IPv6：先展开再判定 ::1 / ::ffff: 变体。
-            ("http://[0:0:0:0:0:0:0:1]/v1", .ipv6Loopback("0:0:0:0:0:0:0:1")),
-            ("http://[0:0:0:0:0:ffff:127.0.0.1]/v1", .ipv4MappedIPv6("0:0:0:0:0:ffff:127.0.0.1")),
-            ("http://[::FFFF:7f00:1]/v1", .ipv4MappedIPv6("::ffff:7f00:1")),
+            "http://[0:0:0:0:0:0:0:1]/v1",
+            "http://[0:0:0:0:0:ffff:127.0.0.1]/v1",
+            "http://[::FFFF:7f00:1]/v1",
         ]
 
-        for (baseUrl, expected) in cases {
+        for baseUrl in cases {
             let result = EndpointPolicy.validate(baseUrl: baseUrl, vendorKey: "custom")
-            XCTAssertEqual(result.rejection, expected, "\(baseUrl) 必须被拒绝")
-            XCTAssertFalse(result.isValid)
-            XCTAssertFalse(result.displayReason?.isEmpty ?? true, "每条拒绝都要带中文原因")
+            XCTAssertTrue(result.isValid, "\(baseUrl) 是回环地址，应放行")
         }
     }
 
@@ -201,15 +186,10 @@ final class EndpointPolicyTests: XCTestCase {
             ("https://user@models.example/v1", "custom"),
             ("https://models.example/v1?a=1", "custom"),
             ("https://models.example/v1#a", "custom"),
-            ("http://localhost/v1", "custom"),
-            ("http://x.localhost/v1", "custom"),
             ("http://box.local/v1", "custom"),
-            ("http://127.0.0.1/v1", "custom"),
             ("http://0.0.0.0/v1", "custom"),
             ("http://169.254.1.1/v1", "custom"),
             ("http://[::]/v1", "custom"),
-            ("http://[::1]/v1", "custom"),
-            ("http://[::ffff:127.0.0.1]/v1", "custom"),
             ("https://models.example/v1", "ollama"),
         ]
 

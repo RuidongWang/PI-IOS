@@ -508,16 +508,21 @@ struct UITestFixture {
         let fixture = onlineProjectLifecycle()
         var state = fixture.state
         let hostID = state.hosts[0].id
-        let spec = ProviderModelSpec(
+        let pro = ProviderModelSpec(
             id: "alpha-pro", contextWindow: 200_000, maxTokens: 8_192,
             thinkingLevels: ["off", "low", "high"], defaultThinkingLevel: "low",
             alias: "Alpha Pro", supportsDocuments: true
+        )
+        let mini = ProviderModelSpec(
+            id: "alpha-mini", contextWindow: 128_000, maxTokens: 4_096,
+            thinkingLevels: ["off", "low"], defaultThinkingLevel: nil,
+            alias: "Alpha Mini"
         )
         state.modelProviders = [StoredModelProvider(
             providerId: "prv_alpha", hostV2Mirror: true, hostID: hostID,
             name: "Alpha Models", baseURL: "https://alpha.invalid",
             apiStyle: "chat_completions",
-            models: [StoredModelBinding(spec: spec)],
+            models: [StoredModelBinding(spec: pro), StoredModelBinding(spec: mini)],
             defaultModelId: "alpha-pro",
             importedAt: Date(timeIntervalSince1970: 1_704_164_640)
         )]
@@ -536,6 +541,11 @@ struct UITestFixture {
                     "contextWindow":200000,"maxTokens":8192,
                     "thinkingLevels":["off","low","high"],
                     "defaultThinkingLevel":"low","supportsImages":false
+                },{
+                    "id":"alpha-mini","displayName":"Alpha Mini",
+                    "contextWindow":128000,"maxTokens":4096,
+                    "thinkingLevels":["off","low"],
+                    "supportsImages":false
                 }],
                 "createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"
             }

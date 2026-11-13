@@ -12,7 +12,6 @@ struct ProjectsScreen: View {
 
     @State private var isRefreshing = false
     @State private var showingBrowser = false
-    @State private var showingNewSession = false
     @State private var actionError: String?
     @State private var currentProjectId: String?
     @State private var selectedProject: RACPProjectSummary?
@@ -58,14 +57,6 @@ struct ProjectsScreen: View {
                     try await register(path: path, name: name)
                 }
             }
-            .sheet(isPresented: $showingNewSession) {
-                NewSessionSheet(
-                    projectId: activeProjectId,
-                    projectName: activeProjectName
-                ) { title in
-                    Task { await createSession(title: title) }
-                }
-            }
             .sheet(isPresented: projectDetailBinding) {
                 if let project = selectedProject {
                     ProjectDetailSheet(
@@ -79,7 +70,9 @@ struct ProjectsScreen: View {
                             currentProjectId = project.id
                             model.rememberProject(project.id)
                             selectedProject = nil
-                            showingNewSession = true
+                            // 新建会话不再先弹标题表单：直接创建并进入会话页，
+                            // 标题由首条指令交给 AI 生成。
+                            Task { await createSession(title: nil) }
                         },
                         onArchive: {
                             archive(project)
@@ -414,7 +407,7 @@ struct ProjectsScreen: View {
             isEnabled: connection.state.isOnline && activeProjectId != nil,
             showsChevron: true,
             showsDivider: false,
-            action: { showingNewSession = true }
+            action: { Task { await createSession(title: nil) } }
         )
     }
 
@@ -1099,44 +1092,5 @@ private struct ProjectBrowserSheet: View {
             return issue.message
         }
         return ConnectionErrorText.describe(error)
-    }
-}
-
-// MARK: - 新建会话（AC-08.2）
-
-private struct NewSessionSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    let projectId: String?
-    let projectName: String?
-    let onCreate: (String?) -> Void
-
-    @State private var title = ""
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    TextField("会话标题（可留空）", text: $title)
-                } footer: {
-                    Text("留空时用首条消息作为标题；项目：\(projectName ?? projectId ?? "未选择")")
-                        .font(PIFont.caption)
-                }
-            }
-            .scrollContentBackground(.hidden)
-            .piPageBackground()
-            .piDetailNavBar("新建会话")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("创建") {
-                        onCreate(title.piTrimmed.isEmpty ? nil : title.piTrimmed)
-                        dismiss()
-                    }
-                    .disabled(projectId == nil)
-                }
-            }
-        }
     }
 }
