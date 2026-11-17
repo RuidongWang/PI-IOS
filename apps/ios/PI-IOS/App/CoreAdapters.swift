@@ -30,37 +30,36 @@ extension RACPSessionMode {
         switch self {
         case .agent: return "Agent"
         case .plan: return "Plan"
-        case .goal: return "Goal"
         }
     }
 }
 
 /// 契约 §7「客户端行为」对用户显示的文案。行为本身在 `RACPErrorCode.action` 里，
-/// 这里只负责把它说成人话；未知码原样展示，不静默归为成功。
+/// 这里只负责「发生了什么 + 下一步」（quiet-v2 R6）：不写协议名、状态码与内部标识。
 extension RACPErrorCode {
     var userMessage: String {
         switch self {
-        case .unauthorized: return "设备令牌已失效：需要重新配对后再连"
-        case .forbidden: return "当前设备没有这个操作的权限"
-        case .protocolMismatch: return "服务器版本不兼容，已停止连接"
+        case .unauthorized: return "设备令牌已失效：重新配对后再连"
+        case .forbidden: return "没有权限：这台服务器不允许该操作"
+        case .protocolMismatch: return "版本不兼容：已停止连接"
         case .invalidArgument: return "参数不合法"
-        case .notFound: return "对象不存在，列表已刷新"
+        case .notFound: return "内容已不存在，列表已刷新"
         case .methodNotFound: return "这台服务器不支持该操作"
-        case .agentUnavailable: return "PI-adaptor 暂不可用，正在退避重连"
+        case .agentUnavailable: return "PI-adaptor 暂不可用：稍后重试"
         case .agentBusy: return "PI-adaptor 正忙"
-        case .conflict: return "状态已变化，重新拉取后再试"
-        case .idempotencyConflict: return "同一幂等键对应了不同内容，需要人工确认"
-        case .cursorExpired: return "事件游标已过期，已按快照重建"
-        case .clientTooSlow: return "客户端处理过慢，已丢弃订阅并按快照重建"
+        case .conflict: return "状态已变化：重新加载后再试"
+        case .idempotencyConflict: return "这次提交与上次不同：确认后再发"
+        case .cursorExpired: return "内容有缺口：已重新加载"
+        case .clientTooSlow: return "内容太多：已重新加载"
         case .approvalExpired: return "审批已过期"
         case .approvalStale: return "审批已失效"
-        case .payloadTooLarge: return "内容超过上限，请压缩后重试"
-        case .rateLimited: return "请求过于频繁，稍后重试"
+        case .payloadTooLarge: return "内容太长：缩短后重试"
+        case .rateLimited: return "请求太频繁：稍后重试"
         case .pairingFailed: return "配对失败"
-        case .pairingTokenExpired: return "配对令牌已过期，需要重启 PI-adaptor 取新令牌"
-        case .capabilityUnavailable: return "服务器未提供该能力"
-        case .serverInternal: return "服务器内部错误"
-        case .unknown(let raw): return raw
+        case .pairingTokenExpired: return "配对令牌已过期：重启 PI-adaptor 取新令牌"
+        case .capabilityUnavailable: return "服务器不支持这个操作"
+        case .serverInternal: return "服务器出错：稍后重试"
+        case .unknown: return "服务器返回了未知错误：稍后重试"
         }
     }
 }
@@ -76,17 +75,17 @@ extension RACPTunnelState {
         }
     }
 
-    /// 供列表行使用的详细说明；`nil` 表示无需额外解释。
+    /// 供列表行使用的状态数据；`nil` 表示无需额外解释。
     var detail: String? {
         switch self {
         case .offline(let reason): return reason
         case .reconnecting(let attempt, let delay, let reason):
-            return "第 \(attempt) 次重连，\(Int(delay)) 秒后重试。上次原因：\(reason)"
+            return "第 \(attempt) 次重连 · \(Int(delay)) 秒后重试 · \(reason)"
         case .verifyingHostKey(_, let status):
             switch status {
-            case .firstUse: return "首次连接：确认指纹后才会建立连接"
-            case .changed(let pinned): return "指纹与固定记录不一致（原 \(pinned.fingerprint)），已拒绝连接"
-            case .matches: return "与固定记录一致"
+            case .firstUse: return "首次连接 · 等待核对指纹"
+            case .changed(let pinned): return "指纹与记录不一致（原 \(pinned.fingerprint)）· 已拒绝连接"
+            case .matches: return "指纹与记录一致"
             }
         default:
             return nil
@@ -228,44 +227,34 @@ struct PairingEntryPolicy: Equatable {
 
     var repairTitle: String {
         switch authFailure {
-        case .deviceRevoked: return "服务器已撤销这台设备的访问权限"
-        case .tokenUnauthorized: return "设备令牌已失效，服务器拒绝了连接"
-        case .none: return "使用新的一次性令牌重新配对"
+        case .deviceRevoked: return "服务器已撤销这台设备"
+        case .tokenUnauthorized: return "设备令牌已失效"
+        case .none: return "重新配对"
         }
     }
 
-    /// 就地恢复的说明：讲清为什么需要新令牌，以及旧令牌在新配对成功前不会被覆盖。
+    /// 失败原因 + 下一步。「旧令牌在新配对成功前不会被覆盖」这类保证不再写（R7）。
     var repairExplanation: String {
         switch authFailure {
         case .deviceRevoked:
-            return "这台设备的访问权限已在服务器侧撤销。请用服务器上的 pi-adaptor 重新输出的一次性令牌就地重新配对；"
-                + "新配对成功前，本机保存的旧设备令牌不会被覆盖。撤销访问权限是另一个动作，仍需要服务器确认。"
+            return "这台设备的访问权限已在服务器上撤销。用 PI-adaptor 输出的一次性令牌重新配对。"
         case .tokenUnauthorized:
-            return "服务器拒绝了本机的设备令牌（可能已失效或被重置）。请用服务器重新输出的一次性令牌就地重新配对；"
-                + "新配对成功前，本机保存的旧设备令牌不会被覆盖。撤销访问权限是另一个动作，仍需要服务器确认。"
+            return "服务器拒绝了本机的设备令牌。用 PI-adaptor 输出的一次性令牌重新配对。"
         case .none:
-            return "服务器重装、令牌重置或设备被撤销后，可用新的一次性令牌重新配对。"
+            return "用服务器上 PI-adaptor 输出的一次性令牌重新配对。"
         }
     }
 
-    var repairActionTitle: String { "使用新的一次性令牌重新配对" }
+    var repairActionTitle: String { "重新配对" }
 
-    var repairRowSubtitle: String {
-        if authFailure.isFailure {
-            return "上次连接被服务器拒绝：用新令牌恢复；新配对成功前旧令牌保留"
-        }
-        return "服务器撤销设备或令牌失效时使用；新配对成功前旧令牌保留"
+    /// 副标题只在携带状态数据时出现（R3）。
+    var repairRowSubtitle: String? {
+        authFailure.isFailure ? "上次连接被服务器拒绝" : nil
     }
 
-    var settingsRepairTitle: String {
-        authFailure.isFailure ? "重新配对（设备令牌已失效）" : "重新配对"
-    }
+    var settingsRepairTitle: String { "重新配对" }
 
-    var settingsRepairSubtitle: String {
-        authFailure.isFailure
-            ? "打开服务器页，用新的一次性令牌就地重新配对"
-            : "打开服务器页完成配对"
-    }
+    var settingsRepairSubtitle: String? { nil }
 
     /// 从连接状态推导失败分类（只读现有状态，不新增写接口）。
     ///

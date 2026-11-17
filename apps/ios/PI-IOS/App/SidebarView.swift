@@ -9,10 +9,17 @@ import PIiOSCore
 struct SidebarView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var connection: ConnectionModel
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var searchText = ""
     @State private var dragSessionID: String?
     @State private var dropResolution: SessionDropResolution?
     @State private var sessionRowFrames: [String: CGRect] = [:]
+    @State private var revealedSessionID: String?
+    @State private var sessionPendingDelete: SessionDeletionTarget?
+    @State private var sessionActionSheet: SessionDeletionTarget?
+    /// 操作 sheet 必须先完全关闭，再弹出删除确认 alert；直接在 sheet 内切换会丢失 alert。
+    @State private var pendingDeleteAfterSheet: SessionDeletionTarget?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -22,28 +29,11 @@ struct SidebarView: View {
             divider
             bottomBar
         }
-        .frame(width: PIMetrics.sidebarWidth)
+        .frame(maxWidth: .infinity)
         .frame(maxHeight: .infinity, alignment: .top)
+        // quiet-v2 §2：抽屉是「页面之上的一层表面」，纯 surface，不画顶光、不画渐变。
         .background {
-            // 侧边栏顶部不留一条死白：用一层由浅到无的顶光渐变把状态栏区域接进来，
-            // 与页面背景的「顶部微光」保持同一语言。
-            ZStack(alignment: .top) {
-                PIColor.surface
-                LinearGradient(
-                    colors: [PIColor.surface2.opacity(0.85), PIColor.surface.opacity(0)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: 210)
-                RadialGradient(
-                    colors: [PIColor.accent.opacity(0.10), .clear],
-                    center: .topLeading,
-                    startRadius: 2,
-                    endRadius: 260
-                )
-                .frame(height: 260)
-            }
-            .ignoresSafeArea()
+            PIColor.surface.ignoresSafeArea()
         }
         .onDisappear(perform: resetSessionDrag)
         .overlay(alignment: .trailing) {
@@ -53,6 +43,54 @@ struct SidebarView: View {
                 .ignoresSafeArea()
         }
         .accessibilityAddTraits(.isModal)
+        .alert(item: $sessionPendingDelete) { target in
+            let session = target.session
+            return Alert(
+                title: Text("删除「\(sessionDisplayTitle(session))」？"),
+                message: Text("服务器会话记录与媒体将永久删除，本机缓存也会清除。此操作不可恢复。"),
+                primaryButton: .destructive(Text("删除")) {
+                    sessionPendingDelete = nil
+                    deleteSession(session)
+                },
+                secondaryButton: .cancel()
+            )
+        }
+        .sheet(item: $sessionActionSheet, onDismiss: {
+            guard let target = pendingDeleteAfterSheet else { return }
+            pendingDeleteAfterSheet = nil
+            sessionPendingDelete = target
+        }) { target in
+            NavigationStack {
+                VStack(alignment: .leading, spacing: PISpacing.s16) {
+                    Text(sessionDisplayTitle(target.session))
+                        .font(PIFont.display)
+                        .foregroundStyle(PIColor.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    PIApprovalSecondaryButton(title: "归档") {
+                        sessionActionSheet = nil
+                        archiveSession(target.session)
+                    }
+                    .accessibilityIdentifier("sidebar.archive.\(target.session.id)")
+                    PIDangerOutlineButton(title: "删除") {
+                        // 只记录待确认目标并关闭 sheet；alert 在 onDismiss 后弹出，
+                        // 避免 sheet 未完成关闭时弹 alert 被系统丢弃。
+                        pendingDeleteAfterSheet = SessionDeletionTarget(session: target.session)
+                        sessionActionSheet = nil
+                    }
+                    .accessibilityIdentifier("sidebar.delete.\(target.session.id)")
+                    Spacer()
+                }
+                .padding(PISpacing.s16)
+                .navigationTitle("会话操作")
+                .navigationBarTitleDisplayMode(.inline)
+                .presentationDetents([.height(280)])
+                .presentationDragIndicator(.visible)
+            }
+        }
+        .onChange(of: searchText) { _, _ in
+            withAnimation(PIMotion.quick) { revealedSessionID = nil }
+        }
     }
 
     private var divider: some View {
@@ -65,107 +103,117 @@ struct SidebarView: View {
 
     @ViewBuilder
     private var hostSelector: some View {
-        VStack(alignment: .leading, spacing: PISpacing.s8) {
+        VStack(alignment: .leading, spacing: PISpacing.s4) {
             HStack {
                 Text("服务器")
-                    .font(PIFont.metaSmall)
-                    .tracking(1.2)
-                    .foregroundStyle(PIColor.text3)
+                    .font(PIFont.caption)
+                    .foregroundStyle(PIColor.text2)
                 Spacer()
                 Button {
                     model.closeSidebar()
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 13, weight: .bold))
+                        .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(PIColor.text2)
                         .frame(width: PIMetrics.minHitTarget, height: PIMetrics.minHitTarget)
-                        .background(PIColor.surface2, in: Circle())
-                        .contentShape(Circle())
+                        .contentShape(Rectangle())
                 }
                 .accessibilityLabel("关闭侧边栏")
                 .accessibilityIdentifier("sidebar.close")
+                .padding(.trailing, -PISpacing.s12)
             }
 
             if model.hosts.isEmpty {
-                Button {
-                    model.showSettings()
-                } label: {
-                    HStack(spacing: PISpacing.s12) {
-                        Image(systemName: "server.rack")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(PIColor.accent)
-                            .frame(width: 34, height: 34)
-                            .background(PIColor.accentSoft, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: PISpacing.s4) {
-                            Text("未配置服务器")
-                                .font(PIFont.listTitle)
-                                .foregroundStyle(PIColor.text)
-                            Text("去设置添加服务器")
-                                .font(PIFont.meta)
-                                .foregroundStyle(PIColor.accent)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, PISpacing.s12)
-                    .padding(.vertical, PISpacing.s8)
-                    .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .frame(minHeight: PIMetrics.minHitTarget)
+                settingsLinkRow
             } else {
-                Menu {
-                    ForEach(model.hosts) { host in
-                        Button {
-                            Task { await model.setCurrentHost(id: host.id) }
-                        } label: {
-                            Text(host.isCurrent ? "✓ \(host.name)" : host.name)
-                        }
-                    }
-                    Divider()
-                    Button("管理服务器…") { model.showSettings() }
-                } label: {
-                    HStack(spacing: PISpacing.s12) {
-                        Image(systemName: "server.rack")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(PIColor.accent)
-                            .frame(width: 34, height: 34)
-                            .background(PIColor.accentSoft, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: PISpacing.s4) {
-                            Text(model.currentHost?.name ?? "选择服务器")
-                                .font(PIFont.listTitle)
-                                .foregroundStyle(PIColor.text)
-                                .lineLimit(1)
-                            HStack(spacing: PISpacing.s4) {
-                                Circle()
-                                    .fill(connection.state.isOnline ? PIColor.success : PIColor.warning)
-                                    .frame(width: 6, height: 6)
-                                    .accessibilityHidden(true)
-                                Text(model.currentHost?.statusText ?? "")
-                                    .font(PIFont.meta)
-                                    .foregroundStyle(PIColor.text2)
-                                    .lineLimit(1)
-                            }
-                        }
-                        Spacer(minLength: PISpacing.s4)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(PIColor.text3)
-                    }
-                    .padding(.horizontal, PISpacing.s12)
-                    .padding(.vertical, PISpacing.s8)
-                    .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous))
-                    .contentShape(Rectangle())
-                }
-                .frame(minHeight: PIMetrics.minHitTarget)
-                .accessibilityLabel("切换服务器")
+                hostMenu
             }
         }
         .padding(.horizontal, PISpacing.s16)
-        .padding(.top, PISpacing.s12)
+        .padding(.top, PISpacing.s8)
         .padding(.bottom, PISpacing.s12)
+    }
+
+    /// 没有服务器时，这一行就是「去设置」的入口：一行文字 + chevron，没有第二个动作。
+    private var settingsLinkRow: some View {
+        Button {
+            model.showSettings()
+        } label: {
+            HStack(spacing: PISpacing.s12) {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 17, weight: .regular))
+                    .foregroundStyle(PIColor.text2)
+                    .frame(width: 24)
+                    .accessibilityHidden(true)
+                Text("未配置服务器")
+                    .font(PIFont.listTitle)
+                    .foregroundStyle(PIColor.text)
+                Spacer(minLength: PISpacing.s8)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PIColor.text3)
+                    .accessibilityHidden(true)
+            }
+            .frame(minHeight: PIMetrics.listRowMinHeight)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("未配置服务器，打开设置")
+        .accessibilityIdentifier("sidebar.addHost")
+    }
+
+    /// 当前服务器：名称 + 实时连接状态 + ▾。图标单色，不做色块 chip。
+    private var hostMenu: some View {
+        Menu {
+            ForEach(model.hosts) { host in
+                Button {
+                    Task { await model.setCurrentHost(id: host.id) }
+                } label: {
+                    Text(host.isCurrent ? "✓ \(host.name)" : host.name)
+                }
+            }
+            Divider()
+            Button("服务器管理") { model.showSettings() }
+        } label: {
+            HStack(spacing: PISpacing.s12) {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 17, weight: .regular))
+                    .foregroundStyle(PIColor.text2)
+                    .frame(width: 24)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(model.currentHost?.name ?? "选择服务器")
+                        .font(PIFont.listTitle)
+                        .foregroundStyle(PIColor.text)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? 0 : 1)
+                        .fixedSize(horizontal: false, vertical: dynamicTypeSize.isAccessibilitySize)
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(connection.state.isOnline ? PIColor.success : PIColor.warning)
+                            .frame(width: 6, height: 6)
+                            .accessibilityHidden(true)
+                        Text(connection.state.displayText)
+                            .font(PIFont.caption)
+                            .foregroundStyle(PIColor.text2)
+                            .lineLimit(dynamicTypeSize.isAccessibilitySize ? 0 : 1)
+                            .fixedSize(horizontal: false, vertical: dynamicTypeSize.isAccessibilitySize)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: PISpacing.s8)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(PIColor.text3)
+                    .accessibilityHidden(true)
+            }
+            .frame(minHeight: PIMetrics.listRowMinHeight)
+            .contentShape(Rectangle())
+        }
+        .accessibilityLabel("切换服务器")
+        // 当前服务器与连接状态读在 value 上：Menu 只有一个无障碍元素，子文本不进元素树。
+        .accessibilityValue("\(model.currentHost?.name ?? "")，\(connection.state.displayText)")
+        .accessibilityIdentifier("sidebar.host")
     }
 
     private var conversationArea: some View {
@@ -173,18 +221,20 @@ struct SidebarView: View {
             VStack(alignment: .leading, spacing: PISpacing.s8) {
                 HStack(spacing: PISpacing.s8) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(PIColor.text3)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(PIColor.text2)
                         .accessibilityHidden(true)
-                    TextField("搜索会话或项目", text: $searchText)
+                    TextField("搜索", text: $searchText)
+                        .accessibilityIdentifier("sidebar.search")
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .textFieldStyle(.plain)
                         .font(PIFont.body)
+                        .accessibilityIdentifier("sidebar.search")
                         .onSubmit {}
                 }
                 .padding(.horizontal, PISpacing.s12)
-                .frame(minHeight: 40)
+                .frame(minHeight: PIMetrics.minHitTarget)
                 .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
@@ -193,39 +243,32 @@ struct SidebarView: View {
                 .padding(.bottom, PISpacing.s8)
                 if connection.state.isOnline {
                     if sidebarGroups.isEmpty {
-                        Text(
-                            searchQuery.isEmpty
-                                ? "没有活跃会话；上游同步的会话会先进入已归档，可在项目详情恢复。"
-                                : "没有匹配的会话或项目。"
-                        )
-                            .font(PIFont.caption)
-                            .foregroundStyle(PIColor.text2)
-                            .fixedSize(horizontal: false, vertical: true)
+                        emptyLine(searchQuery.isEmpty ? "没有会话" : "没有匹配")
                     } else {
                         ForEach(sidebarGroups) { group in
                             projectGroup(group)
                         }
                     }
+                } else if !connection.offlineCacheReady {
+                    ProgressView("正在读取本机会话…")
+                        .font(PIFont.body)
+                        .accessibilityIdentifier("sidebar.cache.loading")
+                } else if let error = connection.offlineCacheLoadError {
+                    emptyLine(error)
+                        .accessibilityIdentifier("sidebar.cache.error")
                 } else {
                     // 一次读出缓存 id 列表：离线分组的过滤与空态都基于同一份输入，
                     // 避免每渲染一次就多读几次缓存快照。
                     let cachedSessionIDs = connection.cachedSessionIds()
                     let groups = offlineSidebarGroups(cachedSessionIDs: cachedSessionIDs)
                     if groups.isEmpty {
-                        Text(
+                        emptyLine(
                             SidebarFilterPolicy.offlineEmptyMessage(
                                 hasCachedSessions: !cachedSessionIDs.isEmpty,
                                 query: searchQuery
                             )
                         )
-                            .font(PIFont.caption)
-                            .foregroundStyle(PIColor.text2)
-                            .fixedSize(horizontal: false, vertical: true)
                     } else {
-                        Text("离线：下面是可以只读查看的缓存会话。")
-                            .font(PIFont.caption)
-                            .foregroundStyle(PIColor.warning)
-                            .fixedSize(horizontal: false, vertical: true)
                         ForEach(groups) { group in
                             offlineProjectGroup(group)
                         }
@@ -240,6 +283,19 @@ struct SidebarView: View {
             .padding(.vertical, PISpacing.s16)
         }
         .coordinateSpace(name: SidebarSessionCoordinates.list)
+    }
+
+    /// 空态：一句话。动作由底部「新建会话」与项目页承担，这里不再写第二句解释。
+    private func emptyLine(_ text: String) -> some View {
+        Text(text)
+            .font(PIFont.body)
+            .foregroundStyle(PIColor.text2)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private struct SessionDeletionTarget: Identifiable {
+        let session: RACPSessionSummary
+        var id: String { session.id }
     }
 
     private struct SidebarGroup: Identifiable {
@@ -393,6 +449,69 @@ struct SidebarView: View {
         model.sessionDisplayTitle(hostID: hostID, sessionID: sessionID, fallback: sessionID)
     }
 
+    @ViewBuilder
+    private func projectGroupHeader(
+        name: String,
+        count: Int,
+        isCurrent: Bool,
+        isCollapsed: Bool
+    ) -> some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: PISpacing.s4) {
+                HStack(spacing: PISpacing.s8) {
+                    Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(PIColor.text2)
+                        .frame(width: 12)
+                    Text(name)
+                        .font(PIFont.captionStrong)
+                        .foregroundStyle(PIColor.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                HStack(spacing: PISpacing.s8) {
+                    Text("\(count) 个会话")
+                        .font(PIFont.metaSmall)
+                        .foregroundStyle(PIColor.text2)
+                    if isCurrent {
+                        Label("当前", systemImage: "checkmark")
+                            .font(PIFont.metaSmall)
+                            .foregroundStyle(PIColor.accent)
+                            .labelStyle(.titleOnly)
+                    }
+                    Spacer()
+                }
+            }
+        } else {
+            HStack(spacing: PISpacing.s8) {
+                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(PIColor.text2)
+                    .frame(width: 12)
+                Text(name)
+                    .font(PIFont.captionStrong)
+                    .foregroundStyle(PIColor.text)
+                    .lineLimit(1)
+                Text("\(count)")
+                    .font(PIFont.metaSmall)
+                    .monospacedDigit()
+                    .foregroundStyle(PIColor.text2)
+                if isCurrent {
+                    HStack(spacing: PISpacing.s4) {
+                        Circle()
+                            .fill(PIColor.accent)
+                            .frame(width: 5, height: 5)
+                            .accessibilityHidden(true)
+                        Text("当前")
+                            .font(PIFont.metaSmall)
+                            .foregroundStyle(PIColor.accent)
+                    }
+                }
+                Spacer()
+            }
+        }
+    }
+
     private func offlineProjectGroup(_ group: OfflineSidebarGroup) -> some View {
         let hostID = model.currentHost?.id
         let collapsed = SidebarFilterPolicy.isCollapsed(
@@ -407,35 +526,12 @@ struct SidebarView: View {
                 guard SidebarFilterPolicy.canToggleGroup(query: searchQuery), let hostID else { return }
                 model.toggleProjectGroup(hostID: hostID, projectID: group.projectID)
             } label: {
-                HStack(spacing: PISpacing.s8) {
-                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(PIColor.text3)
-                        .frame(width: 12)
-                    Text(group.name)
-                        .font(PIFont.captionStrong)
-                        .foregroundStyle(PIColor.text)
-                        .lineLimit(1)
-                    Text("\(group.sessionIDs.count)")
-                        .font(PIFont.metaSmall)
-                        .monospacedDigit()
-                        .foregroundStyle(PIColor.text3)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(PIColor.surface2, in: Capsule())
-                    if current {
-                        HStack(spacing: PISpacing.s4) {
-                            Circle()
-                                .fill(PIColor.accent)
-                                .frame(width: 5, height: 5)
-                                .accessibilityHidden(true)
-                            Text("当前")
-                                .font(PIFont.metaSmall)
-                                .foregroundStyle(PIColor.accent)
-                        }
-                    }
-                    Spacer()
-                }
+                projectGroupHeader(
+                    name: group.name,
+                    count: group.sessionIDs.count,
+                    isCurrent: current,
+                    isCollapsed: collapsed
+                )
                 .padding(.horizontal, PISpacing.s8)
                 .frame(minHeight: PIMetrics.minHitTarget)
                 .contentShape(Rectangle())
@@ -492,35 +588,12 @@ struct SidebarView: View {
                 guard SidebarFilterPolicy.canToggleGroup(query: searchQuery), let hostID else { return }
                 model.toggleProjectGroup(hostID: hostID, projectID: group.project.id)
             } label: {
-                HStack(spacing: PISpacing.s8) {
-                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(PIColor.text3)
-                        .frame(width: 12)
-                    Text(group.name)
-                        .font(PIFont.captionStrong)
-                        .foregroundStyle(PIColor.text)
-                        .lineLimit(1)
-                    Text("\(group.sessions.count)")
-                        .font(PIFont.metaSmall)
-                        .monospacedDigit()
-                        .foregroundStyle(PIColor.text3)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(PIColor.surface2, in: Capsule())
-                    if current {
-                        HStack(spacing: PISpacing.s4) {
-                            Circle()
-                                .fill(PIColor.accent)
-                                .frame(width: 5, height: 5)
-                                .accessibilityHidden(true)
-                            Text("当前")
-                                .font(PIFont.metaSmall)
-                                .foregroundStyle(PIColor.accent)
-                        }
-                    }
-                    Spacer()
-                }
+                projectGroupHeader(
+                    name: group.name,
+                    count: group.sessions.count,
+                    isCurrent: current,
+                    isCollapsed: collapsed
+                )
                 .padding(.horizontal, PISpacing.s8)
                 .frame(minHeight: PIMetrics.minHitTarget)
                 .contentShape(Rectangle())
@@ -579,29 +652,25 @@ struct SidebarView: View {
         } ?? (session.title ?? session.id)
         let isCurrent = connection.session.attachedSessionId == session.id
         let isPinned = binding?.isPinned == true
-        return HStack(spacing: PISpacing.s8) {
+        let content = HStack(spacing: PISpacing.s8) {
             if isPinned {
                 Image(systemName: "line.3.horizontal")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(PIColor.text3)
                     .accessibilityHidden(true)
             }
-            Button {
-                openSession(session)
-            } label: {
-                VStack(alignment: .leading, spacing: PISpacing.s4) {
+            VStack(alignment: .leading, spacing: PISpacing.s4) {
                     HStack(spacing: PISpacing.s4) {
                         Text(title)
                             .font(PIFont.listTitle)
                             .foregroundStyle(PIColor.text)
-                            .lineLimit(1)
+                            .lineLimit(dynamicTypeSize.isAccessibilitySize ? 0 : 1)
+                            .fixedSize(horizontal: false, vertical: dynamicTypeSize.isAccessibilitySize)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         if hostID.map({ model.hasSessionUpdate(hostID: $0, sessionID: session.id) }) == true {
                             Text("新")
                                 .font(PIFont.metaSmall.weight(.semibold))
-                                .foregroundStyle(PIColor.accent)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(PIColor.accentSoft, in: Capsule())
+                                .foregroundStyle(PIColor.text2)
                                 .accessibilityLabel("离开期间有更新")
                         }
                     }
@@ -614,14 +683,15 @@ struct SidebarView: View {
                         }
                         Text(sessionStatus(session, binding: binding))
                             .font(PIFont.metaSmall)
-                            .foregroundStyle(sessionStatusTint(session) ?? PIColor.text3)
+                            .foregroundStyle(PIColor.text2)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .frame(minHeight: PIMetrics.minHitTarget)
                 .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+            .onTapGesture { openSession(session) }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
             .accessibilityIdentifier("sidebar.session.\(session.id)")
             if isCurrent {
                 HStack(spacing: PISpacing.s4) {
@@ -667,18 +737,10 @@ struct SidebarView: View {
             }
         }
         .background(
-            (dropResolution?.targetID == session.id || isCurrent ? PIColor.accentSoft : Color.clear),
+            // 拖拽位置只由上下指示线表达；柔底专属于当前会话，避免两种状态叠成同一语义。
+            (isCurrent ? PIColor.accentSoft : Color.clear),
             in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
         )
-        .overlay(alignment: .leading) {
-            if isCurrent {
-                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .fill(PIColor.accent)
-                    .frame(width: 3)
-                    .padding(.vertical, 8)
-                    .accessibilityHidden(true)
-            }
-        }
         .overlay(alignment: .top) {
             if dropResolution?.targetID == session.id, dropResolution?.edge == .before {
                 dropIndicator
@@ -691,7 +753,7 @@ struct SidebarView: View {
         }
         .opacity(dragSessionID == session.id ? 0.72 : 1)
         .contentShape(Rectangle())
-        .gesture(
+        .simultaneousGesture(
             reorderGesture(
                 sessionID: session.id,
                 projectID: projectID,
@@ -699,9 +761,93 @@ struct SidebarView: View {
                 reorderableIDs: reorderableIDs
             )
         )
-        .accessibilityHint(
-            isPinned ? "长按 0.5 秒后拖动，可在本项目内调整置顶顺序" : ""
-        )
+        .accessibilityHint(isPinned ? "长按拖动可调整置顶顺序" : "")
+
+        return HStack(spacing: 0) {
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if revealedSessionID == session.id, !dynamicTypeSize.isAccessibilitySize {
+                sessionActionButtons(for: session)
+                    .transition(.move(edge: .trailing))
+            }
+        }
+        .clipped()
+        .animation(reduceMotion ? nil : PIMotion.standard, value: revealedSessionID)
+        .simultaneousGesture(sessionSwipeGesture(for: session))
+        .accessibilityAction(named: "归档") { archiveSession(session) }
+        .accessibilityAction(named: "删除") {
+            revealedSessionID = nil
+            sessionPendingDelete = SessionDeletionTarget(session: session)
+        }
+    }
+
+    private func sessionActionButtons(for session: RACPSessionSummary) -> some View {
+        HStack(spacing: 0) {
+            sessionActionButton(
+                title: "归档",
+                icon: "archivebox",
+                tint: PIColor.text,
+                background: PIColor.warningSoft,
+                identifier: "sidebar.archive.\(session.id)"
+            ) { archiveSession(session) }
+            sessionActionButton(
+                title: "删除",
+                icon: "trash",
+                tint: PIColor.danger,
+                background: PIColor.dangerSoft,
+                identifier: "sidebar.delete.\(session.id)"
+            ) {
+                revealedSessionID = nil
+                sessionPendingDelete = SessionDeletionTarget(session: session)
+            }
+        }
+        .disabled(connection.sessionActionInFlight)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func sessionActionButton(
+        title: String,
+        icon: String,
+        tint: Color,
+        background: Color,
+        identifier: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(PIFont.captionStrong)
+                .lineLimit(1)
+                .foregroundStyle(tint)
+                .frame(width: 76)
+                .frame(maxHeight: .infinity)
+                .background(background)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier)
+    }
+
+    /// 快速横滑只展开操作；置顶会话的长按拖动仍走原 reorderGesture。
+    private func sessionSwipeGesture(for session: RACPSessionSummary) -> some Gesture {
+        DragGesture(minimumDistance: 20, coordinateSpace: .local)
+            .onEnded { value in
+                guard !connection.sessionActionInFlight else { return }
+                let horizontal = value.translation.width
+                let vertical = value.translation.height
+                guard abs(horizontal) > abs(vertical) else { return }
+                if horizontal < -32 {
+                    if dynamicTypeSize.isAccessibilitySize {
+                        sessionActionSheet = SessionDeletionTarget(session: session)
+                    } else {
+                        withAnimation(reduceMotion ? nil : PIMotion.standard) {
+                            revealedSessionID = session.id
+                        }
+                    }
+                } else if horizontal > 32 {
+                    withAnimation(reduceMotion ? nil : PIMotion.standard) {
+                        revealedSessionID = nil
+                    }
+                }
+            }
     }
 
     private var dropIndicator: some View {
@@ -846,6 +992,8 @@ struct SidebarView: View {
     private func resetSessionDrag() {
         dragSessionID = nil
         dropResolution = nil
+        // 侧栏关闭/切换分组后不应把上一次展开的归档/删除按钮留给下一次进入的界面。
+        revealedSessionID = nil
     }
 
     private func sessionStatus(
@@ -888,76 +1036,165 @@ struct SidebarView: View {
     }
 
     private func openSession(_ session: RACPSessionSummary) {
+        guard !connection.sessionActionInFlight else { return }
+        if revealedSessionID != nil {
+            withAnimation(reduceMotion ? nil : PIMotion.quick) { revealedSessionID = nil }
+            return
+        }
         if let projectID = session.projectId {
             model.rememberProject(projectID)
         }
         model.rememberSession(session.id)
-        Task {
-            await connection.session.attach(sessionId: session.id)
+        // 已在当前会话时直接进入会话页：重复 attach 会无谓地重放历史，
+        // 长会话下表现为点了没反应。
+        if connection.session.openingSessionID == nil,
+           connection.session.attachedSessionId == session.id,
+           connection.session.view.sessionId == session.id {
             model.switchRoot(.conversation)
             model.closeSidebar()
+            return
         }
+        connection.session.prepareToOpen(sessionId: session.id)
+        model.switchRoot(.conversation)
+        model.closeSidebar()
+        Task {
+            guard !connection.sessionActionInFlight,
+                  model.lastSessionId == session.id,
+                  connection.session.openingSessionID == session.id else { return }
+            await connection.session.attach(sessionId: session.id, source: "sidebar")
+        }
+    }
+
+    private func sessionDisplayTitle(_ session: RACPSessionSummary) -> String {
+        guard let hostID = model.currentHost?.id else { return session.title ?? session.id }
+        return model.sessionDisplayTitle(
+            hostID: hostID,
+            sessionID: session.id,
+            fallback: session.title ?? session.id
+        )
+    }
+
+    private func archiveSession(_ session: RACPSessionSummary) {
+        guard let hostID = model.currentHost?.id else {
+            PILog.warn("Session", "archive rejected session=\(session.id.prefix(8)) reason=noCurrentHost")
+            return
+        }
+        guard connection.beginSessionAction() else {
+            PILog.warn("Session", "archive rejected session=\(session.id.prefix(8)) reason=sessionActionInFlight")
+            model.showToast("正在处理上一个会话操作，请稍候")
+            return
+        }
+        PILog.info("Session", "archive start session=\(session.id.prefix(8)) host=\(hostID.uuidString.prefix(8))")
+        revealedSessionID = nil
+        Task {
+            defer { connection.endSessionAction() }
+            do {
+                try await connection.archiveSession(sessionId: session.id, archived: true)
+                model.setSessionArchived(hostID: hostID, sessionID: session.id, archived: true)
+                finishSessionActionIfCurrent(session.id)
+                PILog.info("Session", "archive end session=\(session.id.prefix(8)) result=ok")
+                model.showToast("会话已归档")
+            } catch {
+                let message = ConnectionErrorText.describeSessionAction(error)
+                PILog.warn("Session", "archive failed session=\(session.id.prefix(8)) error=\(message)")
+                // Toast 位于根视图，抽屉关闭后 Host 原始错误仍可见。
+                model.showToast(message)
+            }
+        }
+    }
+
+    private func deleteSession(_ session: RACPSessionSummary) {
+        guard let hostID = model.currentHost?.id else {
+            PILog.warn("Session", "delete rejected session=\(session.id.prefix(8)) reason=noCurrentHost")
+            return
+        }
+        guard connection.beginSessionAction() else {
+            PILog.warn("Session", "delete rejected session=\(session.id.prefix(8)) reason=sessionActionInFlight")
+            model.showToast("正在处理上一个会话操作，请稍候")
+            return
+        }
+        PILog.info("Session", "delete start session=\(session.id.prefix(8)) host=\(hostID.uuidString.prefix(8))")
+        Task {
+            defer { connection.endSessionAction() }
+            do {
+                try await connection.deleteSession(
+                    sessionId: session.id,
+                    confirmSessionId: session.id
+                )
+                model.deleteSessionLocally(hostID: hostID, sessionID: session.id)
+                revealedSessionID = nil
+                finishSessionActionIfCurrent(session.id)
+                PILog.info("Session", "delete end session=\(session.id.prefix(8)) result=ok")
+                model.showToast("会话已删除")
+            } catch {
+                let message = ConnectionErrorText.describeSessionAction(error)
+                PILog.warn("Session", "delete failed session=\(session.id.prefix(8)) error=\(message)")
+                model.showToast(message)
+            }
+        }
+    }
+
+    /// 先使任何仍在进行的打开请求失效，再按完成时的 attached ID 决定是否退出。
+    private func finishSessionActionIfCurrent(_ sessionID: String) {
+        connection.session.cancelPendingAttach(for: sessionID)
+        guard connection.session.attachedSessionId == sessionID else { return }
+        connection.session.detach()
+        model.rememberSession(nil)
+        model.switchRoot(.projects)
+        model.closeSidebar()
     }
 
     // MARK: - 底部
 
+    /// 抽屉底部只有两件事：**一个动作**（新建会话）与**一处目的地列表**（三个根）。
+    ///
+    /// quiet-v2 §6：旧的三个等宽描边方块既像分段控件又像按钮，只能靠图标+文字才读懂。
+    /// 现在分成两种一眼可辨的形态：
+    /// - 动作 = 实心强调色按钮（唯一的实心块，不可误读成「当前选中」）；
+    /// - 根 = 单选目的地列表（一行一个根，当前项用强调色 + 勾选表达）。
     private var bottomBar: some View {
-        VStack(alignment: .leading, spacing: PISpacing.s12) {
-            if connection.state.isOnline {
-                PIListRow(
-                    title: "新建会话",
-                    subtitle: "先选择项目（作为工作区）",
-                    icon: "plus.circle",
-                    iconTint: PIColor.accent,
-                    showsChevron: true,
-                    showsDivider: false,
-                    action: {
-                        model.switchRoot(.projects)
-                        model.closeSidebar()
-                    }
-                )
-            } else {
-                disabledAction(title: "新建会话", reason: "未连接服务器，无法新建会话")
+        VStack(alignment: .leading, spacing: PISpacing.s16) {
+            PIPrimaryButton(
+                title: "新建会话",
+                isEnabled: connection.state.isOnline,
+                identifier: "sidebar.newSession"
+            ) {
+                model.switchRoot(.projects)
             }
-            HStack(spacing: PISpacing.s8) {
-                // IA §1 的三个根都要有入口：会话 / 项目 / 设置（会话页仍是既有空态，不造假数据）。
-                rootButton(.conversation)
-                rootButton(.projects)
-                rootButton(.settings)
+            HStack(spacing: PISpacing.s4) {
+                ForEach(Self.rootOrder, id: \.self) { root in
+                    rootRow(root)
+                }
             }
         }
         .padding(.horizontal, PISpacing.s16)
-        .padding(.top, PISpacing.s12)
+        .padding(.top, PISpacing.s16)
         .padding(.bottom, PISpacing.s16)
     }
 
-    private func rootButton(_ root: AppModel.Root) -> some View {
-        Button {
+    private static let rootOrder: [AppModel.Root] = [.conversation, .projects, .settings]
+
+    /// 一级导航：三个纯图标横向并列；文字仅保留给辅助技术。
+    private func rootRow(_ root: AppModel.Root) -> some View {
+        let isCurrent = model.root == root
+        return Button {
             model.switchRoot(root)
         } label: {
-            VStack(spacing: PISpacing.s4) {
-                Image(systemName: rootIcon(root))
-                    .font(.system(size: 15, weight: .semibold))
-                Text(root.title)
-                    .font(PIFont.metaSmall.weight(.semibold))
-            }
-            .foregroundStyle(model.root == root ? PIColor.accent : PIColor.text2)
-            .frame(maxWidth: .infinity, minHeight: 50)
-            .background(
-                model.root == root ? PIColor.accentSoft : PIColor.surface2,
-                in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
-                    .strokeBorder(
-                        model.root == root ? PIColor.accentBorder : PIColor.separator,
-                        lineWidth: PIMetrics.hairline
-                    )
-            )
+            Image(systemName: rootIcon(root))
+                .font(.system(size: 18, weight: isCurrent ? .semibold : .regular))
+                .foregroundStyle(isCurrent ? PIColor.accent : PIColor.text2)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: PIMetrics.minHitTarget)
+                .background(
+                    isCurrent ? PIColor.accentSoft : Color.clear,
+                    in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                )
+                .contentShape(Rectangle())
         }
         .buttonStyle(PIPressableButtonStyle())
         .accessibilityLabel(root.title)
-        .accessibilityAddTraits(model.root == root ? .isSelected : [])
+        .accessibilityAddTraits(isCurrent ? .isSelected : [])
+        .accessibilityIdentifier("sidebar.root.\(root.rawValue)")
     }
 
     private func rootIcon(_ root: AppModel.Root) -> String {
@@ -968,33 +1205,6 @@ struct SidebarView: View {
         }
     }
 
-    /// 禁用态操作：明确写清原因，不做「点了没反应」的按钮。
-    private func disabledAction(title: String, reason: String) -> some View {
-        VStack(alignment: .leading, spacing: PISpacing.s4) {
-            HStack(spacing: PISpacing.s8) {
-                Image(systemName: "lock")
-                    .font(.system(size: 12, weight: .semibold))
-                    .accessibilityHidden(true)
-                Text(title)
-                    .font(PIFont.button)
-                Spacer(minLength: 0)
-            }
-            .foregroundStyle(PIColor.text3)
-            .padding(.horizontal, PISpacing.s12)
-            .frame(maxWidth: .infinity, minHeight: PIMetrics.minHitTarget)
-            .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
-                    .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
-            )
-            Text(reason)
-                .font(PIFont.metaSmall)
-                .foregroundStyle(PIColor.text3)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title)，不可用：\(reason)")
-    }
 }
 
 private enum SidebarSessionCoordinates {

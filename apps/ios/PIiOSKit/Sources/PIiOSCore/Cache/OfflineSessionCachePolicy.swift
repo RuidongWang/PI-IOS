@@ -14,6 +14,8 @@ public struct OfflineSessionCacheEntry: Codable, Equatable, Sendable {
     public var status: String?
     public var epoch: String?
     public var sequence: Int?
+    /// Stable turn key projected from ordered history; nil for legacy caches.
+    public var turnId: String?
 
     public init(
         id: String,
@@ -26,7 +28,8 @@ public struct OfflineSessionCacheEntry: Codable, Equatable, Sendable {
         toolName: String? = nil,
         status: String? = nil,
         epoch: String? = nil,
-        sequence: Int? = nil
+        sequence: Int? = nil,
+        turnId: String? = nil
     ) {
         self.id = id
         self.sessionId = sessionId
@@ -39,6 +42,19 @@ public struct OfflineSessionCacheEntry: Codable, Equatable, Sendable {
         self.status = status
         self.epoch = epoch
         self.sequence = sequence
+        self.turnId = turnId
+    }
+
+    /// Reuse the live message renderer without inventing text for empty messages.
+    /// Cache metadata is sufficient for role styling and collapsed tool results.
+    public var conversationItem: RACPItem {
+        var fields: [String: JSONValue] = ["id": .string(id), "text": .string(text)]
+        if let kind { fields["kind"] = .string(kind) }
+        if let role { fields["role"] = .string(role) }
+        if let toolName { fields["toolName"] = .string(toolName) }
+        if let status { fields["status"] = .string(status) }
+        if let turnId { fields["turnId"] = .string(turnId) }
+        return RACPItem(id: id, payload: .object(fields))
     }
 
     /// Offline history still needs a readable row for tool/status items whose
@@ -123,6 +139,9 @@ public enum OfflineSessionCachePolicy {
         }
         return latestByKey.values.sorted {
             if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+            if let lhsSequence = $0.sequence, let rhsSequence = $1.sequence, lhsSequence != rhsSequence {
+                return lhsSequence > rhsSequence
+            }
             return itemKey(hostID: $0.hostID, sessionID: $0.sessionId, itemID: $0.id)
                 < itemKey(hostID: $1.hostID, sessionID: $1.sessionId, itemID: $1.id)
         }
@@ -261,14 +280,14 @@ public enum OfflineSessionCachePolicy {
     /// 对完整缓存快照执行统一裁剪：
     /// - 会话活动时间取自 items/cursors/approvals/drafts 的最新时间；
     /// - 最多保留 20 个 PI-adaptor + 会话；
-    /// - 每个会话的 items 按设置上限（默认 200）保留最新记录；
+    /// - 每个会话按设置上限（默认 200）保留最新完整轮次，轮次内 items 不拆分；
     /// - 游标与草稿每会话一份，审批卡去重后只保留未淘汰会话。
     public static func prunedSnapshot(
         _ snapshot: OfflineSessionCacheSnapshot,
         offlineCacheLimit: Int?
     ) -> OfflineSessionCacheSnapshot {
         let sessions = deduplicatedSessions(snapshot.sessions)
-        let entries = deduplicatedEntries(snapshot.entries)
+        let entries = projectingTurnIDs(deduplicatedEntries(snapshot.entries))
         let cursors = deduplicatedCursors(snapshot.cursors)
         let approvals = deduplicatedApprovals(snapshot.approvals)
         let drafts = deduplicatedDrafts(snapshot.drafts)
@@ -307,7 +326,8 @@ public enum OfflineSessionCachePolicy {
             CacheItemRecord(
                 id: itemKey(hostID: entry.hostID, sessionID: entry.sessionId, itemID: entry.id),
                 sessionId: sessionKey(hostID: entry.hostID, sessionID: entry.sessionId),
-                createdAt: entry.createdAt
+                createdAt: entry.createdAt,
+                turnId: entry.turnId
             )
         }
         let itemPlan = CacheRetention.pruneItems(
@@ -329,7 +349,7 @@ public enum OfflineSessionCachePolicy {
         )
     }
 
-    /// 按契约保留单会话最新 N 条、最多 20 个 PI-adaptor+会话；重复条目先去重，避免以重复键建字典。
+    /// 按契约保留单会话最新 N 轮、最多 20 个 PI-adaptor+会话；重复条目先去重，避免以重复键建字典。
     public static func prunedEntries(
         _ entries: [OfflineSessionCacheEntry],
         offlineCacheLimit: Int?
@@ -338,6 +358,54 @@ public enum OfflineSessionCachePolicy {
             OfflineSessionCacheSnapshot(entries: entries),
             offlineCacheLimit: offlineCacheLimit
         ).entries
+    }
+
+    /// Projects legacy nil-turn entries once per host+session. Reliable ordering uses
+    /// the composite (createdAt, sequence) key; ambiguous subsets stay indivisible.
+    private static func projectingTurnIDs(
+        _ entries: [OfflineSessionCacheEntry]
+    ) -> [OfflineSessionCacheEntry] {
+        let legacyGroups = Dictionary(grouping: entries.filter { $0.turnId == nil }) {
+            sessionKey(hostID: $0.hostID, sessionID: $0.sessionId)
+        }
+        var projectedKeys: [String: String] = [:]
+        for legacyEntries in legacyGroups.values {
+            let itemKeys = legacyEntries.map {
+                itemKey(hostID: $0.hostID, sessionID: $0.sessionId, itemID: $0.id)
+            }
+            let hasCompleteUniqueOrder = legacyEntries.allSatisfy { $0.sequence != nil }
+                && Set(legacyEntries.map {
+                    LegacyOrderKey(createdAt: $0.createdAt, sequence: $0.sequence ?? 0)
+                }).count == legacyEntries.count
+            guard hasCompleteUniqueOrder else {
+                let conservativeKey = "legacy:\(itemKeys.min() ?? "")"
+                for key in itemKeys { projectedKeys[key] = conservativeKey }
+                continue
+            }
+
+            let ordered = legacyEntries.sorted { lhs, rhs in
+                if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+                return (lhs.sequence ?? 0) < (rhs.sequence ?? 0)
+            }
+            var keyer = ConversationTurnKeyer()
+            for entry in ordered {
+                projectedKeys[itemKey(hostID: entry.hostID, sessionID: entry.sessionId, itemID: entry.id)] =
+                    keyer.key(itemID: entry.id, role: entry.role, turnID: nil)
+            }
+        }
+        return entries.map { entry in
+            guard entry.turnId == nil else { return entry }
+            var projected = entry
+            projected.turnId = projectedKeys[
+                itemKey(hostID: entry.hostID, sessionID: entry.sessionId, itemID: entry.id)
+            ]
+            return projected
+        }
+    }
+
+    private struct LegacyOrderKey: Hashable {
+        let createdAt: Date
+        let sequence: Int
     }
 
     private static func approvalKey(

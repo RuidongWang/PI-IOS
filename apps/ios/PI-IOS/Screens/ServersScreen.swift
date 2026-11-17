@@ -81,7 +81,6 @@ struct ServersScreen: View {
                     pairingSection(for: host)
                     dangerSection(for: host)
                 }
-                noteCard
             }
             .padding(.horizontal, PIMetrics.pageMargin)
             .padding(.top, PISpacing.s16)
@@ -135,12 +134,19 @@ struct ServersScreen: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("只删除这条本机记录；同一 SSH 账户仍被其他记录使用时保留凭证。服务器上的会话、文件与模型配置不受影响。")
+            // R7：只说后果（会失去什么），不写安抚句。
+            // 两句各承担一个决定：①本机清什么、凭证在共用 SSH 账户时保留；
+            // ②服务器端设备授权不随之撤销（否则用户会以为删除等于吊销）。
+            Text(
+                "只清本机记录、配对与缓存。\n"
+                    + "共用同一 SSH 账户的其他记录会保留凭证；不会撤销服务器授权。"
+            )
         }
     }
 
+    /// R7：标题说清对象，message 说清后果。
     private var deleteTitle: String {
-        "删除「\(existingHost?.name ?? "这台服务器")」？"
+        "删除「\(existingHost?.name ?? "这台服务器")」的本机记录？"
     }
 
     // MARK: - 状态条
@@ -148,11 +154,7 @@ struct ServersScreen: View {
     @ViewBuilder
     private var statusBanner: some View {
         if connection.isTesting || isSaving {
-            PIStatusBanner(
-                kind: .info,
-                text: "正在测试连接",
-                detail: "会完成 SSH 握手与认证；首次连接需要你核对主机指纹。"
-            )
+            PIStatusBanner(kind: .info, text: "正在测试连接")
         }
     }
 
@@ -163,59 +165,59 @@ struct ServersScreen: View {
             formRow {
                 PIFormField(
                     label: "名称",
-                    hint: "留空时使用服务器地址作为名称",
                     error: errors.name
                 ) {
-                    TextField("例如：家里的服务器", text: $draft.name)
+                    TextField("可选，默认用地址", text: $draft.name)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .accessibilityIdentifier("servers.name")
                 }
             }
             PIRowDivider()
             formRow {
                 PIFormField(
                     label: "地址",
-                    hint: "主机名或 IPv4，例如 192.168.1.10",
                     error: errors.host
                 ) {
                     TextField("192.168.1.10", text: $draft.host)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .accessibilityIdentifier("servers.host")
                 }
             }
             PIRowDivider()
             formRow {
                 PIFormField(
                     label: "SSH 端口",
-                    hint: "默认 22",
                     error: errors.port
                 ) {
                     TextField("22", text: $draft.port)
                         .keyboardType(.numberPad)
+                        .accessibilityIdentifier("servers.port")
                 }
             }
             PIRowDivider()
             formRow {
                 PIFormField(
                     label: "用户名",
-                    hint: "登录服务器用的 Linux 用户",
                     error: errors.username
                 ) {
                     TextField("pi", text: $draft.username)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .accessibilityIdentifier("servers.username")
                 }
             }
             PIRowDivider()
             formRow {
                 PIFormField(
                     label: "PI-adaptor 端口",
-                    hint: "留空自动探测",
                     error: errors.hostPort
                 ) {
                     TextField("自动探测", text: $draft.hostPort)
                         .keyboardType(.numberPad)
+                        .accessibilityIdentifier("servers.adaptorPort")
                 }
             }
         }
@@ -234,6 +236,7 @@ struct ServersScreen: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                    .accessibilityIdentifier("servers.authKind")
                 }
             }
             PIRowDivider()
@@ -242,17 +245,16 @@ struct ServersScreen: View {
                 case .password:
                     PIFormField(
                         label: "密码",
-                        hint: "保存在 Keychain",
                         error: errors.secret
                     ) {
-                        SecureField("服务器登录密码", text: $draft.secret)
+                        SecureField(passwordPlaceholder, text: $draft.secret)
                             .textContentType(.password)
+                            .accessibilityIdentifier("servers.password")
                     }
                 case .privateKey:
                     VStack(alignment: .leading, spacing: PISpacing.s8) {
                         PIFormField(
                             label: "私钥文件",
-                            hint: keyFileHint,
                             error: errors.secret
                         ) {
                             HStack(spacing: PISpacing.s8) {
@@ -301,36 +303,29 @@ struct ServersScreen: View {
                             }
                             .buttonStyle(.borderless)
                             .font(PIFont.caption)
+                            .accessibilityIdentifier("servers.removeKey")
                         }
                         PIFormField(
                             label: "私钥口令（可选）",
-                            hint: "私钥带口令时填写",
                             error: errors.passphrase
                         ) {
                             SecureField("私钥口令", text: $draft.passphrase)
                                 .textContentType(.newPassword)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
+                                .accessibilityIdentifier("servers.passphrase")
                         }
                     }
-                }
-            }
-            if isEditing {
-                PIRowDivider()
-                formRow {
-                    Text(existingHost?.authKind != draft.authKind
-                        ? "更换认证方式时，请填写对应的新凭证。"
-                        : (draft.secret.piTrimmed.isEmpty
-                            ? "留空表示沿用 Keychain 里已保存的凭证。"
-                            : "填写后会覆盖 Keychain 里的旧凭证。"))
-                        .font(PIFont.caption)
-                        .foregroundStyle(PIColor.text2)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
         // U13：认证方式与凭证同样在保存期间冻结，避免「提交 A、界面显示 B」。
         .disabled(isSaving)
+    }
+
+    /// R4：约束写进控件——编辑态留空表示沿用 Keychain 里的旧凭证，不再单独写一行说明。
+    private var passwordPlaceholder: String {
+        isEditing ? "留空沿用已保存凭证" : "服务器登录密码"
     }
 
     private var saveButton: some View {
@@ -343,16 +338,10 @@ struct ServersScreen: View {
                 saveAndTest()
             }
             if isSaving {
-                Text("保存中：本次提交使用点击时的地址、端口、用户名、认证方式与凭证；保存完成前以上字段不可编辑，完成后再改属于下一次提交。")
+                Text("保存中")
                     .font(PIFont.caption)
                     .foregroundStyle(PIColor.text2)
-                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("servers.saveFrozenHint")
-            } else {
-                Text("测试会真实登录一次服务器。")
-                    .font(PIFont.caption)
-                    .foregroundStyle(PIColor.text3)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             if let resultMessage {
                 PIInlineMessage(kind: .info, text: "测试结果：\(resultMessage)")
@@ -369,11 +358,17 @@ struct ServersScreen: View {
     // MARK: - 指纹
 
     private func fingerprintSection(for host: HostRecord) -> some View {
-        PIGroup(
-            "主机指纹",
-            footer: "指纹变化会拒绝连接；服务器重装后请先移除旧指纹，再重新核对。"
-        ) {
-            if let pinned = pinnedHostKey {
+        // 展示与删除必须绑定同一个「已保存身份」。之前展示用 draft 账号、删除用
+        // host 账号：编辑用户名/地址/端口后，两个账号都有 pin 时会显示新账号指纹
+        // 却删除旧账号 pin，甚至影响共用旧账号的其他记录。
+        let savedAccount = KeychainStore.account(
+            username: host.username,
+            host: host.host,
+            port: host.port
+        )
+        let pinned = KeychainStore.loadHostKey(account: savedAccount)
+        return PIGroup("主机指纹") {
+            if let pinned {
                 PIListRow(
                     title: "已固定",
                     subtitle: pinned.fingerprint,
@@ -384,27 +379,22 @@ struct ServersScreen: View {
                 )
                 PIListRow(
                     title: "移除旧指纹后重新核对",
-                    subtitle: "下次连接仍需确认新指纹",
                     icon: "arrow.counterclockwise",
                     showsChevron: true,
                     showsDivider: false,
                     action: {
                         connection.removeHostKeyPin(
-                            account: KeychainStore.account(
-                                username: host.username,
-                                host: host.host,
-                                port: host.port
-                            ),
+                            account: savedAccount,
                             address: host.address,
                             previousFingerprint: pinned.fingerprint
                         )
                         model.showToast("已移除旧指纹；下次连接需要重新核对")
                     }
                 )
+                .accessibilityIdentifier("servers.removeHostKey")
             } else {
                 PIListRow(
                     title: "尚未固定",
-                    subtitle: "首次连接需确认 SHA256 指纹",
                     icon: "shield.slash",
                     iconTint: PIColor.warning,
                     isEnabled: false,
@@ -511,10 +501,7 @@ struct ServersScreen: View {
 
     private func pairingSection(for host: HostRecord) -> some View {
         let policy = pairingPolicy(for: host)
-        return PIGroup(
-            "PI-adaptor 连接",
-            footer: "配对令牌一次性有效；设备令牌只保存在本机 Keychain。重新配对成功前保留现有设备令牌。"
-        ) {
+        return PIGroup("PI-adaptor 连接") {
             PIListRow(
                 title: "安装或修复 PI-adaptor",
                 icon: "shippingbox",
@@ -524,6 +511,7 @@ struct ServersScreen: View {
                 showsDivider: true,
                 action: { push(.installAdaptor(host.id)) }
             )
+            .accessibilityIdentifier("servers.install")
             if policy.hasDeviceToken {
                 PIListRow(
                     title: "已保存设备令牌",
@@ -533,9 +521,10 @@ struct ServersScreen: View {
                     isEnabled: false,
                     showsDivider: true
                 )
+                .accessibilityIdentifier("servers.pairing.tokenState")
                 PIListRow(
                     title: "连接 PI-adaptor",
-                    subtitle: "通过 SSH 隧道连接 127.0.0.1:\(host.hostPort.map(String.init) ?? "未设置")",
+                    subtitle: host.hostPort.map { "127.0.0.1:\($0)" },
                     icon: "bolt",
                     iconTint: PIColor.accent,
                     isEnabled: !isSaving && !isPairing && !isDeleting,
@@ -543,6 +532,7 @@ struct ServersScreen: View {
                     showsDivider: true,
                     action: { connectExisting(host) }
                 )
+                .accessibilityIdentifier("servers.connect")
                 // U17：有设备令牌时也提供「使用新的一次性令牌重新配对」。
                 // 失败被拒绝时该入口已在页面顶部展开，这里不再重复一份表单。
                 if policy.showsRepairEntry, !policy.isRepairPromoted {
@@ -583,8 +573,7 @@ struct ServersScreen: View {
     private func pairingTokenForm(for host: HostRecord, actionTitle: String) -> some View {
         VStack(alignment: .leading, spacing: PISpacing.s8) {
             PIFormField(
-                label: "一次性配对令牌",
-                hint: "安装流程会输出 ppt2.… 令牌"
+                label: "一次性配对令牌"
             ) {
                 SecureField("ppt2.…", text: $pairingToken)
                     .textInputAutocapitalization(.never)
@@ -601,10 +590,9 @@ struct ServersScreen: View {
             }
             .disabled(pairingToken.piTrimmed.isEmpty)
             if isPairing {
-                Text("正在配对：成功后会保存新设备令牌并自动连接；失败时旧设备令牌与本次输入的令牌都会保留。")
+                Text("正在配对")
                     .font(PIFont.caption)
                     .foregroundStyle(PIColor.text3)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, PISpacing.s16)
@@ -654,9 +642,9 @@ struct ServersScreen: View {
                 }
             } catch {
                 await MainActor.run {
-                    // 失败只报原因：旧设备令牌仍保留，本次输入也留在输入框里可重试。
+                    // 失败只报原因与下一步：旧设备令牌仍保留，本次输入也留在输入框里可重试。
                     pairingMessage = "配对失败：\(ConnectionErrorText.describe(error))；"
-                        + "旧设备令牌仍保留，可重试；如果令牌已过期，请重启 PI-adaptor 取新令牌"
+                        + "旧设备令牌仍保留，可重试；令牌过期请重启 PI-adaptor 取新令牌"
                 }
                 if model.canApplyHostOperation(operationGeneration, hostID: host.id),
                    let current = model.currentHost {
@@ -681,19 +669,7 @@ struct ServersScreen: View {
                 isEnabled: !isSaving && !isPairing && !isDeleting,
                 action: { showDeleteConfirm = true }
             )
-        }
-    }
-
-    private var noteCard: some View {
-        PICard {
-            Text("本机写了什么")
-                .font(PIFont.metaSmall)
-                .tracking(1.1)
-                .foregroundStyle(PIColor.text3)
-            Text("地址、端口与名称保存在本机；密码/私钥、设备令牌与主机指纹只进 Keychain。")
-                .font(PIFont.caption)
-                .foregroundStyle(PIColor.text3)
-                .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("servers.delete")
         }
     }
 
@@ -709,14 +685,6 @@ struct ServersScreen: View {
 
     // MARK: - 私钥文件
 
-    /// 私钥文件的提示：首次选择、重新选择、编辑态沿用已保存文件，三种情况文案不同。
-    private var keyFileHint: String {
-        if draft.secret.isEmpty, let name = draft.keyFileName {
-            return "重新选择会覆盖 Keychain 里来自「\(name)」的私钥。"
-        }
-        return "OpenSSH 私钥（ed25519 / ECDSA / RSA），读取一次后存入 Keychain。"
-            + "选择器读不到文件时，用旁边的「粘贴」直接把私钥全文粘进来。"
-    }
     /// 读取并校验所选私钥文件。
     ///
     /// iOS 的沙盒约束：外部文件只在选择回调期间可访问（security-scoped），所以这里一次性读入内存，
@@ -737,7 +705,7 @@ struct ServersScreen: View {
             draft.keyFileName = file.fileName
             errors.secret = nil
             keyFileError = file.info.isEncrypted && draft.passphrase.isEmpty
-                ? "这把私钥带口令保护（\(file.info.cipherName)）：请填写下面的口令，否则连接会失败。"
+                ? "这把私钥带口令保护（\(file.info.cipherName)）：请填写下面的私钥口令"
                 : nil
         } catch let error as SSHPrivateKeyFileError {
             // 读不到 / 空 / 过大 / 不是私钥：只报原因，不覆盖已选或已保存的私钥。
@@ -761,21 +729,18 @@ struct ServersScreen: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .accessibilityIdentifier("servers.pasteKey.text")
+                    // 错误只作为一行原因出现在输入框下面；quiet-v2 不再用分组 footer 承载说明。
+                    // 独立标识：弹层固定有「私钥全文…」标题，按“含私钥”查文本会把标题
+                    // 当成错误提示，导致导入完全不生效也能通过。
+                    if let message = pasteKeyError {
+                        Text(message)
+                            .font(PIFont.caption)
+                            .foregroundStyle(PIColor.danger)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("servers.pasteKey.error")
+                    }
                 } header: {
                     Text("私钥全文（以 -----BEGIN 开头）")
-                } footer: {
-                    VStack(alignment: .leading, spacing: PISpacing.s8) {
-                        if let message = pasteKeyError {
-                            Text(message)
-                                .font(PIFont.caption)
-                                .foregroundStyle(PIColor.danger)
-                                .fixedSize(horizontal: false, vertical: true)
-                                // 独立标识：弹层固定有「私钥全文…」标题，按“含私钥”查文本
-                                // 会把标题当成错误提示，导致导入完全不生效也能通过。
-                                .accessibilityIdentifier("servers.pasteKey.error")
-                        }
-                        Text("粘贴的文本只保存在 Keychain，不写入本机文件、日志或剪贴板。")
-                    }
                 }
             }
             .scrollContentBackground(.hidden)
@@ -812,7 +777,7 @@ struct ServersScreen: View {
             errors.secret = nil
             pasteKeyError = nil
             keyFileError = file.info.isEncrypted && draft.passphrase.isEmpty
-                ? "这把私钥带口令保护（\(file.info.cipherName)）：请填写下面的口令，否则连接会失败。"
+                ? "这把私钥带口令保护（\(file.info.cipherName)）：请填写下面的私钥口令"
                 : nil
             isPastingKey = false
         } catch let error as SSHPrivateKeyFileError {
@@ -976,7 +941,7 @@ struct HostKeyConfirmSheet: View {
                 PIStatusBanner(
                     kind: .danger,
                     text: "指纹与固定记录不一致，连接已被拒绝",
-                    detail: "原指纹：\(pinned.fingerprint)。这不提供「一键忽略」：请先确认服务器是否被重装或中间人劫持。"
+                    detail: "原指纹：\(pinned.fingerprint)。若确实重装过服务器，先在服务器页移除旧指纹，再重新核对。"
                 )
             }
 
@@ -1009,10 +974,12 @@ struct HostKeyConfirmSheet: View {
                     onConfirm(.trust)
                     dismiss()
                 }
+                .accessibilityIdentifier("servers.hostKey.trust")
                 PISecondaryButton(title: "取消（不建立连接）") {
                     onConfirm(.reject)
                     dismiss()
                 }
+                .accessibilityIdentifier("servers.hostKey.cancel")
             }
         }
         .padding(.horizontal, PIMetrics.pageMargin)

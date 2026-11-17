@@ -167,6 +167,43 @@ public enum ConversationRow: Equatable, Sendable {
     }
 }
 
+/// A complete row snapshot and its item lookup are replaced together. Building
+/// visits each original item once; resolving a saved item never scans the rows.
+public struct ConversationRowIndex: Equatable, Sendable {
+    public let rows: [ConversationRow]
+    public let anchors: [String: String]
+    public let indexedItemCount: Int
+
+    public init(items: [RACPItem]) {
+        self.init(rows: ToolCallGroupingPolicy.rows(for: items))
+    }
+
+    public init(rows: [ConversationRow]) {
+        self.rows = rows
+        var anchors: [String: String] = [:]
+        var visited = 0
+        for row in rows {
+            switch row {
+            case .item(let item):
+                visited += 1
+                if anchors[item.id] == nil { anchors[item.id] = item.id }
+            case .toolGroup(let group):
+                let anchor = row.anchorItemID
+                for item in group.items {
+                    visited += 1
+                    if anchors[item.id] == nil { anchors[item.id] = anchor }
+                }
+            }
+        }
+        self.anchors = anchors
+        indexedItemCount = visited
+    }
+
+    public func anchorItemID(for itemID: String) -> String {
+        anchors[itemID] ?? itemID
+    }
+}
+
 /// 线程行的折叠策略。
 ///
 /// 一轮对话从用户消息开始，到该轮最后一条非工具回复结束。策略把「最终回复之前」
@@ -182,6 +219,10 @@ public enum ToolCallGroupingPolicy {
     public static let minimumGroupCount = 2
 
     public static func rows(for items: [RACPItem]) -> [ConversationRow] {
+        // 纯空白中间条目直接丢弃：Host 在一轮的纯工具步骤里会推一条正文为空（或只有
+        // 空白/换行）的 assistant 条目，它渲染出来只有右侧复制按钮加一整块空白，
+        // 在工具组里就是一条「空行」。
+        let items = items.filter { !$0.isBlankNonToolItem }
         var rows: [ConversationRow] = []
         var segment: [RACPItem] = []
         var turnAnchorID: String?
@@ -275,5 +316,19 @@ public enum ToolCallGroupingPolicy {
             }
         }
         return itemID
+    }
+}
+
+extension RACPItem {
+    /// 纯空白中间条目：非工具、非用户、无附件，正文为空且类型缺省或为通用 message。
+    ///
+    /// 会话线程里这种条目没有任何可显示内容（`MarkdownParser` 对纯空白切不出块，
+    /// 高度为 0），只剩右对齐的复制按钮占位，于是每条都变成一行空白。
+    /// 用户消息、工具卡片、带附件的条目一律保留。
+    public var isBlankNonToolItem: Bool {
+        guard !isToolItem, role != "user", attachments.isEmpty else { return false }
+        let trimmedText = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let trimmedKind = kind?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedText.isEmpty && (trimmedKind.isEmpty || trimmedKind == "message")
     }
 }

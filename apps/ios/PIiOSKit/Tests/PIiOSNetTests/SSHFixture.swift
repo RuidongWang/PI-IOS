@@ -6,6 +6,18 @@ import XCTest
 ///
 /// fixture 全部由 `ssh-keygen` 在开发机上临时生成（见 Fixtures/README.md），
 /// 不是任何真实服务器使用的密钥；口令统一是 `pi-test-passphrase`。
+/// Host-key policy for opt-in real-server tests. Tests must supply the
+/// fingerprint obtained out of band (PI_SSH_KNOWN_HOST_KEY); otherwise the
+/// connection is rejected instead of silently trusting any key.
+enum TestHostKeyPolicy {
+    static func confirm(_ key: SSHHostKey) -> HostKeyConfirmation {
+        let expected = ProcessInfo.processInfo.environment["PI_SSH_KNOWN_HOST_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let expected, !expected.isEmpty else { return .reject }
+        return key.fingerprint == expected ? .trust : .reject
+    }
+}
+
 enum SSHFixture {
     static let passphrase = "pi-test-passphrase"
 

@@ -10,7 +10,7 @@ final class PairingEntryPolicyTests: XCTestCase {
         let policy = PairingEntryPolicy(hasDeviceToken: true, isPaired: true, authFailure: .none)
         XCTAssertTrue(policy.showsRepairEntry)
         XCTAssertFalse(policy.isRepairPromoted)
-        XCTAssertEqual(policy.repairActionTitle, "使用新的一次性令牌重新配对")
+        XCTAssertEqual(policy.repairActionTitle, "重新配对")
         XCTAssertTrue(policy.repairExplanation.contains("重新配对"))
         XCTAssertFalse(policy.settingsRepairTitle.contains("失效"))
         XCTAssertFalse(policy.shouldShowSettingsRepairRow)
@@ -25,10 +25,10 @@ final class PairingEntryPolicyTests: XCTestCase {
         XCTAssertTrue(policy.showsRepairEntry)
         XCTAssertTrue(policy.isRepairPromoted)
         XCTAssertTrue(policy.repairTitle.contains("令牌已失效"))
-        XCTAssertTrue(policy.repairExplanation.contains("旧设备令牌不会被覆盖"))
-        XCTAssertTrue(policy.repairExplanation.contains("撤销"))
+        XCTAssertTrue(policy.repairExplanation.contains("服务器拒绝了本机的设备令牌"))
+        XCTAssertTrue(policy.repairExplanation.contains("一次性令牌重新配对"))
         XCTAssertTrue(policy.shouldShowSettingsRepairRow)
-        XCTAssertTrue(policy.settingsRepairTitle.contains("失效"))
+        XCTAssertEqual(policy.settingsRepairTitle, "重新配对")
     }
 
     func testDeviceRevokedWithTokenPromotesRepairWithDistinctTitle() {
@@ -39,7 +39,7 @@ final class PairingEntryPolicyTests: XCTestCase {
         )
         XCTAssertTrue(policy.isRepairPromoted)
         XCTAssertTrue(policy.repairTitle.contains("撤销"))
-        XCTAssertTrue(policy.repairExplanation.contains("服务器侧撤销"))
+        XCTAssertTrue(policy.repairExplanation.contains("访问权限已在服务器上撤销"))
         XCTAssertTrue(policy.shouldShowSettingsRepairRow)
     }
 

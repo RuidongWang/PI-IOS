@@ -54,7 +54,8 @@ final class OfflineSessionCacheSQLiteTests: XCTestCase {
                     toolName: nil,
                     status: "completed",
                     epoch: "ep_1",
-                    sequence: 40
+                    sequence: 40,
+                    turnId: "turn:turn_1"
                 ),
             ],
             cursors: [
@@ -98,6 +99,8 @@ final class OfflineSessionCacheSQLiteTests: XCTestCase {
             "deepseek-flash"
         )
         XCTAssertEqual(try tableNames(), ["approvals", "cursors", "drafts", "items", "sessions"])
+        XCTAssertEqual(try userVersion(), 2)
+        XCTAssertEqual(try itemColumns().filter { $0 == "turn_id" }.count, 1)
         XCTAssertEqual(
             try databaseURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup,
             true
@@ -144,6 +147,50 @@ final class OfflineSessionCacheSQLiteTests: XCTestCase {
         XCTAssertEqual(loaded.cursors.map(\.hostID), [hostB])
         XCTAssertEqual(loaded.approvals.map(\.hostID), [hostB])
         XCTAssertEqual(loaded.drafts.map(\.hostID), [hostB])
+    }
+
+    func testV1ItemsTableMigratesToV2IdempotentlyAndPreservesRows() throws {
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(databaseURL.path, &handle), SQLITE_OK)
+        guard let handle else { return XCTFail("missing sqlite handle") }
+        defer { sqlite3_close(handle) }
+        try execute("""
+            CREATE TABLE items (
+                host_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                kind TEXT,
+                role TEXT,
+                text TEXT NOT NULL,
+                tool_name TEXT,
+                status TEXT,
+                epoch TEXT,
+                sequence INTEGER,
+                created_at REAL NOT NULL,
+                PRIMARY KEY (host_id, session_id, id)
+            )
+            """, on: handle)
+        try execute("""
+            INSERT INTO items
+                (host_id, id, session_id, kind, role, text, created_at)
+            VALUES ('\(hostA.uuidString)', 'legacy', 'ses_1', 'message', 'user', 'preserved', 1700000000)
+            """, on: handle)
+        try execute("PRAGMA user_version=1", on: handle)
+
+        do {
+            let migrated = try OfflineSessionCacheSQLite(url: databaseURL)
+            let snapshot = try migrated.loadSnapshot()
+            XCTAssertEqual(snapshot.entries.first?.text, "preserved")
+            XCTAssertNil(snapshot.entries.first?.turnId)
+            XCTAssertEqual(try userVersion(), 2)
+            XCTAssertEqual(try itemColumns().filter { $0 == "turn_id" }.count, 1)
+        }
+
+        // Reopening must not attempt a second ALTER or duplicate the column.
+        _ = try OfflineSessionCacheSQLite(url: databaseURL)
+        XCTAssertEqual(try userVersion(), 2)
+        XCTAssertEqual(try itemColumns().filter { $0 == "turn_id" }.count, 1)
+        XCTAssertEqual(try OfflineSessionCacheSQLite(url: databaseURL).loadSnapshot().entries.first?.text, "preserved")
     }
 
     func testCorruptDatabaseIsRejectedAndNotOverwritten() throws {
@@ -266,6 +313,42 @@ final class OfflineSessionCacheSQLiteTests: XCTestCase {
             idempotencyKey: "key_\(text)",
             updatedAt: base
         )
+    }
+
+    private func execute(_ sql: String, on handle: OpaquePointer) throws {
+        guard sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK else {
+            throw NSError(domain: "OfflineSessionCacheSQLiteTests", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(handle))])
+        }
+    }
+
+    private func userVersion() throws -> Int {
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(databaseURL.path, &handle), SQLITE_OK)
+        guard let handle else { throw NSError(domain: "OfflineSessionCacheSQLiteTests", code: 2) }
+        defer { sqlite3_close(handle) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(handle, "PRAGMA user_version", -1, &statement, nil), SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
+        return Int(sqlite3_column_int(statement, 0))
+    }
+
+    private func itemColumns() throws -> [String] {
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(databaseURL.path, &handle), SQLITE_OK)
+        guard let handle else { throw NSError(domain: "OfflineSessionCacheSQLiteTests", code: 3) }
+        defer { sqlite3_close(handle) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(handle, "PRAGMA table_info(items)", -1, &statement, nil), SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        var columns: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let name = sqlite3_column_text(statement, 1) {
+                columns.append(String(cString: name))
+            }
+        }
+        return columns
     }
 
     private func tableNames() throws -> [String] {

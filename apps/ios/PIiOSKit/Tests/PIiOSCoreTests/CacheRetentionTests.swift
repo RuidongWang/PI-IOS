@@ -9,7 +9,11 @@ final class CacheRetentionTests: XCTestCase {
     // MARK: - 保留上限（AC-15.1）
 
     func testAC15_1_retentionLimitsMatchContract() {
-        XCTAssertEqual(CacheRetention.maxItemsPerSession, 200)
+        XCTAssertEqual(CacheRetention.maxTurnsPerSession, 200)
+        XCTAssertEqual(CacheRetention.defaultTurnsPerSession, 200)
+        XCTAssertEqual(CacheRetention.turnsPerSessionLimit(offlineCacheLimit: 1000), 1000)
+        XCTAssertEqual(CacheRetention.maxItemsPerSession, CacheRetention.maxTurnsPerSession)
+        XCTAssertEqual(CacheRetention.defaultItemsPerSession, CacheRetention.defaultTurnsPerSession)
         XCTAssertEqual(CacheRetention.maxSessions, 20)
     }
 
@@ -127,6 +131,57 @@ final class CacheRetentionTests: XCTestCase {
         let sessions = [CacheSessionRecord(id: "ses_1", createdAt: base)]
         XCTAssertEqual(CacheRetention.prune(sessions: sessions, items: items, offlineCacheLimit: 1000).items.kept.count, 1_000)
         XCTAssertEqual(CacheRetention.prune(sessions: sessions, items: items).items.kept.count, 200)
+    }
+
+    // MARK: - 完整轮次裁剪
+
+    func testTurnRetentionKeepsWholeLatestGroupsIncludingActiveTurn() {
+        let items = [
+            CacheItemRecord(id: "old-user", sessionId: "ses_1", createdAt: base, turnId: "turn:old"),
+            CacheItemRecord(id: "old-reply", sessionId: "ses_1", createdAt: base.addingTimeInterval(1), turnId: "turn:old"),
+            CacheItemRecord(id: "middle-user", sessionId: "ses_1", createdAt: base.addingTimeInterval(2), turnId: "turn:middle"),
+            CacheItemRecord(id: "middle-tool", sessionId: "ses_1", createdAt: base.addingTimeInterval(3), turnId: "turn:middle"),
+            CacheItemRecord(id: "middle-reply", sessionId: "ses_1", createdAt: base.addingTimeInterval(4), turnId: "turn:middle"),
+            CacheItemRecord(id: "active-user", sessionId: "ses_1", createdAt: base.addingTimeInterval(5), turnId: "turn:active"),
+            CacheItemRecord(id: "active-delta", sessionId: "ses_1", createdAt: base.addingTimeInterval(6), turnId: "turn:active"),
+        ]
+
+        let plan = CacheRetention.pruneItems(items, limit: 2)
+
+        XCTAssertEqual(Set(plan.kept), Set(items.dropFirst(2).map(\.id)))
+        XCTAssertEqual(Set(plan.evicted), ["old-user", "old-reply"])
+        XCTAssertEqual(plan.kept.filter { $0.hasPrefix("active-") }.count, 2, "活动轮同样按一整组保留")
+    }
+
+    func testTurnRetentionUsesLatestItemDateAndGroupKeyTieBreak() {
+        let items = [
+            CacheItemRecord(id: "a-first", sessionId: "ses_1", createdAt: base, turnId: "turn:a"),
+            CacheItemRecord(id: "a-last", sessionId: "ses_1", createdAt: base.addingTimeInterval(100), turnId: "turn:a"),
+            CacheItemRecord(id: "b-only", sessionId: "ses_1", createdAt: base.addingTimeInterval(50), turnId: "turn:b"),
+        ]
+        let latestWins = CacheRetention.pruneItems(items, limit: 1)
+        XCTAssertEqual(Set(latestWins.kept), ["a-first", "a-last"])
+        XCTAssertEqual(latestWins.evicted, ["b-only"])
+
+        let tied = [
+            CacheItemRecord(id: "b", sessionId: "ses_1", createdAt: base, turnId: "turn:b"),
+            CacheItemRecord(id: "a", sessionId: "ses_1", createdAt: base, turnId: "turn:a"),
+        ]
+        XCTAssertEqual(CacheRetention.pruneItems(tied, limit: 1).kept, ["a"])
+    }
+
+    func testTurnRetentionIsIndependentPerSessionAndNilTurnsStaySeparate() {
+        let items = [
+            CacheItemRecord(id: "a-old", sessionId: "ses_a", createdAt: base, turnId: "turn:old"),
+            CacheItemRecord(id: "a-new-user", sessionId: "ses_a", createdAt: base.addingTimeInterval(1), turnId: "turn:new"),
+            CacheItemRecord(id: "a-new-reply", sessionId: "ses_a", createdAt: base.addingTimeInterval(2), turnId: "turn:new"),
+            CacheItemRecord(id: "b-only", sessionId: "ses_b", createdAt: base, turnId: "turn:only"),
+            CacheItemRecord(id: "legacy-1", sessionId: "ses_legacy", createdAt: base),
+            CacheItemRecord(id: "legacy-2", sessionId: "ses_legacy", createdAt: base.addingTimeInterval(1)),
+        ]
+        let plan = CacheRetention.pruneItems(items, limit: 1)
+        XCTAssertEqual(Set(plan.kept), ["a-new-user", "a-new-reply", "b-only", "legacy-2"])
+        XCTAssertEqual(Set(plan.evicted), ["a-old", "legacy-1"], "纯函数 nil-turn 必须保持一项一个兼容单元")
     }
 
     // MARK: - 缓存不得含密钥（AC-15.3）

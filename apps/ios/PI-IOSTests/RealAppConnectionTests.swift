@@ -62,6 +62,22 @@ final class RealAppConnectionTests: XCTestCase {
             installReceipt: nil
         )
         let account = KeychainStore.account(username: user, host: hostName, port: sshPort)
+        // Never destroy a real credential that happens to use the same
+        // host/user/port. Back up whatever exists and restore it afterwards.
+        let existingCredential = KeychainStore.loadCredential(account: account)
+        defer {
+            if let existingCredential {
+                switch existingCredential {
+                case .password:
+                    _ = KeychainStore.saveCredential(existingCredential, kind: .password, account: account)
+                case .privateKey(_, _):
+                    _ = KeychainStore.saveCredential(existingCredential, kind: .privateKey, account: account)
+                }
+            } else {
+                KeychainStore.deleteCredential(account: account)
+            }
+            KeychainStore.deleteDeviceToken(hostID: host.id, legacyAccount: account, deleteLegacy: false)
+        }
         XCTAssertTrue(KeychainStore.saveCredential(
             .privateKey(openSSHText: keyText, passphrase: nil),
             kind: .privateKey,
@@ -72,10 +88,7 @@ final class RealAppConnectionTests: XCTestCase {
             deviceToken: pair.deviceToken,
             hostID: host.id
         ))
-        defer {
-            KeychainStore.deleteCredential(account: account)
-            KeychainStore.deleteDeviceToken(hostID: host.id, legacyAccount: account, deleteLegacy: false)
-        }
+
 
         let model = ConnectionModel()
         model.setCacheHostID(host.id)

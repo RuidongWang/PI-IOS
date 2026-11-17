@@ -113,10 +113,11 @@ enum HostValidator {
     static func directEndpointError(_ draft: HostDraft) -> String? {
         let text = draft.directEndpoint.piTrimmed
         if text.isEmpty {
-            return draft.connectionPreference == .directPreferred ? "启用直连前请填写 WSS 地址" : nil
+            return draft.connectionPreference == .directPreferred ? "先填写直连地址" : nil
         }
         guard canonicalDirectEndpoint(text) != nil else {
-            return "直连地址必须是 wss://主机[:端口]/v1/racp/ws，且不能包含账号、query、fragment 或末尾斜杠"
+            // R6：只说格式 + 下一步，不列协议内部结构名（query / fragment）。
+            return "直连地址格式不对：需要 wss:// 主机[:端口]/v1/racp/ws，不能带账号、参数或末尾斜杠"
         }
         return nil
     }

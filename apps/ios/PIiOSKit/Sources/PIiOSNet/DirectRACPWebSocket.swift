@@ -420,7 +420,7 @@ public final class DirectRACPWebSocket: RACPSocket, @unchecked Sendable {
         self.session = session
         self.sessionDelegate = sessionDelegate
         var sink: AsyncStream<Data>.Continuation!
-        self.inbound = AsyncStream { sink = $0 }
+        self.inbound = AsyncStream<Data>(bufferingPolicy: .bufferingOldest(64)) { sink = $0 }
         self.continuation = sink
     }
 
@@ -459,6 +459,13 @@ public final class DirectRACPWebSocket: RACPSocket, @unchecked Sendable {
         continuation.finish()
         terminationState.finish(RACPSocketTermination(closeCode: 1000, reason: "", category: .canceled))
         session.finishTasksAndInvalidate()
+    }
+
+    /// Settles the explicit local intent first; `close()` only fills in the
+    /// default user-cancel state when nothing has terminated the socket yet.
+    public func abort(_ termination: RACPSocketTermination) async {
+        terminationState.finish(termination)
+        await close()
     }
 
     public func waitUntilClosed() async {
@@ -693,4 +700,3 @@ private enum DirectDERX509 {
         return false
     }
 }
-

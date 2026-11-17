@@ -26,7 +26,10 @@ final class HostV2WireTests: XCTestCase {
         XCTAssertTrue(methods.contains("skill/install"))
         XCTAssertTrue(methods.contains("attachment/complete"))
         XCTAssertTrue(methods.contains("session/suggest-title"))
-        XCTAssertEqual(methods.count, 49)
+        // 扩展 V1 的两个只读查询（契约 2.0.0 加法字段）。
+        XCTAssertTrue(methods.contains("extension/list"))
+        XCTAssertTrue(methods.contains("session/extensions"))
+        XCTAssertEqual(methods.count, 51)
     }
 
     /// v2 `turn/start` 的冻结响应体只有 `turn`（见 golden），不带 v1 的 `accepted`。

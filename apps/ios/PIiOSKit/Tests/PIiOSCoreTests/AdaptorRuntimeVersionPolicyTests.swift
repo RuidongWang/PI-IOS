@@ -23,18 +23,28 @@ final class AdaptorRuntimeVersionPolicyTests: XCTestCase {
         ))
     }
 
+    /// 「服务器更新不要求重装」：显式钉住内置版本，本用例只验证相对关系，
+    /// 不能随包内 PI-adaptor 版本号变化而失效（曾因写死 0.0.4 在升到 0.0.5 后误报）。
     func testNewerRuntimeIsCompatibleAndDoesNotAskForReinstall() {
         XCTAssertTrue(AdaptorRuntimeVersionPolicy.isCompatible(
             serverName: "pi-adaptor",
-            serverVersion: "0.0.4"
+            serverVersion: "0.0.4",
+            bundledVersion: "0.0.3"
         ))
         XCTAssertTrue(AdaptorRuntimeVersionPolicy.isCompatible(
             serverName: "pi-adaptor",
-            serverVersion: "0.1.0"
+            serverVersion: "0.1.0",
+            bundledVersion: "0.0.4"
         ))
         XCTAssertTrue(AdaptorRuntimeVersionPolicy.isCompatible(
             serverName: "pi-adaptor",
-            serverVersion: "1.0.0"
+            serverVersion: "1.0.0",
+            bundledVersion: "0.1.0"
+        ))
+        // 真实内置版本：同版本必须兼容（不提示重装）。
+        XCTAssertTrue(AdaptorRuntimeVersionPolicy.isCompatible(
+            serverName: "pi-adaptor",
+            serverVersion: bundled
         ))
     }
 

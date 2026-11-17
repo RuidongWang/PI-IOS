@@ -1,9 +1,13 @@
 import XCTest
 
+/// 每个会话各自恢复自己的阅读位置。
+///
+/// quiet-v2：仍然靠 `conversation.debugTopVisibleItem` 探针判定视口首条，
+/// 「回到最新」按钮改由 `conversation.scrollToLatest` 定位，不再依赖按钮文案。
 final class OnlineReadingPositionUITests: XCTestCase {
     private let app = XCUIApplication()
     private var latest: XCUIElement {
-        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "回到最新")).firstMatch
+        app.buttons["conversation.scrollToLatest"]
     }
 
     override func setUpWithError() throws {

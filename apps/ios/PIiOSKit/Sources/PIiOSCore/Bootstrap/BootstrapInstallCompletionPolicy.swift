@@ -19,7 +19,7 @@ public enum BootstrapInstallCompletionPolicy {
                !reason.isEmpty {
                 return .failed(reason: reason)
             }
-            return .failed(reason: "无法保存本机服务器安装记录")
+            return .failed(reason: "无法保存服务器记录。")
         }
         return .succeeded
     }

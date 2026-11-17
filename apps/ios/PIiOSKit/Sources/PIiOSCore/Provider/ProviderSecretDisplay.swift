@@ -47,7 +47,8 @@ public enum ProviderSecretDisplay {
         case .notRequired:
             return "无需密钥"
         case .localOnly(let hasLocalKey):
-            return hasLocalKey ? "密钥仅存本机" : "本机缺少密钥"
+            // 只表达状态，不复述「密钥只存本机」这条架构事实（全 App 只在填写 API Key 处说明一次）。
+            return hasLocalKey ? "本机有密钥" : "本机缺密钥"
         case .serverManaged(let mask):
             return "密钥 \(mask)"
         case .missing:
@@ -78,8 +79,10 @@ public enum ProviderSecretDisplay {
     }
 
     /// 本机缺少密钥时给用户的下一步说明；有密钥或不需要密钥时返回 nil。
+    ///
+    /// 状态本身已经说明「缺密钥」，这里只给下一步，不再复述后果。
     public static func missingKeyGuidance(_ status: ProviderSecretStatus) -> String? {
         guard case .localOnly(false) = status else { return nil }
-        return "本机没有该模型服务的密钥，发送时会被服务器拒绝。请在“模型服务”里重新填写 API Key。"
+        return "重新填写 API Key 后才能发送。"
     }
 }

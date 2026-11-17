@@ -20,16 +20,25 @@ final class HostDeletionIsolationUITests: XCTestCase {
         showRoot("设置")
         openHost(hostBName)
 
-        let delete = app.buttons
-            .matching(NSPredicate(format: "label CONTAINS %@", "删除这台服务器"))
-            .firstMatch
+        let delete = app.buttons["servers.delete"].firstMatch.exists
+            ? app.buttons["servers.delete"].firstMatch
+            : app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "删除这台服务器")).firstMatch
         XCTAssertTrue(delete.waitForExistence(timeout: 10))
         delete.tap()
+        // quiet-v2 R7：标题说清对象，message 一行说清后果（不再有安抚性长段）。
         XCTAssertTrue(
             app.staticTexts
-                .matching(NSPredicate(format: "label CONTAINS %@", "只删除这条本机记录"))
+                .matching(NSPredicate(format: "label CONTAINS %@", "的本机记录？"))
                 .firstMatch
-                .waitForExistence(timeout: 5)
+                .waitForExistence(timeout: 5),
+            "删除确认框标题必须说明只删除本机记录"
+        )
+        XCTAssertTrue(
+            app.staticTexts
+                .matching(NSPredicate(format: "label CONTAINS %@", "只清本机记录"))
+                .firstMatch
+                .waitForExistence(timeout: 5),
+            "删除确认框必须一行写清后果"
         )
         app.buttons["删除"].firstMatch.tap()
 

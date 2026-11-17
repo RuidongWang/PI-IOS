@@ -37,17 +37,10 @@ final class ProjectsLaunchUITests: XCTestCase {
             throw XCTSkip("The expected real PI-adaptor is not configured for this host-backed smoke test.")
         }
 
-        // The browse-and-register row only exists when the PI-adaptor has an active project.
-        // Keep that assertion conditional so the smoke test also runs with an empty PI-adaptor.
-        let browseRow = app.buttons
-            .matching(NSPredicate(format: "label CONTAINS %@", "浏览服务器目录并注册"))
-            .firstMatch
-        if !browseRow.exists {
-            app.swipeUp()
-        }
-        let emptyStateAction = app.buttons["选择服务器目录"]
+        // 目录入口只有一个主操作：导航栏 +（有项目时）或空态动作（没有项目时）。
+        let emptyStateAction = app.buttons["projects.addProject"]
         XCTAssertTrue(
-            browseRow.exists || emptyStateAction.exists,
+            addProject.exists || emptyStateAction.exists,
             "The projects screen must expose a non-mutating path to the directory browser."
         )
 
@@ -69,7 +62,7 @@ final class ProjectsLaunchUITests: XCTestCase {
             "The add-project sheet must expose its project name field."
         )
         XCTAssertTrue(
-            app.buttons["用当前目录注册项目"].waitForExistence(timeout: 5),
+            app.buttons["projectBrowser.register"].waitForExistence(timeout: 5),
             "The add-project sheet must expose its register button."
         )
 
@@ -203,7 +196,7 @@ final class ProjectsLaunchUITests: XCTestCase {
         addProject.tap()
         let currentPath = app.staticTexts["projectBrowser.currentPath"]
         XCTAssertTrue(currentPath.waitForExistence(timeout: 15))
-        let registerButton = app.buttons["用当前目录注册项目"]
+        let registerButton = app.buttons["projectBrowser.register"]
         XCTAssertTrue(registerButton.waitForExistence(timeout: 10))
         let browser = app.collectionViews.firstMatch
         XCTAssertTrue(browser.exists, "The project browser list must remain visible.")
@@ -277,9 +270,9 @@ final class ProjectsLaunchUITests: XCTestCase {
             deniedPath,
             "Tapping an unreadable directory must keep the attempted path visible. Labels: \(app.staticTexts.allElementsBoundByIndex.map(\.label))"
         )
-        XCTAssertTrue(app.buttons["重试当前目录"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["projectBrowser.retry"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["projectBrowser.parent"].exists)
-        XCTAssertFalse(app.buttons["用当前目录注册项目"].isEnabled)
+        XCTAssertFalse(app.buttons["projectBrowser.register"].isEnabled)
         app.buttons["取消"].tap()
     }
 
@@ -321,66 +314,21 @@ final class ProjectsLaunchUITests: XCTestCase {
             ) != nil,
             "The settled systemd row must include a status value. Current label: \(systemd.label)"
         )
+        // quiet-v2 §6.4：整段后台推送说明下线，通知区只留一行开关；
+        // 断言按 identifier 定位这一行，不绑在被删的说明文案上。
         XCTAssertTrue(
+            app.descendants(matching: .any)["settings.notificationRow"]
+                .waitForExistence(timeout: 5),
+            "Notification settings must remain a single row."
+        )
+        XCTAssertFalse(
             app.staticTexts["不会收到后台推送"].exists,
-            "Settings must explicitly state that APNs background push is unavailable."
+            "The removed background push paragraph must not come back."
         )
     }
 
-    func testModelServiceProtocolPresetsDefaultToLocalhost() throws {
-        showRoot("设置")
-
-        let models = app.buttons
-            .matching(NSPredicate(format: "label CONTAINS %@", "模型服务"))
-            .firstMatch
-        // 设置里的「模型服务」入口与服务协议选择不依赖 host；缺失是回归，不是环境跳过。
-        XCTAssertTrue(
-            models.waitForExistence(timeout: 10),
-            "The model-services entry must exist in Settings."
-        )
-        models.tap()
-
-        let protocolPicker = app.buttons["models.servicePreset"]
-        XCTAssertTrue(
-            protocolPicker.waitForExistence(timeout: 10),
-            "The protocol picker must be reachable on the model-services screen."
-        )
-
-        // 订阅账号登录已整体移除。
-        XCTAssertFalse(app.buttons["订阅账号登录"].exists, "Subscription login must be removed.")
-        XCTAssertFalse(app.staticTexts["暂不支持订阅账号登录；不会发起 OAuth 或访问账号授权页面。"].exists)
-
-        XCTAssertEqual(
-            app.textFields["models.serviceName"].value as? String,
-            "localhost",
-            "The service name must default to localhost."
-        )
-        XCTAssertEqual(
-            app.textFields["models.baseURL"].value as? String,
-            "http://localhost:8080",
-            "The Base URL must default to the local gateway."
-        )
-        XCTAssertTrue(app.textFields["models.baseURL"].isEnabled)
-        XCTAssertTrue(app.secureTextFields["models.apiKey"].isEnabled)
-
-        let expectedProtocols = [
-            "OpenAI Chat Completions",
-            "OpenAI Responses",
-            "Anthropic Messages",
-            "Google Generative AI",
-        ]
-        for name in expectedProtocols {
-            protocolPicker.tap()
-            let option = app.buttons[name].firstMatch
-            XCTAssertTrue(option.waitForExistence(timeout: 5), "Protocol option \(name) must exist.")
-            option.tap()
-            XCTAssertEqual(
-                app.textFields["models.baseURL"].value as? String,
-                "http://localhost:8080",
-                "Switching to \(name) must keep the localhost default."
-            )
-        }
-    }
+    // 协议预设与 localhost 默认值不依赖真实 Host，由 UIRegressionSuiteTests 的
+    // MDL-02/03 在确定性夹具中逐协议覆盖，不在本真实 Host 套件重复执行。
 
     func testInstallAdaptorScreenIsReachableWithoutStartingInstallation() throws {
         showRoot("设置")
@@ -402,13 +350,16 @@ final class ProjectsLaunchUITests: XCTestCase {
         }
         install.tap()
 
-        XCTAssertTrue(app.navigationBars["安装 PI-adaptor"].waitForExistence(timeout: 8))
+        let installBar = app.navigationBars
+            .matching(NSPredicate(format: "identifier CONTAINS %@", "安装"))
+            .firstMatch
+        XCTAssertTrue(installBar.waitForExistence(timeout: 8))
         XCTAssertTrue(
             app.textFields["installHost.port"].waitForExistence(timeout: 5),
             "The installation screen must expose its fixed loopback port."
         )
         XCTAssertTrue(
-            app.buttons["开始安装"].exists,
+            app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "安装")).firstMatch.exists,
             "The installation screen must expose the real install action without auto-starting it."
         )
     }
@@ -417,7 +368,7 @@ final class ProjectsLaunchUITests: XCTestCase {
         showRoot("项目")
 
         let session = app.buttons
-            .matching(NSPredicate(format: "label CONTAINS[c] %@", "rev "))
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "projects.session."))
             .firstMatch
         for _ in 0..<4 where !session.exists {
             app.swipeUp()
@@ -427,7 +378,9 @@ final class ProjectsLaunchUITests: XCTestCase {
         }
         session.tap()
 
-        let attachment = app.buttons["图片附件"]
+        let attachment = app.buttons
+            .matching(NSPredicate(format: "label CONTAINS %@", "附件"))
+            .firstMatch
         XCTAssertTrue(
             attachment.waitForExistence(timeout: 15),
             "An opened conversation must expose the attachment affordance."
@@ -446,7 +399,7 @@ final class ProjectsLaunchUITests: XCTestCase {
         menu.tap()
 
         XCTAssertTrue(
-            app.textFields["搜索会话或项目"].waitForExistence(timeout: 5),
+            app.textFields["sidebar.search"].waitForExistence(timeout: 5),
             "The sidebar must expose conversation/project search."
         )
         XCTAssertTrue(
@@ -456,8 +409,8 @@ final class ProjectsLaunchUITests: XCTestCase {
                 .waitForExistence(timeout: 8),
             "The sidebar must show the current project group."
         )
-        XCTAssertTrue(app.buttons["项目"].exists, "The sidebar project root entry must exist.")
-        XCTAssertTrue(app.buttons["设置"].exists, "The sidebar settings root entry must exist.")
+        XCTAssertTrue(app.buttons["sidebar.root.projects"].exists, "The sidebar project root entry must exist.")
+        XCTAssertTrue(app.buttons["sidebar.root.settings"].exists, "The sidebar settings root entry must exist.")
     }
 
     func testLiveProviderImportUsingEnvironment() throws {
@@ -531,7 +484,7 @@ final class ProjectsLaunchUITests: XCTestCase {
         }
         showRoot("项目")
         let session = app.buttons
-            .matching(NSPredicate(format: "label CONTAINS[c] %@", "rev "))
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "projects.session."))
             .firstMatch
         for _ in 0..<4 where !session.exists {
             app.swipeUp()
@@ -561,12 +514,22 @@ final class ProjectsLaunchUITests: XCTestCase {
         XCTAssertTrue(menu.waitForExistence(timeout: 8), "The root navigation menu must exist.")
         menu.tap()
 
-        let root = app.buttons[title].firstMatch
+        let root = app.buttons[Self.sidebarRootIdentifier(for: title)].firstMatch
         XCTAssertTrue(root.waitForExistence(timeout: 5), "The \(title) root entry must exist.")
         root.tap()
         XCTAssertTrue(
             app.navigationBars[title].waitForExistence(timeout: 10),
             "The \(title) screen must be reachable without mutating server state."
         )
+    }
+
+    /// 侧边栏根入口按 identifier 定位（quiet-v2 §7：定位与文案解耦）。
+    private static func sidebarRootIdentifier(for title: String) -> String {
+        switch title {
+        case "会话": return "sidebar.root.conversation"
+        case "项目": return "sidebar.root.projects"
+        case "设置": return "sidebar.root.settings"
+        default: return "sidebar.root.\(title)"
+        }
     }
 }

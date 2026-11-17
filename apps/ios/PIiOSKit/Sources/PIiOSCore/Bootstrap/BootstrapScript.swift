@@ -97,17 +97,17 @@ public enum BootstrapScriptError: Error, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .invalidAttemptId:
-            return "attemptId 只能包含 ASCII 字母、数字、点、下划线和短横线"
+            return "安装任务标识不合法。"
         case .invalidPort:
-            return "PI-adaptor 端口必须在 1...65535 之间；不能使用随机端口 0，否则常驻 unit 会与配对端口不一致"
+            return "端口必须在 1–65535 之间。"
         case .invalidHostIdentity:
-            return "PI-adaptor 运行平台或架构包含不安全字符"
+            return "运行平台或架构不合法。"
         case .invalidPairingLifetime:
-            return "配对令牌有效期必须在 1 到 15 分钟之间"
+            return "配对令牌有效期必须在 1–15 分钟之间。"
         case .invalidTimeout:
-            return "bootstrap 超时必须是 1...3600 秒"
+            return "安装超时必须在 1–3600 秒之间。"
         case .invalidDirectConfiguration:
-            return "directName 必须是纯 DNS/IP，direct 端口必须在 1...65535 且不同于 loopback 端口"
+            return "直连主机必须是 DNS 或 IP，直连端口需与本地端口不同。"
         }
     }
 }
@@ -229,6 +229,8 @@ TRANSACTION_INSTALL_DIR="$WORK/transaction.install-dir"
 TRANSACTION_ROLLBACK_SCRIPT="$WORK/transaction.rollback-install.sh"
 TRANSACTION_RECEIPT_BACKUP="$WORK/transaction.receipt.previous"
 TRANSACTION_LEGACY="$WORK/transaction.legacy-units"
+TRANSACTION_UNIT_BACKUP="$WORK/transaction.unit.previous"
+TRANSACTION_UNIT_ABSENT="$WORK/transaction.unit.absent"
 ROLLBACK_SCRIPT="$WORK/install.sh"
 DIRECT_ACTIVE=0
 DIRECT_TLS="$BASE/tls"
@@ -409,6 +411,18 @@ record_transaction() {
 
   rm -f "$TRANSACTION_RECEIPT_BACKUP"
   rm -f "$TRANSACTION_LEGACY"
+  # Preserve the previous unit file itself: rollback used to restore only the
+  # release link and service states, so a failed upgrade could leave the old
+  # service running with the new unit's port/paths (or lose customizations).
+  unit_path="$HOME/.config/systemd/user/$UNIT_NAME"
+  rm -f "$TRANSACTION_UNIT_BACKUP" "$TRANSACTION_UNIT_ABSENT"
+  if [ -f "$unit_path" ]; then
+    cp "$unit_path" "$TRANSACTION_UNIT_BACKUP"
+    chmod 600 "$TRANSACTION_UNIT_BACKUP"
+  else
+    : >"$TRANSACTION_UNIT_ABSENT"
+    chmod 600 "$TRANSACTION_UNIT_ABSENT"
+  fi
   LEGACY_UNITS_JSON='[]'
   if [ -f "$RECEIPT" ]; then
     cp "$RECEIPT" "$TRANSACTION_RECEIPT_BACKUP"
@@ -542,6 +556,21 @@ rollback_transaction() {
     rollback_ok=0
   fi
 
+  # Restore the unit file (or remove a newly-created one) before daemon-reload
+  # and before re-enabling/starting the old service.
+  unit_path="$HOME/.config/systemd/user/$UNIT_NAME"
+  if [ -f "$TRANSACTION_UNIT_BACKUP" ]; then
+    mkdir -p "$(dirname "$unit_path")" 2>/dev/null || true
+    if cp "$TRANSACTION_UNIT_BACKUP" "$unit_path" 2>/dev/null; then
+      chmod 644 "$unit_path" 2>/dev/null || true
+    else
+      ROLLBACK_STEP="restore-unit"; rollback_ok=0
+    fi
+  elif [ -f "$TRANSACTION_UNIT_ABSENT" ]; then
+    rm -f "$unit_path" 2>/dev/null || true
+  fi
+  systemctl --user daemon-reload >/dev/null 2>&1 || { ROLLBACK_STEP="restore-unit"; rollback_ok=0; }
+
   if [ -f "$TRANSACTION_RECEIPT_BACKUP" ]; then
     cp "$TRANSACTION_RECEIPT_BACKUP" "$RECEIPT" 2>/dev/null || true
     chmod 600 "$RECEIPT" 2>/dev/null || true
@@ -572,7 +601,8 @@ rollback_transaction() {
     ROLLBACK_REASON=""
     rm -f "$TRANSACTION_ACTIVE" "$TRANSACTION_PREVIOUS" "$TRANSACTION_SERVICE" \
       "$TRANSACTION_ENABLED" "$TRANSACTION_INSTALL_DIR" "$TRANSACTION_ROLLBACK_SCRIPT" \
-      "$TRANSACTION_RECEIPT_BACKUP" "$TRANSACTION_LEGACY"
+      "$TRANSACTION_RECEIPT_BACKUP" "$TRANSACTION_LEGACY" \
+      "$TRANSACTION_UNIT_BACKUP" "$TRANSACTION_UNIT_ABSENT"
     TRANSACTION_STARTED=0
     return 0
   fi
@@ -713,9 +743,15 @@ if [ -z "${HOME:-}" ]; then
 fi
 mkdir -p "$BASE" "$WORK" || die "bootstrap-permissions"
 chmod 700 "$BASE" "$WORK" 2>/dev/null || die "bootstrap-permissions"
-rm -f "$CANCEL" "$PAIR_RESULT" "$VERIFY_RESULT"
 
 if ! mkdir "$LOCK" 2>/dev/null; then
+  # The pid file is written just after the lock directory is created. Give the
+  # winner a short window instead of deleting a fresh lock in that gap.
+  attempts=0
+  while [ ! -s "$LOCK/pid" ] && [ "$attempts" -lt 20 ]; do
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
   old_pid=$(cat "$LOCK/pid" 2>/dev/null || true)
   if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
     old_command=$(ps -p "$old_pid" -o command= 2>/dev/null || true)
@@ -731,6 +767,10 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 fi
 printf '%s\n' "$$" >"$LOCK/pid"
 chmod 600 "$LOCK/pid" 2>/dev/null || die "bootstrap-permissions"
+# Only the lock owner may clear another attempt's control files. Doing this
+# before acquiring the lock let a rejected second install wipe the first
+# install's cancel/pair/verify state.
+rm -f "$CANCEL" "$PAIR_RESULT" "$VERIFY_RESULT"
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 rm -f "$PAIR_REJECT"
@@ -958,7 +998,16 @@ installed_version=$(node -e '
 if [ "$DIRECT_REQUESTED" = 1 ]; then
   if mkdir -p "$DIRECT_TLS" && chmod 700 "$DIRECT_TLS"; then
     previous_name=$(cat "$DIRECT_TLS/direct-name" 2>/dev/null || true)
-    if [ "$previous_name" != "$DIRECT_NAME" ] || [ ! -f "$DIRECT_TLS/direct-cert.pem" ] || [ ! -f "$DIRECT_TLS/direct-key.pem" ]; then
+    reuse_ok=0
+    if [ "$previous_name" = "$DIRECT_NAME" ] && [ -f "$DIRECT_TLS/direct-cert.pem" ] && [ -f "$DIRECT_TLS/direct-key.pem" ] && \
+       openssl x509 -in "$DIRECT_TLS/direct-cert.pem" -noout -checkend 2592000 >/dev/null 2>&1 && \
+       openssl x509 -in "$DIRECT_TLS/direct-cert.pem" -noout -text 2>/dev/null | grep -q 'CA:FALSE' && \
+       openssl x509 -in "$DIRECT_TLS/direct-cert.pem" -noout -ext subjectAltName 2>/dev/null | grep -Fq "$DIRECT_SAN" && \
+       [ "$(openssl x509 -in "$DIRECT_TLS/direct-cert.pem" -noout -pubkey 2>/dev/null)" = "$(openssl pkey -in "$DIRECT_TLS/direct-key.pem" -pubout 2>/dev/null)" ] && \
+       [ "$(stat -c '%a' "$DIRECT_TLS/direct-key.pem" 2>/dev/null || printf '600')" = "600" ]; then
+      reuse_ok=1
+    fi
+    if [ "$reuse_ok" != 1 ]; then
       tls_staging="$DIRECT_TLS.staging.$$"
       tls_backup="$DIRECT_TLS.previous.$$"
       rm -rf "$tls_staging" "$tls_backup"
@@ -987,7 +1036,8 @@ if [ "$DIRECT_REQUESTED" = 1 ]; then
       else
         rm -rf "$tls_staging"
       fi
-    elif openssl x509 -in "$DIRECT_TLS/direct-cert.pem" -noout -text 2>/dev/null | grep -q 'CA:FALSE'; then
+    else
+      # The validated reuse path above already set DIRECT_ACTIVE.
       DIRECT_ACTIVE=1
     fi
   fi

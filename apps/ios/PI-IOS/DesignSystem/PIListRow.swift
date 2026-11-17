@@ -1,7 +1,9 @@
 import SwiftUI
 
-/// 列表行：可选图标 + 标题 + 第二行说明 + 右侧值与 chevron。
-/// 双行时行高不小于 62pt；图标作为装饰不进入无障碍标签。
+/// 列表行：可选图标 + 标题 + 状态数据 + 右侧值与 chevron。
+///
+/// quiet-v2 取舍：图标不再装色块，直接以单色 20pt 排在文字前；行高 48pt、零投影。
+/// `subtitle` 只放**不重复的状态数据**（地址、计数、版本、错误原因），不复述标题。
 struct PIListRow<Trailing: View>: View {
     let title: String
     var subtitle: String? = nil
@@ -35,21 +37,17 @@ struct PIListRow<Trailing: View>: View {
         HStack(alignment: .center, spacing: PISpacing.s12) {
             if let icon {
                 Image(systemName: icon)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(isEnabled ? iconTint : PIColor.text3)
-                    .frame(width: 30, height: 30)
-                    .background(
-                        (isEnabled ? iconTint : PIColor.text3).opacity(0.12),
-                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    )
+                    .font(.system(size: 18, weight: .regular))
+                    .foregroundStyle(isEnabled ? iconTint : PIColor.text2)
+                    .frame(width: 24)
                     .accessibilityHidden(true)
             }
-            VStack(alignment: .leading, spacing: PISpacing.s4) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(PIFont.listTitle)
-                    .foregroundStyle(isEnabled ? PIColor.text : PIColor.text3)
+                    .foregroundStyle(isEnabled ? PIColor.text : PIColor.text2)
                     .multilineTextAlignment(.leading)
-                if let subtitle {
+                if let subtitle, !subtitle.isEmpty {
                     Text(subtitle)
                         .font(PIFont.caption)
                         .foregroundStyle(PIColor.text2)
@@ -60,15 +58,15 @@ struct PIListRow<Trailing: View>: View {
             Spacer(minLength: PISpacing.s8)
             if let value {
                 Text(value)
-                    .font(PIFont.meta)
+                    .font(PIFont.caption)
                     .monospacedDigit()
-                    .foregroundStyle(isEnabled ? PIColor.text2 : PIColor.text3)
+                    .foregroundStyle(PIColor.text2)
             }
             trailing()
             if showsChevron {
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(PIColor.text3)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(isEnabled ? PIColor.text3 : PIColor.text2)
                     .accessibilityHidden(true)
             }
         }
@@ -119,23 +117,14 @@ struct PIDangerRow: View {
         VStack(spacing: 0) {
             Button(role: .destructive, action: action) {
                 HStack(spacing: PISpacing.s12) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(isEnabled ? PIColor.danger : PIColor.text3)
-                        .frame(width: 30, height: 30)
-                        .background(
-                            (isEnabled ? PIColor.danger : PIColor.text3).opacity(0.12),
-                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        )
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: PISpacing.s4) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(title)
                             .font(PIFont.listTitle)
-                            .foregroundStyle(isEnabled ? PIColor.danger : PIColor.text3)
+                            .foregroundStyle(isEnabled ? PIColor.danger : PIColor.text2)
                         if let disabledReason, !isEnabled {
                             Text(disabledReason)
                                 .font(PIFont.caption)
-                                .foregroundStyle(PIColor.text3)
+                                .foregroundStyle(PIColor.text2)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -184,7 +173,7 @@ struct PIToastView: View {
             RoundedRectangle(cornerRadius: PIRadius.group, style: .continuous)
                 .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
         )
-        .shadow(color: PIColor.floatingShadow, radius: 18, y: 8)
+        .shadow(color: PIColor.floatingShadow, radius: 16, y: 6)
         .padding(.horizontal, PIMetrics.pageMargin)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isStaticText)

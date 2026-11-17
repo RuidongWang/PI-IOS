@@ -78,9 +78,9 @@ public enum AdaptorReleaseResolutionSource: Equatable, Sendable {
     public var displayName: String {
         switch self {
         case .latest:
-            return "GitHub 最新稳定发布"
+            return "最新发布"
         case let .fallback(reason):
-            return "内置回退版本（\(reason)）"
+            return "内置版本（\(reason)）"
         }
     }
 }

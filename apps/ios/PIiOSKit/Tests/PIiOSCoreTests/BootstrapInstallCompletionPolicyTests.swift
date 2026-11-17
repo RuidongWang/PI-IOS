@@ -16,7 +16,7 @@ final class BootstrapInstallCompletionPolicyTests: XCTestCase {
                 persisted: false,
                 saveError: nil
             ),
-            .failed(reason: "无法保存本机服务器安装记录")
+            .failed(reason: "无法保存服务器记录。")
         )
     }
 

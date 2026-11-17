@@ -11,7 +11,7 @@ final class OfflineSessionCacheSchemaTests: XCTestCase {
 
     func testDocumentRoundTripPreservesItemsCursorApprovalsAndDraft() throws {
         let snapshot = OfflineSessionCacheSnapshot(
-            entries: [entry("itm_1", session: "ses_1", host: hostA, offset: 1)],
+            entries: [entry("itm_1", session: "ses_1", host: hostA, offset: 1, turnId: "turn:turn_1")],
             cursors: [
                 OfflineSessionCursor(
                     hostID: hostA,
@@ -186,7 +186,8 @@ final class OfflineSessionCacheSchemaTests: XCTestCase {
                         "itm_\(itemIndex)",
                         session: sessionID,
                         host: hostA,
-                        offset: TimeInterval(sessionIndex * 1_000 + itemIndex)
+                        offset: TimeInterval(sessionIndex * 1_000 + itemIndex),
+                        turnId: "turn:\(itemIndex)"
                     )
                 )
             }
@@ -346,14 +347,16 @@ final class OfflineSessionCacheSchemaTests: XCTestCase {
         session: String,
         host: UUID?,
         offset: TimeInterval,
-        text: String = "text"
+        text: String = "text",
+        turnId: String? = nil
     ) -> OfflineSessionCacheEntry {
         OfflineSessionCacheEntry(
             id: id,
             sessionId: session,
             hostID: host,
             text: text,
-            createdAt: base.addingTimeInterval(offset)
+            createdAt: base.addingTimeInterval(offset),
+            turnId: turnId
         )
     }
 

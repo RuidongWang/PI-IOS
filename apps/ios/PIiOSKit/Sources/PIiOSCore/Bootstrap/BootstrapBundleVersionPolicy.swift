@@ -20,8 +20,7 @@ public enum BootstrapBundleVersionPolicy {
             return nil
         }
         guard appVersion != bundledReleaseVersion else { return nil }
-        return "本机 App 版本 \(appVersion)，但内置 PI-adaptor 回退版本是 \(bundledReleaseVersion)。"
-            + "无法解析 GitHub 最新发布时（例如 API 限流），本次安装会装成 \(bundledReleaseVersion)。"
-            + "请改用与该发布配套的 App 构建：发布门禁要求 App 版本与内置 PI-adaptor 版本一致。"
+        return "App \(appVersion) · 内置 \(bundledReleaseVersion)。"
+            + "解析不到最新发布时会安装内置版本；请换配套构建。"
     }
 }

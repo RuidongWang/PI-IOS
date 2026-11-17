@@ -119,13 +119,29 @@ struct ProviderDeletionUseCase {
                 let outcome = ProviderDeletionOutcome(receipt: receipt)
                 switch outcome {
                 case .success(let summary):
+                    // 回执必须对应本次请求的 provider。串线/错误回执不能被当作
+                    // 已删除目标，否则会清掉本机映射与密钥却留下服务器记录。
+                    if let summary, summary.providerId.caseInsensitiveCompare(legacyProviderId) != .orderedSame {
+                        return report(
+                            .unparseable(reason: "删除回执的 providerId 与请求目标不一致"),
+                            stages: stages,
+                            target: target
+                        )
+                    }
                     stages.legacyCleared = summary?.effect == .deleted
                     stages.legacyAlreadyAbsent = summary?.effect == .absent
                     serverOutcome = outcome
                 case .alreadyAbsent:
                     stages.legacyAlreadyAbsent = true
                     serverOutcome = outcome
-                case .defaultTransferOrderUnknown:
+                case .defaultTransferOrderUnknown(let removedProviderId, _):
+                    guard removedProviderId.caseInsensitiveCompare(legacyProviderId) == .orderedSame else {
+                        return report(
+                            .unparseable(reason: "删除回执的 providerId 与请求目标不一致"),
+                            stages: stages,
+                            target: target
+                        )
+                    }
                     stages.legacyCleared = true
                     serverOutcome = outcome
                 case .failure, .unparseable, .blocked:
@@ -167,11 +183,15 @@ struct ProviderDeletionUseCase {
         for providerId in target.keychainProviderIds where !providerId.isEmpty {
             guard seen.insert(providerId).inserted else { continue }
             let hostID = target.host.id
-            if KeychainStore.loadProviderKey(hostID: hostID, providerId: providerId) == nil {
+            let status = KeychainStore.providerKeyStatus(hostID: hostID, providerId: providerId)
+            if status == errSecItemNotFound { continue }
+            guard status == errSecSuccess else {
+                // 读取失败不等于不存在：保留“未清干净”的事实，让用户可重试。
+                allGone = false
                 continue
             }
             _ = KeychainStore.deleteProviderKey(hostID: hostID, providerId: providerId)
-            if KeychainStore.loadProviderKey(hostID: hostID, providerId: providerId) != nil {
+            if KeychainStore.providerKeyStatus(hostID: hostID, providerId: providerId) != errSecItemNotFound {
                 allGone = false
             }
         }

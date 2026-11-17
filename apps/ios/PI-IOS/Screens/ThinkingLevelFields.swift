@@ -119,7 +119,6 @@ struct PIThinkingLevelPicker: View {
         }
         .buttonStyle(.plain)
         .disabled(orderedOptions.isEmpty)
-        .opacity(orderedOptions.isEmpty ? 0.55 : 1)
         .accessibilityIdentifier(identifier)
         .accessibilityLabel("\(title)：\(selection.isEmpty ? "不指定" : selection)")
     }
@@ -134,7 +133,7 @@ private struct PIFormFieldLabel: View {
 
     var body: some View {
         Text(text)
-            .font(PIFont.meta)
+            .font(PIFont.caption)
             .foregroundStyle(PIColor.text2)
             .frame(maxWidth: .infinity, alignment: .leading)
     }

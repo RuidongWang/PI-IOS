@@ -30,11 +30,12 @@ final class UpstreamImportUITests: XCTestCase {
         XCTAssertTrue(archivedP2.exists)
         XCTAssertFalse(app.buttons["projects.row.P1"].exists)
         XCTAssertFalse(app.buttons["projects.row.P2"].exists)
-        XCTAssertTrue(app.staticTexts["还没有项目"].exists)
+        XCTAssertTrue(app.staticTexts["没有项目"].exists)
 
         archivedP1.tap()
         XCTAssertTrue(app.buttons["projects.row.P1"].waitForExistence(timeout: 5))
-        app.buttons["projects.details.P1"].tap()
+        // 项目行已收敛为单一点击目标：整行点进「项目详情」，不再有并列的「详情」按钮。
+        app.buttons["projects.row.P1"].tap()
         XCTAssertTrue(app.buttons["projectDetail.restoreSession.S1"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["projectDetail.restoreSession.S2"].exists)
         app.buttons["projectDetail.restoreSession.S1"].tap()

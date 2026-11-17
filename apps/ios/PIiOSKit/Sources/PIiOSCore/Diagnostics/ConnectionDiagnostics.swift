@@ -85,30 +85,31 @@ public enum ConnectionFailureKind: String, Equatable, Sendable {
     case protocolViolation
     case unknown
 
+    /// quiet-v2 R6：只写「发生了什么 + 下一步」。协议名、状态码、内部标识一律不出现。
     public var userMessage: String {
         switch self {
         case .dns:
-            return "无法解析服务器地址（DNS）：请检查地址拼写、手机网络或 VPN。"
+            return "解析不了服务器地址：检查地址拼写、手机网络或 VPN。"
         case .tls:
-            return "TLS 安全连接失败：请检查证书、系统时间、代理或网络中间设备。"
+            return "无法建立安全连接：检查服务器证书、手机时间或代理。"
         case .authentication:
-            return "认证失败（401）：请检查用户名、密码、私钥、口令或设备令牌。"
+            return "认证失败：检查用户名、密码、私钥、口令或设备令牌。"
         case .rateLimit:
-            return "请求被限流（429）：请等待后重试，避免连续重连。"
+            return "请求太频繁：等一下再试，避免连续重连。"
         case .insufficientBalance:
-            return "账户余额或调用额度不足（402）：请在模型服务侧补充额度后重试。"
+            return "模型服务额度不足：补充额度后再试。"
         case .timeout:
-            return "连接超时：请检查网络、服务器防火墙和 PI-adaptor 状态后重试。"
+            return "连接超时：检查网络、防火墙和 PI-adaptor 状态后重试。"
         case .offline:
-            return "当前处于离线状态：恢复手机网络或 VPN 后再试。"
+            return "当前没有网络：恢复手机网络或 VPN 后再试。"
         case .hostKey:
-            return "主机密钥校验失败：服务器指纹与已固定记录不一致，可能存在中间人风险；本机不会自动忽略指纹变化。若确为你自己重装服务器导致，请先在服务器设置里移除旧指纹，再重新核对新指纹。"
+            return "主机密钥与记录不一致：可能不是你自己的服务器。确认重装过服务器后，先在服务器页移除旧指纹，再重新核对。"
         case .remoteUnavailable:
-            return "服务器或 PI-adaptor 暂不可用：请检查 PI-adaptor 服务、端口与防火墙。"
+            return "服务器或 PI-adaptor 暂不可用：检查 PI-adaptor 服务、端口与防火墙。"
         case .protocolViolation:
-            return "连接协议异常或版本不兼容：请核对客户端与 PI-adaptor 版本。"
+            return "版本不兼容：核对客户端与 PI-adaptor 版本。"
         case .unknown:
-            return "连接失败：请检查服务器地址、网络与 PI-adaptor 状态后重试。"
+            return "连接失败：检查服务器地址、网络与 PI-adaptor 状态后重试。"
         }
     }
 
@@ -137,19 +138,19 @@ public enum ConnectionFailureClassifier {
         case .unknown:
             return ConnectionFailureKind.unknown.userMessage
         case .invalidArgument: return "参数不合法"
-        case .notFound: return "对象不存在，列表已刷新"
+        case .notFound: return "内容已不存在，列表已刷新"
         case .methodNotFound: return "这台服务器不支持该操作"
         case .agentBusy: return "PI-adaptor 正忙"
-        case .conflict: return "状态已变化，重新拉取后再试"
-        case .idempotencyConflict: return "同一幂等键对应了不同内容，需要人工确认"
-        case .cursorExpired: return "事件游标已过期，已按快照重建"
-        case .clientTooSlow: return "客户端处理过慢，已丢弃订阅并按快照重建"
+        case .conflict: return "状态已变化：重新加载后再试"
+        case .idempotencyConflict: return "这次提交与上次不同：确认后再发"
+        case .cursorExpired: return "内容有缺口：已重新加载"
+        case .clientTooSlow: return "内容太多：已重新加载"
         case .approvalExpired: return "审批已过期"
         case .approvalStale: return "审批已失效"
-        case .payloadTooLarge: return "内容超过上限，请压缩后重试"
+        case .payloadTooLarge: return "内容太长：缩短后重试"
         case .pairingFailed: return "配对失败"
-        case .pairingTokenExpired: return "配对令牌已过期，需要重启 PI-adaptor 取新令牌"
-        case .capabilityUnavailable: return "服务器未提供该能力"
+        case .pairingTokenExpired: return "配对令牌已过期：重启 PI-adaptor 取新令牌"
+        case .capabilityUnavailable: return "服务器不支持这个操作"
         }
     }
 
@@ -323,6 +324,13 @@ public enum ConnectionDiagnosticRedactor {
             pattern: #"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{6,}"#,
             options: [],
             replacement: "Bearer [已隐藏]"
+        ),
+        // JSON form: {"password":"..."} — the plain key/value rule below does
+        // not match because the key is quoted.
+        Rule(
+            pattern: #"(?i)("(?:api[_-]?key|device[_-]?token|token|password|passphrase|secret|authorization)"\s*:\s*)"(?:[^"\\]|\\.)*""#,
+            options: [],
+            replacement: "$1\"[已隐藏]\""
         ),
         Rule(
             pattern: #"(?i)\b(api[_-]?key|device[_-]?token|token|password|passphrase|secret|authorization)\s*[:=]\s*[^\s,;]+"#,

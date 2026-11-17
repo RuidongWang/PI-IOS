@@ -204,25 +204,25 @@ public enum ProviderDeletionPresenter {
             return ProviderDeletionPresentation(
                 tone: .failure,
                 headline: nil,
-                message: "\(code.displayMessage)\n本机映射与密钥线索已保留，处理后可回到原入口重试。"
+                message: "\(code.displayMessage)\n本机记录与密钥未改动，处理后可回到原入口重试。"
             )
         case .unparseable(let reason):
             return ProviderDeletionPresentation(
                 tone: .failure,
                 headline: nil,
-                message: "服务器回执无法解析：\(reason)。本机映射与密钥线索已保留，请在服务器上人工确认后再处理。"
+                message: "服务器回执无法解析：\(reason)。本机记录与密钥未改动，请先在服务器上确认。"
             )
         case .blocked(.offline):
             return ProviderDeletionPresentation(
                 tone: .failure,
                 headline: nil,
-                message: "服务器离线：无法确认删除结果，本机映射与密钥线索已保留。请连接后重试。"
+                message: "服务器离线：无法确认删除结果，本机记录与密钥未改动。连接后重试。"
             )
         case .blocked(.hostChanged):
             return ProviderDeletionPresentation(
                 tone: .failure,
                 headline: nil,
-                message: "PI-adaptor 在删除过程中已切换：本机映射未改动，请到原 PI-adaptor 上核对删除结果。"
+                message: "PI-adaptor 在删除过程中已切换：本机记录未改动，请到原 PI-adaptor 上核对。"
             )
         }
     }

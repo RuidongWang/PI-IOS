@@ -67,18 +67,24 @@ struct ModelProviderDetailSheet: View {
                             .font(PIFont.display)
                             .foregroundStyle(PIColor.text)
                         Text(snapshot.baseURL)
-                            .font(PIFont.caption)
+                            .font(PIFont.metaMono)
                             .foregroundStyle(PIColor.text2)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
-                        Text("\(snapshot.models.count) 个模型 · 本机记录")
-                            .font(PIFont.meta)
-                            .foregroundStyle(PIColor.text3)
-                        Text(keyStatusText)
-                            .font(PIFont.meta)
-                            .foregroundStyle(hasLocalProviderKey ? PIColor.text3 : PIColor.warning)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityIdentifier("models.provider.keyStatus")
+                        HStack(spacing: PISpacing.s8) {
+                            Text("\(snapshot.models.count) 个模型")
+                                .font(PIFont.meta)
+                                .foregroundStyle(PIColor.text3)
+                            Text("·")
+                                .font(PIFont.meta)
+                                .foregroundStyle(PIColor.text3)
+                                .accessibilityHidden(true)
+                            Text(keyStatusText)
+                                .font(PIFont.meta)
+                                .foregroundStyle(hasLocalProviderKey ? PIColor.text3 : PIColor.warning)
+                                .accessibilityIdentifier("models.provider.keyStatus")
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
                     }
                     if let guidance = ProviderSecretDisplay.missingKeyGuidance(
                         .localOnly(hasLocalKey: hasLocalProviderKey)
@@ -97,20 +103,14 @@ struct ModelProviderDetailSheet: View {
                             .accessibilityIdentifier("models.provider.status")
                     }
 
-                    PIGroup(
-                        "模型",
-                        footer: "点「编辑」只改这一个模型；点「设为模型」把它设为该服务的默认模型。"
-                    ) {
+                    PIGroup("模型") {
                         ForEach(Array(snapshot.models.enumerated()), id: \.element.id) { index, item in
                             modelRow(item, isDefault: snapshot.defaultModelId == item.id)
                             if index < snapshot.models.count - 1 { PIRowDivider() }
                         }
                     }
 
-                    PIGroup(
-                        "更新模型",
-                        footer: "重新获取会调用服务端 `/models`，把新模型合并进清单；已有模型的参数保持不变。"
-                    ) {
+                    PIGroup {
                         VStack(alignment: .leading, spacing: PISpacing.s8) {
                             PISecondaryButton(
                                 title: isSaving ? "正在更新…" : "重新获取模型",
@@ -127,30 +127,27 @@ struct ModelProviderDetailSheet: View {
                             }
                             .accessibilityIdentifier("models.provider.editService")
                         }
-                        .padding(.horizontal, PISpacing.s16)
-                        .padding(.vertical, PISpacing.s12)
+                        .padding(PISpacing.s16)
                     }
                     if snapshot.hostV2Mirror == false {
-                        Text("这条旧版服务没有可原位更新的 PI-adaptor v2 镜像；不会用删除重建替代更新。")
+                        Text("旧版服务不能就地更新。")
                             .font(PIFont.caption)
                             .foregroundStyle(PIColor.text3)
                             .fixedSize(horizontal: false, vertical: true)
                     } else if !connection.state.isOnline {
-                        Text("连接服务器后可更新模型。")
+                        Text("连接后可更新。")
                             .font(PIFont.caption)
                             .foregroundStyle(PIColor.text3)
                     }
 
-                    PIGroup(
-                        "删除模型服务",
-                        footer: "删除会移除服务器上的 provider 记录，并清除本机保存的密钥。正在运行的 turn 可能失败且不会被自动迁移；建议先中止运行中的轮次。"
-                    ) {
+                    PIGroup {
                         PIDangerRow(
-                            title: isDeleting ? "正在删除…" : "删除这条服务",
+                            title: isDeleting ? "正在删除…" : "删除模型服务",
                             isEnabled: connection.state.isOnline && !isDeleting,
                             disabledReason: connection.state.isOnline ? nil : "服务器离线，无法确认删除结果",
                             action: { showingDeleteConfirm = true }
                         )
+                        .accessibilityIdentifier("models.provider.delete")
                     }
                 }
                 .padding(.horizontal, PIMetrics.pageMargin)
@@ -189,7 +186,6 @@ struct ModelProviderDetailSheet: View {
             }
             .sheet(item: $refetchPresentation) { presentation in
                 RefetchModelsSheet(
-                    providerName: snapshot.name,
                     candidates: presentation.candidates
                 ) { selected in
                     await persist(
@@ -207,7 +203,7 @@ struct ModelProviderDetailSheet: View {
                     Task { await deleteProvider() }
                 }
             } message: {
-                Text("将从服务器删除该 provider 记录，并清除本机 Keychain 中的密钥。项目、文件和设备配对不受影响。")
+                Text("服务器记录与本机密钥都会删除。")
             }
             .piMessageAlert(title: "删除未完成", message: $errorMessage)
             .piMessageAlert(title: "模型服务已更新", message: $resultMessage)
@@ -223,7 +219,7 @@ struct ModelProviderDetailSheet: View {
                 Spacer()
                 if isDefault {
                     Text("当前")
-                        .font(PIFont.metaSmall)
+                        .font(PIFont.meta)
                         .foregroundStyle(PIColor.accent)
                 }
             }
@@ -238,11 +234,11 @@ struct ModelProviderDetailSheet: View {
                         : " · 思考 \(item.thinkingLevels.joined(separator: "/"))")
                     + (item.defaultThinkingLevel.map { " · 默认 \($0)" } ?? "")
             )
-            .font(PIFont.metaSmall)
+            .font(PIFont.meta)
             .foregroundStyle(PIColor.text3)
             HStack(spacing: PISpacing.s8) {
                 if !isDefault {
-                    Button("设为模型") {
+                    Button("设为默认") {
                         Task { await setDefaultModel(item.id) }
                     }
                     .font(PIFont.captionStrong)
@@ -250,7 +246,7 @@ struct ModelProviderDetailSheet: View {
                     .accessibilityIdentifier("models.provider.setDefault.\(item.id)")
                     .disabled(!canUpdate || isSaving)
                 }
-                Button("编辑") {
+                Button("编辑模型") {
                     editingModel = ModelEditTarget(binding: item)
                 }
                 .font(PIFont.captionStrong)
@@ -285,7 +281,10 @@ struct ModelProviderDetailSheet: View {
         merged.alias = spec.alias
         merged.supportsImages = spec.supportsImages
         models[index] = merged
-        let defaultID = (makeDefault ? merged.id : snapshot.defaultModelId) ?? merged.id
+        // 编辑单个模型不是「选择默认模型」：只有用户明确勾选「设为默认」才改；
+        // nil 表示不动默认，由 AppModel 按「原默认是否仍存在」决定是否转移。
+        // 旧写法 `?? merged.id` 会让用户只改一个模型的参数就把该服务变成默认。
+        let defaultID = makeDefault ? merged.id : snapshot.defaultModelId
         return await persist(
             models: models,
             defaultModelID: defaultID,
@@ -305,13 +304,16 @@ struct ModelProviderDetailSheet: View {
 
     private func setDefaultModel(_ modelID: String) async {
         guard !isSaving else { return }
-        _ = await persist(
+        if let error = await persist(
             models: snapshot.models.map(\.providerSpec),
             defaultModelID: modelID,
             name: snapshot.name,
             baseURL: snapshot.baseURL,
             apiKey: nil
-        )
+        ) {
+            // 之前这里丢弃返回值，切换失败时界面没有任何反馈。
+            errorMessage = error
+        }
     }
 
     /// 本机记录里两种写法并存：导入时写入的是 legacy `apiStyle`
@@ -460,10 +462,10 @@ struct ModelProviderDetailSheet: View {
                     spec.nativeWebSearch = previous?.nativeWebSearch
                     return spec
                 },
-                defaultModelId: ProviderUpdateComposer.resolvedDefaultModelID(
-                    previous: defaultModelID,
-                    models: updated.models.map { ProviderUpdateComposer.modelSpec($0) }
-                )
+                // 只传「本次明确想设的默认」：nil 表示不动默认。是否回退到首项由
+                // AppModel 按「本机原有默认是否被移出清单」决定——这里再用
+                // resolvedDefaultModelID 兜底会把没有默认的服务编辑一次就变成默认。
+                defaultModelId: defaultModelID
             )
             guard model.recordImportedProvider(
                 context: operation,
@@ -493,9 +495,23 @@ struct ModelProviderDetailSheet: View {
                 baseURL: updated.baseUrl,
                 apiStyle: updated.protocolName,
                 models: updated.models.map { wire in
-                    StoredModelBinding(spec: ProviderUpdateComposer.modelSpec(wire))
+                    // 复用上面已合并过扩展能力的 createInput 模型；否则连续
+                    // 保存时 previous 会从丢失字段的 snapshot 读取，把
+                    // thinkingProtocol / supportsReasoningEffort /
+                    // supportsDocuments 覆盖成 nil。
+                    var spec = ProviderUpdateComposer.modelSpec(wire)
+                    if let merged = createInput.models.first(where: { $0.id == wire.id }) {
+                        spec = merged
+                    }
+                    return StoredModelBinding(spec: spec)
                 },
-                defaultModelId: createInput.defaultModelId,
+                // 以本机记录为准：若原默认模型已被移出清单，AppModel 会把默认项
+                // 转移到剩余模型；这里不能继续用请求里的旧值，否则详情页与
+                // 设置页的「默认模型」会各说各话。
+                defaultModelId: model.storedProvider(
+                    hostID: snapshot.hostID,
+                    providerId: updated.id
+                )?.defaultModelId,
                 importedAt: snapshot.importedAt
             )
             resultMessage = "已更新 \(updated.models.count) 个模型。"
@@ -580,7 +596,7 @@ private struct ProviderServiceEditSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: PISpacing.s16) {
-                    PIGroup("服务信息", footer: "新 API Key 只写入本机 Keychain；留空保持不变。") {
+                    PIGroup("服务信息") {
                         VStack(alignment: .leading, spacing: PISpacing.s16) {
                             PIFormField(label: "服务名称") {
                                 TextField("服务名称", text: $name)
@@ -593,11 +609,8 @@ private struct ProviderServiceEditSheet: View {
                                     .autocorrectionDisabled()
                                     .accessibilityIdentifier("models.provider.editBaseURL")
                             }
-                            PIFormField(
-                                label: "新 API Key",
-                                hint: hasStoredKey ? "可选；留空保持不变" : "本机尚未保存密钥，建议现在填写"
-                            ) {
-                                SecureField("新 API Key", text: $apiKey)
+                            PIFormField(label: "新 API Key") {
+                                SecureField(hasStoredKey ? "留空保持不变" : "sk-…", text: $apiKey)
                                     .textInputAutocapitalization(.never)
                                     .autocorrectionDisabled()
                                     .accessibilityIdentifier("models.provider.editAPIKey")
@@ -608,9 +621,13 @@ private struct ProviderServiceEditSheet: View {
                     if let errorMessage {
                         PIInlineMessage(kind: .danger, text: errorMessage)
                     }
-                    PIPrimaryButton(title: isSaving ? "正在保存…" : "保存服务信息") {
+                    PIPrimaryButton(
+                        title: isSaving ? "正在保存…" : "保存服务信息",
+                        isEnabled: !isSaving
+                    ) {
                         Task { await submit() }
                     }
+                    .accessibilityIdentifier("models.provider.saveService")
                     .disabled(isSaving)
                 }
                 .padding(.horizontal, PIMetrics.pageMargin)
@@ -675,7 +692,7 @@ private struct ProviderModelEditSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: PISpacing.s16) {
-                    PIGroup("模型参数", footer: "模型 ID 不可修改；如需使用新 ID，请重新获取模型。") {
+                    PIGroup("模型参数") {
                         VStack(alignment: .leading, spacing: PISpacing.s16) {
                             PIFormField(label: "模型 ID") {
                                 Text(modelID)
@@ -685,6 +702,7 @@ private struct ProviderModelEditSheet: View {
                             }
                             PIFormField(label: "显示名") {
                                 TextField("模型显示名", text: $displayName)
+                                    .accessibilityIdentifier("models.provider.editDisplayName")
                             }
                             HStack(spacing: PISpacing.s12) {
                                 PIFormField(label: "上下文") {
@@ -712,10 +730,12 @@ private struct ProviderModelEditSheet: View {
                             Toggle("支持图片输入", isOn: $supportsImages)
                                 .font(PIFont.body)
                                 .tint(PIColor.accent)
+                                .accessibilityIdentifier("models.provider.supportsImages")
                             if !isDefault {
-                                Toggle("设为该服务的默认模型", isOn: $makeDefault)
+                                Toggle("设为默认", isOn: $makeDefault)
                                     .font(PIFont.body)
                                     .tint(PIColor.accent)
+                                    .accessibilityIdentifier("models.provider.makeDefault")
                             }
                         }
                         .padding(PISpacing.s16)
@@ -723,9 +743,13 @@ private struct ProviderModelEditSheet: View {
                     if let errorMessage {
                         PIInlineMessage(kind: .danger, text: errorMessage)
                     }
-                    PIPrimaryButton(title: isSaving ? "正在保存…" : "保存这个模型") {
+                    PIPrimaryButton(
+                        title: isSaving ? "正在保存…" : "保存这个模型",
+                        isEnabled: !isSaving
+                    ) {
                         Task { await submit() }
                     }
+                    .accessibilityIdentifier("models.provider.saveModel")
                     .disabled(isSaving)
                 }
                 .padding(.horizontal, PIMetrics.pageMargin)
@@ -783,7 +807,6 @@ private struct RefetchPresentation: Identifiable {
 
 private struct RefetchModelsSheet: View {
     @Environment(\.dismiss) private var dismiss
-    let providerName: String
     @State private var candidates: [RefetchCandidate]
     let save: ([ProviderModelSpec]) async -> String?
 
@@ -792,11 +815,9 @@ private struct RefetchModelsSheet: View {
     @State private var errorMessage: String?
 
     init(
-        providerName: String,
         candidates: [RefetchCandidate],
         save: @escaping ([ProviderModelSpec]) async -> String?
     ) {
-        self.providerName = providerName
         self.save = save
         _candidates = State(initialValue: candidates)
     }
@@ -818,7 +839,7 @@ private struct RefetchModelsSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: PISpacing.s16) {
-                    Text("从「\(providerName)」的 /models 重新获取。已有模型保持原参数，新模型默认勾选。")
+                    Text("已有模型保持原参数；新模型默认勾选。")
                         .font(PIFont.caption)
                         .foregroundStyle(PIColor.text2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -826,6 +847,7 @@ private struct RefetchModelsSheet: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .piFieldChrome()
+                        .accessibilityIdentifier("models.refetch.filter")
                     PIGroup("模型清单（\(candidates.count)）") {
                         ForEach(Array(visible.enumerated()), id: \.element.id) { index, candidate in
                             Toggle(isOn: binding(for: candidate.id)) {
@@ -835,22 +857,21 @@ private struct RefetchModelsSheet: View {
                                             .font(PIFont.listTitle)
                                         if candidate.isNew {
                                             Text("新增")
-                                                .font(PIFont.metaSmall)
-                                                .foregroundStyle(PIColor.accent)
-                                                .padding(.horizontal, PISpacing.s8)
-                                                .padding(.vertical, 2)
-                                                .background(PIColor.accentSoft, in: Capsule())
+                                                .font(PIFont.meta)
+                                                .foregroundStyle(PIColor.text2)
+                                                .accessibilityIdentifier("models.refetch.new.\(candidate.spec.id)")
                                         }
                                     }
                                     Text(candidate.spec.id)
                                         .font(PIFont.codeMono)
                                         .foregroundStyle(PIColor.text2)
                                     Text("\(candidate.spec.contextWindow) ctx · \(candidate.spec.maxTokens) output")
-                                        .font(PIFont.metaSmall)
+                                        .font(PIFont.meta)
                                         .foregroundStyle(PIColor.text3)
                                 }
                             }
                             .tint(PIColor.accent)
+                            .accessibilityIdentifier("models.refetch.toggle.\(candidate.spec.id)")
                             .padding(.horizontal, PISpacing.s16)
                             .padding(.vertical, PISpacing.s12)
                             if index < visible.count - 1 { PIRowDivider() }
@@ -859,9 +880,13 @@ private struct RefetchModelsSheet: View {
                     if let errorMessage {
                         PIInlineMessage(kind: .danger, text: errorMessage)
                     }
-                    PIPrimaryButton(title: isSaving ? "正在保存…" : "保存 \(selectedSpecs.count) 个模型") {
+                    PIPrimaryButton(
+                        title: isSaving ? "正在保存…" : "保存 \(selectedSpecs.count) 个模型",
+                        isEnabled: !isSaving && !selectedSpecs.isEmpty
+                    ) {
                         Task { await submit() }
                     }
+                    .accessibilityIdentifier("models.refetch.save")
                     .disabled(isSaving || selectedSpecs.isEmpty)
                 }
                 .padding(.horizontal, PIMetrics.pageMargin)

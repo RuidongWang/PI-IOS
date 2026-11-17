@@ -149,6 +149,95 @@ public final class OfflineSessionCacheSQLite {
         }
     }
 
+    public struct WriteStatistics: Equatable, Sendable {
+        public var insertedRows = 0
+        public var deletedRows = 0
+        public var changedTables: [String] = []
+        public var elapsedMilliseconds: Double = 0
+        public var transactionCount: Int { changedTables.isEmpty ? 0 : 1 }
+    }
+
+    /// `durable` must be the last successfully persisted snapshot owned by the
+    /// serialized caller. Unchanged rows retain their original encrypted bytes.
+    /// All table deltas commit together; a no-op never opens a transaction.
+    public func saveChanges(
+        from durable: OfflineSessionCacheSnapshot,
+        to desired: OfflineSessionCacheSnapshot
+    ) throws -> WriteStatistics {
+        let clock = ContinuousClock()
+        let started = clock.now
+        let sessions = try delta(durable.sessions, desired.sessions) { [Self.hostID($0.hostID), $0.id] }
+        let items = try delta(durable.entries, desired.entries) { [Self.hostID($0.hostID), $0.sessionId, $0.id] }
+        let cursors = try delta(durable.cursors, desired.cursors) { [Self.hostID($0.hostID), $0.sessionId] }
+        let approvals = try delta(durable.approvals, desired.approvals) { [Self.hostID($0.hostID), $0.sessionId, $0.id] }
+        let drafts = try delta(durable.drafts, desired.drafts) { [Self.hostID($0.hostID), $0.sessionId] }
+        var statistics = WriteStatistics()
+        lock.lock()
+        defer { lock.unlock() }
+        try requireDatabase()
+        if !sessions.isEmpty || !items.isEmpty || !cursors.isEmpty || !approvals.isEmpty || !drafts.isEmpty {
+            try execute("BEGIN IMMEDIATE")
+            do {
+                try apply(sessions, table: "sessions", columns: ["host_id", "id"], insert: insertSessions, statistics: &statistics)
+                try apply(items, table: "items", columns: ["host_id", "session_id", "id"], insert: insertItems, statistics: &statistics)
+                try apply(cursors, table: "cursors", columns: ["host_id", "session_id"], insert: insertCursors, statistics: &statistics)
+                try apply(approvals, table: "approvals", columns: ["host_id", "session_id", "id"], insert: insertApprovals, statistics: &statistics)
+                try apply(drafts, table: "drafts", columns: ["host_id", "session_id"], insert: insertDrafts, statistics: &statistics)
+                try execute("COMMIT")
+            } catch {
+                try? execute("ROLLBACK")
+                throw error
+            }
+        }
+        let elapsed = started.duration(to: clock.now).components
+        statistics.elapsedMilliseconds = Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15
+        return statistics
+    }
+
+    private struct Delta<Row> {
+        var removed: [[String]]
+        var inserted: [Row]
+        var isEmpty: Bool { removed.isEmpty && inserted.isEmpty }
+    }
+
+    private func delta<Row: Equatable>(
+        _ old: [Row], _ new: [Row], key: (Row) -> [String]
+    ) throws -> Delta<Row> {
+        func index(_ rows: [Row]) throws -> [[String]: Row] {
+            var result: [[String]: Row] = [:]
+            for row in rows {
+                guard result.updateValue(row, forKey: key(row)) == nil else {
+                    throw DatabaseError(message: "duplicate cache composite key")
+                }
+            }
+            return result
+        }
+        let oldIndex = try index(old)
+        let newIndex = try index(new)
+        return Delta(
+            removed: old.compactMap { newIndex[key($0)] == $0 ? nil : key($0) },
+            inserted: new.filter { oldIndex[key($0)] != $0 }
+        )
+    }
+
+    private func apply<Row>(
+        _ delta: Delta<Row>, table: String, columns: [String],
+        insert: ([Row]) throws -> Void, statistics: inout WriteStatistics
+    ) throws {
+        guard !delta.isEmpty else { return }
+        statistics.changedTables.append(table)
+        let predicate = columns.map { "\($0) = ?" }.joined(separator: " AND ")
+        for key in delta.removed {
+            try execute("DELETE FROM \(table) WHERE \(predicate)", bindings: key.map { .text($0) })
+            statistics.deletedRows += Int(sqlite3_changes(database))
+        }
+        // Each insert helper executes one INSERT per row, without REPLACE side effects.
+        for row in delta.inserted {
+            try insert([row])
+            statistics.insertedRows += Int(sqlite3_changes(database))
+        }
+    }
+
     public func removeHost(_ hostID: UUID) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -198,6 +287,7 @@ public final class OfflineSessionCacheSQLite {
                 epoch TEXT,
                 sequence INTEGER,
                 created_at REAL NOT NULL,
+                turn_id TEXT,
                 PRIMARY KEY (host_id, session_id, id)
             )
             """)
@@ -234,7 +324,14 @@ public final class OfflineSessionCacheSQLite {
                 PRIMARY KEY (host_id, session_id)
             )
             """)
-        try execute("PRAGMA user_version=1")
+        let itemColumns = try query("PRAGMA table_info(items)") { statement in
+            text(statement, 1) ?? ""
+        }
+        if !itemColumns.contains("turn_id") {
+            try execute("ALTER TABLE items ADD COLUMN turn_id TEXT")
+        }
+        // Publish the new schema version only after every CREATE/ALTER succeeds.
+        try execute("PRAGMA user_version=2")
     }
 
     // MARK: - Reads
@@ -274,7 +371,7 @@ public final class OfflineSessionCacheSQLite {
     private func loadItems() throws -> [OfflineSessionCacheEntry] {
         try query("""
             SELECT host_id, id, session_id, kind, role, text, tool_name,
-                   status, epoch, sequence, created_at
+                   status, epoch, sequence, created_at, turn_id
             FROM items
             """) { statement in
             let rawText = text(statement, 5) ?? ""
@@ -292,7 +389,8 @@ public final class OfflineSessionCacheSQLite {
                 toolName: text(statement, 6),
                 status: text(statement, 7),
                 epoch: text(statement, 8),
-                sequence: integer(statement, 9)
+                sequence: integer(statement, 9),
+                turnId: text(statement, 11)
             )
         }
     }
@@ -386,8 +484,8 @@ public final class OfflineSessionCacheSQLite {
             try execute("""
                 INSERT INTO items
                     (host_id, id, session_id, kind, role, text, tool_name,
-                     status, epoch, sequence, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     status, epoch, sequence, created_at, turn_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, bindings: [
                     .text(Self.hostID(entry.hostID)),
                     .text(entry.id),
@@ -400,6 +498,7 @@ public final class OfflineSessionCacheSQLite {
                     .optionalText(entry.epoch),
                     .optionalInt(entry.sequence),
                     .real(entry.createdAt.timeIntervalSince1970),
+                    .optionalText(entry.turnId),
                 ])
         }
     }

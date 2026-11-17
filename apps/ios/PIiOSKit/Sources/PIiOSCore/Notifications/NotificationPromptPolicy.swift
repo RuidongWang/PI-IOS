@@ -16,9 +16,9 @@ public enum NotificationPromptPolicy {
     /// 是否已经解释过一次（点过「启用」或「稍后」），避免反复弹解释。
     public static let explainedDefaultsKey = "piios.notifications.explained"
 
-    public static let explanationTitle = "开启离开期间的更新提醒？"
-    public static let explanationBody = "回到 App 时，如果离开期间有会话更新或新的待处理项，我们会提示你。"
-    public static let explanationDetail = "需要通知权限。只会在回到 App 时提示，不会在后台实时推送消息。"
+    /// quiet-v2：解释卡只留一行。用户只需要知道「要不要开」，
+    /// 不需要知道通知的实现方式（R1 / R9）。
+    public static let explanationTitle = "离开期间的更新提醒"
 
     /// 一次判定的输入。全部来自现有的只读状态，不引入新的持久化契约。
     public struct Context: Equatable, Sendable {
@@ -95,17 +95,6 @@ public enum NotificationPromptPolicy {
             return "临时允许"
         case .ephemeral:
             return "仅本次允许"
-        }
-    }
-
-    public static func settingsSubtitle(_ status: LocalNotificationAuthorizationStatus) -> String {
-        switch status {
-        case .notDetermined:
-            return "启用后，回到 App 时会提示离开期间的更新"
-        case .denied:
-            return "系统里已拒绝；需要到系统设置中重新允许"
-        case .authorized, .provisional, .ephemeral:
-            return "已启用：回到 App 时提示离开期间的更新"
         }
     }
 }

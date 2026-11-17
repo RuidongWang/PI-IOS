@@ -1,5 +1,8 @@
 import XCTest
 
+/// 工具卡渲染延迟：展开大结果后，首个真实上屏帧必须落在 200ms 以内。
+///
+/// quiet-v2：仍然只测「有界预览」这一条性能契约，定位全部走 identifier。
 final class ToolRenderLatencyUITests: XCTestCase {
     private let app = XCUIApplication()
 
@@ -16,6 +19,9 @@ final class ToolRenderLatencyUITests: XCTestCase {
         XCTAssertTrue(app.buttons["sidebar.session.S1"].waitForExistence(timeout: 8))
         app.buttons["sidebar.session.S1"].tap()
         XCTAssertTrue(app.buttons["sidebar.close"].waitForNonExistence(timeout: 5))
+
+        // 工具卡标题也必须稳定可定位：渲染测量挂在 toggle 上，标题是它的视觉锚点。
+        XCTAssertTrue(app.staticTexts["toolCard.large-tool.title"].waitForExistence(timeout: 8))
 
         let toggle = app.descendants(matching: .any)["toolCard.large-tool.toggle"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 8))

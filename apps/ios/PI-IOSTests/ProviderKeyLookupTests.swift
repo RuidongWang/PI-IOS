@@ -10,8 +10,9 @@ import PIiOSCore
 @MainActor
 final class ProviderKeyLookupTests: XCTestCase {
     func testLookupIsScopedByCurrentHostAndProvider() throws {
-        let hostID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
-        let otherHostID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        // Random scope: never overwrite or delete a real user's Keychain entry.
+        let hostID = UUID()
+        let otherHostID = UUID()
         let providerID = "provider_alpha"
         let otherProviderID = "provider_beta"
         let key = "sk-test-client-only"
@@ -45,5 +46,91 @@ final class ProviderKeyLookupTests: XCTestCase {
         // PROVIDER_SECRET_MISSING), it must never fall back to a cached/in-memory key.
         let model = ConnectionModel()
         XCTAssertNil(model.providerKeyForCurrentHost("provider_alpha"))
+    }
+}
+
+/// 「provider 已同步到服务器、key 是否同步」的回归：legacy 映射记录可能把明文
+/// 只留在 `legacyProviderId` 下，发送路径按会话绑定的 v2 id 取 key 时必须回退。
+@MainActor
+final class ProviderKeyLegacyFallbackTests: XCTestCase {
+    private let hostID = UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
+    private var root: URL!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("provider-key-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        _ = KeychainStore.deleteProviderKey(hostID: hostID, providerId: "prv_v2")
+        _ = KeychainStore.deleteProviderKey(hostID: hostID, providerId: "prv_legacy")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    func testTurnKeyFallsBackToLegacyProviderID() throws {
+        let key = "sk-legacy-only"
+        guard KeychainStore.saveProviderKey(key, hostID: hostID, providerId: "prv_legacy") else {
+            throw XCTSkip("模拟器 Keychain 不可写，跳过 provider key fallback 用例")
+        }
+
+        let model = makeModel()
+        XCTAssertEqual(
+            model.providerKeyForTurn(providerId: "prv_v2", hostID: hostID),
+            key,
+            "v2 id 没有明文时必须回退到本机记录里的 legacy id"
+        )
+        XCTAssertEqual(
+            model.connection.session.providerAPIKey?("prv_v2"),
+            key,
+            "会话发送注入的解析器也必须走同一回退"
+        )
+        XCTAssertNil(model.providerKeyForTurn(providerId: "prv_unknown", hostID: hostID))
+    }
+
+    func testDirectProviderIDKeyWinsOverLegacyFallback() throws {
+        guard KeychainStore.saveProviderKey("sk-legacy", hostID: hostID, providerId: "prv_legacy"),
+              KeychainStore.saveProviderKey("sk-v2", hostID: hostID, providerId: "prv_v2")
+        else {
+            throw XCTSkip("模拟器 Keychain 不可写，跳过 provider key fallback 用例")
+        }
+
+        let model = makeModel()
+        XCTAssertEqual(model.providerKeyForTurn(providerId: "prv_v2", hostID: hostID), "sk-v2")
+    }
+
+    private func makeModel() -> AppModel {
+        let host = HostRecord(
+            id: hostID,
+            name: "Key Host",
+            host: "127.0.0.1",
+            port: 22,
+            username: "tester",
+            authKind: .password,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            isCurrent: true,
+            pairedAt: nil
+        )
+        let provider = StoredModelProvider(
+            providerId: "prv_v2",
+            legacyProviderId: "prv_legacy",
+            hostV2Mirror: true,
+            hostID: hostID,
+            name: "Legacy Mirror",
+            baseURL: "https://legacy.invalid",
+            apiStyle: "chat_completions",
+            models: [StoredModelBinding(spec: ProviderModelSpec(
+                id: "legacy-model",
+                contextWindow: 32_000,
+                maxTokens: 4_096,
+                thinkingLevels: []
+            ))],
+            defaultModelId: nil,
+            importedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        return AppModel(
+            seed: PersistedState(hosts: [host], modelProviders: [provider]),
+            logStore: PILogger(directoryURL: root.appendingPathComponent("logs", isDirectory: true))
+        )
     }
 }

@@ -54,6 +54,6 @@ final class RealServerSmokeTests: XCTestCase {
 private struct AcceptHostKey: HostKeyConfirming {
     func confirmHostKey(_ key: SSHHostKey, status: HostKeyTrustStatus) async -> HostKeyConfirmation {
         // 测试里信任任何密钥；真实 App 走 HostKeyPromptBroker 让用户确认。
-        .trust
+        TestHostKeyPolicy.confirm(key)
     }
 }

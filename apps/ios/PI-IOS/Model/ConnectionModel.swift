@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import Combine
 import PIiOSCore
 import PIiOSNet
 
@@ -208,11 +209,19 @@ final class ConnectionModel: ObservableObject {
     nonisolated static let defaultAdaptorInstallReleaseVersion = PIAdaptorRelease.patchedReleaseVersion
     nonisolated static let defaultAdaptorInstallReleaseBaseURL = PIAdaptorRelease.defaultPatchedBaseURL
 
-    @Published private(set) var state: RACPTunnelState = .offline(reason: nil)
+    @Published private(set) var state: RACPTunnelState = .offline(reason: nil) {
+        didSet { syncExtensionContext() }
+    }
     @Published private(set) var connectionStatus = ConnectionStatus()
     @Published private(set) var projects: [RACPProjectSummary] = []
     @Published private(set) var sessions: [RACPSessionSummary] = []
-    @Published private(set) var info: RACPServerInfo?
+    @Published private(set) var info: RACPServerInfo? {
+        didSet {
+            extensionInfoHostID = cacheHostID
+            syncExtensionContext()
+        }
+    }
+    private var extensionInfoHostID: UUID?
     @Published private(set) var lastError: String?
     /// Invoked when the loopback PI-adaptor port is discovered over SSH so the owner
     /// (AppModel) can persist it onto the host record.
@@ -227,8 +236,24 @@ final class ConnectionModel: ObservableObject {
     @Published private(set) var isTesting = false
     @Published var hostKeyPrompt: HostKeyPrompt?
 
-    private var client: RACPClient?
+    private var client: RACPClient? { didSet { updateCacheContext() } }
+    @Published private(set) var offlineCacheReady = false
+    @Published private(set) var offlineCacheLoadError: String?
+    private var cacheSessionObservation: AnyCancellable?
+    private var cacheStatusRevision: UInt64 = 0
     var activeClient: RACPClient? { client }
+    /// 会话归档/恢复/删除的全局互斥：视图关闭不会重置或允许重复提交。
+    @Published private(set) var sessionActionInFlight = false
+
+    func beginSessionAction() -> Bool {
+        guard !sessionActionInFlight else { return false }
+        sessionActionInFlight = true
+        return true
+    }
+
+    func endSessionAction() {
+        sessionActionInFlight = false
+    }
     private var updateTask: Task<Void, Never>?
     private var statusTask: Task<Void, Never>?
     private var candidateClient: RACPClient?
@@ -239,14 +264,19 @@ final class ConnectionModel: ObservableObject {
     private var brokers: [UUID: HostKeyPromptBroker] = [:]
     private var connectionBrokerID: UUID?
     private var connectedAccount: String?
-    private var connectionGeneration = 0
+    private var connectionGeneration = 0 { didSet { updateCacheContext() } }
+    /// 连接代次只读快照。异步回调用它在完成时确认「发起时的连接仍是当前连接」，
+    /// 生产代码不得修改代次；测试用访问器见 `#if DEBUG` 的 `connectionGenerationForTesting`。
+    var currentConnectionGeneration: Int { connectionGeneration }
     private var connectionIntentGeneration = 0
     private var catalogGeneration = 0
-    private(set) var cacheHostID: UUID?
+    /// 仅用于日志连接耗时的起点：connect 开始计时、online/offline 或断开时清空。不参与业务分支。
+    private var connectLogStartedAt: Date?
+    private(set) var cacheHostID: UUID? { didSet { updateCacheContext() } }
     private var offlineCacheLimit = PersistedState.defaultOfflineCacheLimit
     private var cacheStore: SessionCacheStore
     /// 每次真实 RACP client 建立时更新；缓存迟到写入据此拒绝旧连接结果。
-    private var cacheClientID = UUID()
+    private var cacheClientID = UUID() { didSet { updateCacheContext() } }
     private struct PendingDraftWrite {
         let lease: OfflineSessionCacheWriteLease
         let sessionID: String
@@ -254,21 +284,33 @@ final class ConnectionModel: ObservableObject {
         let idempotencyKey: String?
     }
     private var pendingDraftWrite: PendingDraftWrite?
+    private var draftWriteDebounce = CacheWriteDebounce()
     private var draftWriteTask: Task<Void, Never>?
     private var sessionCacheWriteTask: Task<Void, Never>?
     private var sessionCacheWritePending = false
-    private var cacheFlushTask: Task<Void, Never>?
+    private var cacheFlushTask: Task<CacheFlushReport?, Never>?
     private var cacheFlushGeneration = 0
+#if DEBUG
+    /// Test-only interleave point between the flush barrier and applying its
+    /// result, used to publish a real newer revision from the real save path.
+    var afterCacheFlushBarrierHookForTesting: (() async -> Void)?
+    var beforeCacheFlushHookForTesting: (() -> Void)?
+#endif
     var currentCatalogHostID: UUID? { cacheHostID }
     /// 当前选中的 HostRecord id（由 AppModel 的 setCacheHostID 保持同步）。
     /// Provider key lookup 用它定位本机 Keychain 中的 (host, provider) 密钥。
     var currentHostID: UUID? { cacheHostID }
     /// 会话内的读写（发送、审批、排队、配置）全部走它。
     let session: SessionController
+    let extensions = ExtensionCatalogModel()
+    private var extensionSnapshotGeneration: UInt64?
     private let usesUITestFixture: Bool
     private var fixtureProviderBindingStatuses: [String: ProviderBindingStatus] = [:]
     private var fixtureAdaptorUnitSnapshot: AdaptorUnitSnapshot?
     private var fixtureUpdatableProviders: [RACPV2Provider] = []
+    private var fixtureExtensionInventory: RACPExtensionInventory?
+    private var fixtureSessionExtensions: [String: RACPSessionExtensions] = [:]
+    private var fixtureExtensionReadFailure = false
     private var fixtureCatalogs: [UUID: UITestFixture.Catalog] = [:]
     private var fixtureConnectionState: RACPTunnelState?
     private var fixtureSupportsRevoke = false
@@ -448,7 +490,7 @@ final class ConnectionModel: ObservableObject {
 
     func installConnectionPiecesForTesting(
         oldClient: RACPClient,
-        candidate: RACPClient,
+        candidate: RACPClient? = nil,
         hostID: UUID
     ) {
         client = oldClient
@@ -476,7 +518,8 @@ final class ConnectionModel: ObservableObject {
     }
 #endif
 
-    init(fixture: UITestFixture? = nil, releaseCatalog: (any AdaptorReleaseResolving)? = nil) {
+    init(fixture: UITestFixture? = nil, releaseCatalog: (any AdaptorReleaseResolving)? = nil,
+         cacheStoreOverride: SessionCacheStore? = nil) {
         self.releaseCatalog = releaseCatalog
             ?? (fixture == nil ? AdaptorReleaseCatalog() : FixtureAdaptorReleaseCatalog())
         usesUITestFixture = fixture != nil
@@ -487,7 +530,10 @@ final class ConnectionModel: ObservableObject {
             fixtureConnectionState = fixture.connectionState
             fixtureSupportsRevoke = fixture.supportsFixtureRevoke
             fixtureUpdatableProviders = fixture.updatableProviders
-            cacheStore = SessionCacheStore(
+            fixtureExtensionInventory = fixture.extensionInventory
+            fixtureSessionExtensions = fixture.sessionExtensions
+            fixtureExtensionReadFailure = fixture.extensionReadFailure
+            cacheStore = cacheStoreOverride ?? SessionCacheStore(
                 offlineCacheLimit: PersistedState.defaultOfflineCacheLimit,
                 inMemory: fixture.cache
             )
@@ -507,9 +553,26 @@ final class ConnectionModel: ObservableObject {
             }
             connectionStatus = fixture.connectionStatus ?? ConnectionStatus()
         } else {
-            cacheStore = SessionCacheStore(offlineCacheLimit: PersistedState.defaultOfflineCacheLimit)
+            cacheStore = cacheStoreOverride ?? SessionCacheStore(offlineCacheLimit: PersistedState.defaultOfflineCacheLimit)
             session = SessionController()
         }
+        offlineCacheReady = cacheStore.status.ready
+        offlineCacheLoadError = cacheStore.status.error
+        cacheStore.observe { [weak self] status in
+            Task { @MainActor [weak self] in
+                self?.applyCacheStatus(status)
+            }
+        }
+        cacheSessionObservation = session.$attachedSessionId.sink { [weak self] sessionID in
+            guard let self else { return }
+            self.cacheStore.updateContext(clientID: self.cacheClientID, generation: self.connectionGeneration,
+                                          hostID: self.cacheHostID, sessionID: sessionID, active: self.client != nil)
+            Task { @MainActor [weak self] in
+                guard let self, self.session.attachedSessionId == sessionID, let sessionID else { return }
+                await self.refreshSessionExtensions(sessionID)
+            }
+        }
+        updateCacheContext()
         session.onDraftChanged = { [weak self] sessionID, text, idempotencyKey in
             self?.scheduleDraftCache(
                 sessionID: sessionID,
@@ -543,6 +606,12 @@ final class ConnectionModel: ObservableObject {
         if let hostID, let catalog = fixtureCatalogs[hostID] {
             applyFixtureCatalog(catalog)
         }
+#if DEBUG
+        if usesUITestFixture, !state.isOnline, let hostID, let inventory = fixtureExtensionInventory,
+           info?.hostId == inventory.hostId {
+            extensions.seedForFixture(hostID: hostID, inventory: inventory, results: fixtureSessionExtensions)
+        }
+#endif
     }
 
     /// Provider API keys live only in the local Keychain, scoped by (host, provider).
@@ -553,7 +622,9 @@ final class ConnectionModel: ObservableObject {
         return KeychainStore.loadProviderKey(hostID: hostID, providerId: providerId)
     }
 
-    var cacheItemLimit: Int { cacheStore.itemLimit }
+    var cacheTurnLimit: Int { cacheStore.turnLimit }
+    /// Compatibility alias; the configured unit is a complete turn.
+    var cacheItemLimit: Int { cacheTurnLimit }
 
     // MARK: - 测试连接（SSH）
 
@@ -1137,13 +1208,13 @@ final class ConnectionModel: ObservableObject {
         port: Int,
         deviceId: String,
         deviceToken: String
-    ) async {
+    ) async -> BootstrapStagingRevokeResult {
         let account = KeychainStore.account(
             username: record.username,
             host: record.host,
             port: record.port
         )
-        guard let credential = KeychainStore.loadCredential(account: account) else { return }
+        guard let credential = KeychainStore.loadCredential(account: account) else { return .failed }
         let pinned = KeychainStore.loadHostKey(account: account)
         let (operationID, promptBroker) = makeHostKeyBroker(
             account: account,
@@ -1167,7 +1238,7 @@ final class ConnectionModel: ObservableObject {
         )
         // The operation may not cooperate with cancellation. The deadline wins
         // independently, then stopBestEffort separately bounds client shutdown.
-        _ = await boundedAsyncValue(seconds: 8) {
+        let revoked = await boundedAsyncValue(seconds: 8) {
             let stream = await client.start()
             for await update in stream {
                 switch update {
@@ -1182,6 +1253,8 @@ final class ConnectionModel: ObservableObject {
             return false
         }
         _ = await client.stopBestEffort(timeout: 1)
+        guard let revoked else { return .unknown }
+        return revoked ? .revoked : .failed
     }
 
     /// Reads the owner-only bootstrap log through a fresh SSH `exec`. The
@@ -1289,6 +1362,10 @@ final class ConnectionModel: ObservableObject {
                 message: "PI-adaptor 未声明 providerDiscovery 能力"
             )
         }
+        PILog.debug(
+            "Model",
+            "provider/discover protocol=\(wireProtocol ?? "-") apiKey=present"
+        )
         return try await RemoteProviderOperations.discoverModels(
             client: client,
             requestURL: baseURL,
@@ -1307,6 +1384,23 @@ final class ConnectionModel: ObservableObject {
               let client
         else { throw RACPV2Error.notConnected }
         let payload = try ProviderImportEncoder.decode(payload)
+        // 排查「配置的 provider 传给服务器了，key 有没有一起上传」：只记有无，
+        // 不记明文、不记完整载荷。api_key 服务缺 key 时服务器会拒绝，这里先留痕。
+        let requiresKeyCount = payload.providers.filter { $0.input.authKind != "none" }.count
+        let keyedCount = payload.providers.filter {
+            $0.input.authKind != "none" && !(($0.input.secretValue ?? "").isEmpty)
+        }.count
+        let keyState: String
+        if requiresKeyCount == 0 {
+            keyState = "not-required"
+        } else {
+            keyState = keyedCount == requiresKeyCount ? "present" : "missing/partial"
+        }
+        PILog.info(
+            "Model",
+            "provider/create providers=\(payload.providers.count) key=\(keyState)"
+                + " default=\(payload.defaultModel?.modelId ?? "-")"
+        )
         return try await RemoteProviderOperations.importProviders(
             client: client,
             payload: payload,
@@ -1434,6 +1528,52 @@ final class ConnectionModel: ObservableObject {
     }
 
     // MARK: - PI-adaptor v2 additive features
+
+    private func syncExtensionContext() {
+        let identityMatches = cacheHostID != nil && extensionInfoHostID == cacheHostID
+        extensions.setContext(.init(
+            hostID: cacheHostID, generation: connectionGeneration,
+            remoteHostID: identityMatches ? info?.hostId : nil,
+            online: state.isOnline && identityMatches,
+            inventorySupported: identityMatches && info?.capabilities?.value(at: ["extensionInventory"])?.boolValue == true,
+            sessionSupported: identityMatches && info?.capabilities?.value(at: ["sessionExtensions"])?.boolValue == true
+        ))
+    }
+
+    func refreshExtensionInventory() async {
+        syncExtensionContext()
+#if DEBUG
+        if usesUITestFixture, let inventory = fixtureExtensionInventory {
+            await extensions.refreshInventory {
+                if fixtureExtensionReadFailure { throw CancellationError() }
+                return inventory
+            }
+            return
+        }
+#endif
+        guard let client else { return }
+        await extensions.refreshInventory {
+            try await client.v2Request(method: RACPV2Method.extensionList.rawValue, params: .object([:]))
+        }
+    }
+
+    func refreshSessionExtensions(_ sessionID: String) async {
+        syncExtensionContext()
+#if DEBUG
+        if usesUITestFixture, let result = fixtureSessionExtensions[sessionID] {
+            await extensions.refreshSession(sessionID) {
+                if fixtureExtensionReadFailure { throw CancellationError() }
+                return result
+            }
+            return
+        }
+#endif
+        guard let client else { return }
+        await extensions.refreshSession(sessionID) {
+            try await client.v2Request(method: RACPV2Method.sessionExtensions.rawValue,
+                                      params: .object(["sessionId": .string(sessionID)]))
+        }
+    }
 
     private struct AdaptorV2SkillList: Decodable {
         var skills: [RACPV2Skill]
@@ -1649,10 +1789,18 @@ final class ConnectionModel: ObservableObject {
                 ])
             ])
         )
+        PILog.info(
+            "Model",
+            "provider/create(mirror) provider=\(String(result.provider.id.prefix(8))) key=present"
+        )
         return result.provider
     }
 
-    /// 完整替换已配置 Provider 的模型列表；密钥缺省时由 PI-adaptor 保留原密钥。
+    /// 完整替换已配置 Provider 的模型列表。
+    ///
+    /// 密钥语义：缺省表示「本次不改」，请求里省略 `apiKey`；服务器不落盘任何密钥，
+    /// 发送时由 `turn/start` 另带本机 Keychain 明文。客户端只在用户确实改过密钥
+    /// 时把新值随本次请求上传（服务器仅校验后丢弃），不把它当作长期保存。
     func updateAdaptorProvider(
         id: String,
         input: ProviderUpdateInput
@@ -1665,6 +1813,7 @@ final class ConnectionModel: ObservableObject {
             guard composition.isValid else {
                 throw ProviderImportValidationFailure(issues: composition.issues)
             }
+            logProviderUpdate(id: id, composition: composition)
             let updated = RACPV2Provider.fixtureForUpdate(
                 existing: existing, input: composition.input
             )
@@ -1683,6 +1832,7 @@ final class ConnectionModel: ObservableObject {
         guard composition.isValid else {
             throw ProviderImportValidationFailure(issues: composition.issues)
         }
+        logProviderUpdate(id: id, composition: composition)
         let result: AdaptorV2ProviderEnvelope
         do {
             result = try await client.v2Request(
@@ -1700,6 +1850,17 @@ final class ConnectionModel: ObservableObject {
             throw Self.v2Error(from: error)
         }
         return result.provider
+    }
+
+    /// 只记 `apiKey` 是「省略」还是「本次替换」，不记明文：用于回答
+    /// 「provider 配置上传了，key 是否同步上传」这类排查，且满足日志不落密钥。
+    private func logProviderUpdate(id: String, composition: ProviderUpdateComposition) {
+        PILog.info(
+            "Model",
+            "provider/update id=\(String(id.prefix(8)))"
+                + " apiKey=\(composition.input.apiKey == nil ? "unchanged(omitted)" : "replacement(uploaded)")"
+                + " models=\(composition.input.models.count)"
+        )
     }
 
     /// 保留旧“编辑首项模型 ID”的辅助入口；主模型服务使用完整列表更新。
@@ -1863,11 +2024,17 @@ final class ConnectionModel: ObservableObject {
                 confirmer: promptBroker,
                 timeout: 15
             )
-            let result = try await transport.exec(HostPortResolver.probeCommand, timeout: 15)
-            await transport.close()
-            if let port = HostPortResolver.resolve(stdout: result.stdoutText) {
-                onResolvedHostPort?(record.id, port)
-                return port
+            do {
+                let result = try await transport.exec(HostPortResolver.probeCommand, timeout: 15)
+                await transport.close()
+                if let port = HostPortResolver.resolve(stdout: result.stdoutText) {
+                    onResolvedHostPort?(record.id, port)
+                    return port
+                }
+            } catch {
+                // exec 失败也必须关闭已建立的 SSH 连接，否则反复探测会累积通道。
+                await transport.close()
+                return nil
             }
         } catch {
             return nil
@@ -1935,22 +2102,38 @@ final class ConnectionModel: ObservableObject {
     ///
     /// 前提是 Keychain 里已有凭证与设备令牌；缺任何一项都直接给出原因，不假装在线。
     func connect(record: HostRecord) async {
+        // 日志：连接开始只落 host UUID 前 8 位与 hostPort，不落用户名/密码/私钥/令牌。
+        let hostLabel = record.id.uuidString.prefix(8)
+        let logStartedAt = Date()
+        PILog.info(
+            "Connection",
+            "connect start host=\(hostLabel) hostPort=\(record.hostPort.map { String($0) } ?? "-")"
+        )
         connectionIntentGeneration &+= 1
         let intent = connectionIntentGeneration
         await disconnectCurrent(expectedIntent: intent)
         guard intent == connectionIntentGeneration,
               cacheHostID == record.id
-        else { return }
+        else {
+            PILog.debug(
+                "Connection",
+                "connect cancelled host=\(hostLabel) elapsedMs=\(Int(Date().timeIntervalSince(logStartedAt) * 1000))"
+            )
+            return
+        }
         if usesUITestFixture {
+            PILog.debug("Connection", "connect fixture host=\(hostLabel)")
             applyFixtureCatalog(fixtureCatalogs[record.id])
             return
         }
         guard record.pairedAt != nil else {
+            PILog.warn("Connection", "connect failed host=\(hostLabel) category=notPaired")
             state = .offline(reason: "本机记录尚未配对：请先完成 PI-adaptor 配对")
             return
         }
         let account = KeychainStore.account(username: record.username, host: record.host, port: record.port)
         guard let token = KeychainStore.loadDeviceToken(hostID: record.id) else {
+            PILog.warn("Connection", "connect failed host=\(hostLabel) category=missingDeviceToken")
             state = .offline(reason: "本机没有设备令牌：请到服务器页用一次性令牌完成配对")
             return
         }
@@ -1964,6 +2147,7 @@ final class ConnectionModel: ObservableObject {
                   pin.hostId == adaptorHostId,
                   token.hasPrefix("pdt2.")
             else {
+                PILog.warn("Connection", "connect failed host=\(hostLabel) category=missingDirectConfig")
                 state = .offline(reason: "direct 配置缺少已授权 pin、endpoint、hostId 或 pdt2，不能直连")
                 return
             }
@@ -1976,6 +2160,7 @@ final class ConnectionModel: ObservableObject {
 
         let credential = KeychainStore.loadCredential(account: account)
         if preference == .sshOnly, credential == nil {
+            PILog.warn("Connection", "connect failed host=\(hostLabel) category=missingCredential")
             state = .offline(reason: "本机没有保存这台服务器的凭证：请先在服务器页「保存并测试连接」")
             return
         }
@@ -1983,6 +2168,7 @@ final class ConnectionModel: ObservableObject {
         var hostPort = record.hostPort
         if preference == .sshOnly {
             guard let credential else {
+                PILog.warn("Connection", "connect failed host=\(hostLabel) category=missingCredential")
                 state = .offline(reason: "本机没有保存这台服务器的凭证")
                 return
             }
@@ -1993,11 +2179,18 @@ final class ConnectionModel: ObservableObject {
                 pinned: pinned
             )
             guard hostPort != nil else {
+                PILog.warn("Connection", "connect failed host=\(hostLabel) category=hostPortUnresolved")
                 state = .offline(reason: "无法确定 PI-adaptor 端口：SSH 探测失败且未记录端口")
                 return
             }
         }
-        guard intent == connectionIntentGeneration, cacheHostID == record.id else { return }
+        guard intent == connectionIntentGeneration, cacheHostID == record.id else {
+            PILog.debug(
+                "Connection",
+                "connect cancelled host=\(hostLabel) elapsedMs=\(Int(Date().timeIntervalSince(logStartedAt) * 1000))"
+            )
+            return
+        }
         let (operationID, promptBroker) = makeHostKeyBroker(
             account: account,
             address: record.address
@@ -2020,6 +2213,8 @@ final class ConnectionModel: ObservableObject {
             connectionPreference: preference,
             direct: directConfiguration
         )
+        // 日志计时在真正创建客户端前开始，供 apply 里首次 online/offline 计算耗时。
+        connectLogStartedAt = logStartedAt
         let newClient = RACPClient(configuration: configuration, confirmer: promptBroker)
         client = newClient
         connectionGeneration &+= 1
@@ -2029,11 +2224,18 @@ final class ConnectionModel: ObservableObject {
         session.bind(client: newClient, online: false)
         let stream = await newClient.start()
         guard self.client === newClient, connectionGeneration == generation else {
+            connectLogStartedAt = nil
+            PILog.debug(
+                "Connection",
+                "connect cancelled host=\(hostLabel) elapsedMs=\(Int(Date().timeIntervalSince(logStartedAt) * 1000))"
+            )
             releaseHostKeyBroker(operationID)
             _ = await newClient.stopBestEffort(timeout: 1)
             return
         }
         updateTask = Task { [weak self] in
+            await newClient.enableSessionChangeCoalescing()
+            guard !Task.isCancelled else { return }
             for await update in stream {
                 await self?.apply(update, client: newClient, generation: generation)
             }
@@ -2047,11 +2249,17 @@ final class ConnectionModel: ObservableObject {
                 self.connectionStatus = next
             }
         }
+        PILog.debug(
+            "Connection",
+            "connect setup done host=\(hostLabel) elapsedMs=\(Int(Date().timeIntervalSince(logStartedAt) * 1000))"
+        )
     }
 
     /// Starts a direct candidate while the old SSH client remains active and readable.
     /// Only a successful final C1 replay can atomically replace the active generation.
     func retryDirect(record: HostRecord) async {
+        // 日志：直连候选属于重连尝试，只记 debug。
+        PILog.debug("Connection", "direct retry start host=\(record.id.uuidString.prefix(8))")
         guard client != nil, state.isOnline, connectionStatus.activeRoute == .ssh,
               candidateClient == nil, cacheHostID == record.id,
               let token = KeychainStore.loadDeviceToken(hostID: record.id), token.hasPrefix("pdt2."),
@@ -2061,6 +2269,7 @@ final class ConnectionModel: ObservableObject {
               let pin = KeychainStore.loadDirectTLSTrustPin(hostID: record.id),
               pin.hostId == adaptorHostId
         else {
+            PILog.debug("Connection", "direct retry skipped host=\(record.id.uuidString.prefix(8)) reason=precondition")
             lastError = "direct candidate 缺少已验证 endpoint、pin、hostId 或活动 SSH 连接"
             return
         }
@@ -2201,6 +2410,8 @@ final class ConnectionModel: ObservableObject {
             connectionStatus = candidateStatus
             info = candidateInfo
             state = .online
+            // 日志：直连候选切换成功，属于重连尝试结果，只记 debug。
+            PILog.debug("Connection", "direct retry promoted host=\(record.id.uuidString.prefix(8))")
             connectionBrokerID = brokerID
 #if DEBUG
             if candidatePostPromotionDelayForTesting > 0 {
@@ -2220,6 +2431,8 @@ final class ConnectionModel: ObservableObject {
             else { throw ConnectionLifecycleError.connectionChanged }
             onDirectVerified?(record.id, endpoint, adaptorHostId)
             updateTask = Task { [weak self] in
+                await candidate.enableSessionChangeCoalescing()
+                guard !Task.isCancelled else { return }
                 for await update in stream {
                     await self?.apply(update, client: candidate, generation: generation)
                 }
@@ -2271,18 +2484,37 @@ final class ConnectionModel: ObservableObject {
     }
 
     func disconnect() async {
+        // 日志：主动断开的时间轴；只落 host UUID 前 8 位，不落凭证。
+        let startedAt = Date()
+        PILog.info("Connection", "disconnect start host=\(cacheHostID.map { String($0.uuidString.prefix(8)) } ?? "-")")
         connectionIntentGeneration &+= 1
         await disconnectCurrent(expectedIntent: connectionIntentGeneration)
+        PILog.info(
+            "Connection",
+            "disconnect end host=\(cacheHostID.map { String($0.uuidString.prefix(8)) } ?? "-") elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+        )
     }
 
     /// Only close the connection if the PI-adaptor that requested teardown is still active.
     /// A stale PI-adaptor action must never disconnect the connection installed by a newer switch.
     func disconnect(ifHostID expectedHostID: UUID) async {
-        guard cacheHostID == expectedHostID else { return }
+        guard cacheHostID == expectedHostID else {
+            PILog.debug(
+                "Connection",
+                "disconnect skipped host=\(expectedHostID.uuidString.prefix(8)) reason=hostChanged"
+            )
+            return
+        }
+        let startedAt = Date()
+        PILog.info("Connection", "disconnect start host=\(expectedHostID.uuidString.prefix(8)) reason=adaptorRequest")
         connectionIntentGeneration &+= 1
         await disconnectCurrent(
             expectedIntent: connectionIntentGeneration,
             expectedHostID: expectedHostID
+        )
+        PILog.info(
+            "Connection",
+            "disconnect end host=\(expectedHostID.uuidString.prefix(8)) elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
         )
     }
 
@@ -2296,8 +2528,20 @@ final class ConnectionModel: ObservableObject {
               expectedHostID == nil || cacheHostID == expectedHostID
         else { return }
 
-        // Invalidate synchronously before any await: a delayed cache flush can never
-        // leave a candidate promoted into an already disconnected UI generation.
+        // 日志：断开后没有待完成的 connect 计时。
+        connectLogStartedAt = nil
+
+        // The caller already fenced connection intent, so candidates cannot promote
+        // while the last valid draft/session writes drain under the outgoing lease.
+        let needsOutgoingFlush = client != nil || candidateClient != nil || hasPendingCacheMutations
+        if needsOutgoingFlush {
+            await flushPendingCacheWrites()
+        } else {
+            PILog.debug("Cache", "disconnect flush skipped reason=cleanStart")
+        }
+        guard expectedIntent == connectionIntentGeneration,
+              connectionGeneration == generation,
+              expectedHostID == nil || cacheHostID == expectedHostID else { return }
         connectionGeneration &+= 1
         let invalidatedGeneration = connectionGeneration
         cacheClientID = UUID()
@@ -2335,7 +2579,7 @@ final class ConnectionModel: ObservableObject {
             try? await Task.sleep(for: .milliseconds(Int(disconnectFlushDelayForTesting * 1000)))
         }
 #endif
-        await flushPendingCacheWrites()
+        if needsOutgoingFlush || hasPendingCacheMutations { await flushPendingCacheWrites() }
         if expectedIntent == connectionIntentGeneration,
            connectionGeneration == invalidatedGeneration {
             projects = []
@@ -2460,12 +2704,24 @@ final class ConnectionModel: ObservableObject {
     }
 
     /// `session/create`：在项目中新建会话（AC-08.2）。
-    func createSession(title: String?, projectId: String?) async throws -> RACPSessionSummary {
+    ///
+    /// 带上本机默认 provider/model 后，会话创建即处于可发送的模型绑定状态；
+    /// 没有默认模型时保持原行为（绑定留空，由用户在会话配置里选择）。
+    func createSession(
+        title: String?,
+        projectId: String?,
+        providerId: String? = nil,
+        modelId: String? = nil,
+        thinkingLevel: String? = nil
+    ) async throws -> RACPSessionSummary {
         guard let client, state.isOnline else { throw RACPClientError.notConnected }
         let connection = connectionGeneration
         let created = try await client.createSession(
             title: title,
             projectId: projectId,
+            providerId: providerId,
+            modelId: modelId,
+            thinkingLevel: thinkingLevel.flatMap(RACPThinkingLevel.init(rawValue:)),
             permissionMode: nil
         )
         guard self.client === client, connectionGeneration == connection else {
@@ -2474,14 +2730,133 @@ final class ConnectionModel: ObservableObject {
         return created
     }
 
+    /// 在线归档或恢复会话；只有 Host 回执与当前连接代际均匹配才提交目录。
+    func archiveSession(
+        sessionId: String,
+        archived: Bool
+    ) async throws -> RACPSessionSummary {
+#if DEBUG
+        if usesUITestFixture {
+            guard state.isOnline else { throw RACPClientError.notConnected }
+            guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else {
+                throw RACPClientError.protocolMismatch("归档目标不存在")
+            }
+            invalidateCatalogLoads()
+            var updated = sessions[index]
+            updated.status = archived ? "archived" : "idle"
+            sessions[index] = updated
+            return updated
+        }
+#endif
+        guard let client, state.isOnline else { throw RACPClientError.notConnected }
+        let connection = connectionGeneration
+        let hostID = cacheHostID
+        invalidateCatalogLoads()
+        let result = try await client.archiveSession(sessionId: sessionId, archived: archived)
+        guard self.client === client,
+              connectionGeneration == connection,
+              cacheHostID == hostID,
+              result.session.id == sessionId
+        else {
+            if result.session.id != sessionId {
+                throw RACPClientError.protocolMismatch("归档回执目标不一致")
+            }
+            throw ConnectionLifecycleError.connectionChanged
+        }
+        if let index = sessions.firstIndex(where: { $0.id == sessionId }) {
+            sessions[index] = result.session
+        } else {
+            sessions.append(result.session)
+        }
+        return result.session
+    }
+
+    /// 删除会话并提交目录与缓存；本机 binding 由 AppModel 在此返回后收尾。
+    func deleteSession(
+        sessionId: String,
+        confirmSessionId: String
+    ) async throws -> RACPV2SessionDeleteResult {
+#if DEBUG
+        if usesUITestFixture {
+            guard state.isOnline else { throw RACPClientError.notConnected }
+            guard sessionId == confirmSessionId else {
+                throw RACPClientError.protocolMismatch("删除确认目标不一致")
+            }
+            guard sessions.contains(where: { $0.id == sessionId }) else {
+                throw RACPClientError.protocolMismatch("删除目标不存在")
+            }
+            invalidateCatalogLoads()
+            removeCachedSessions([sessionId])
+            sessions.removeAll { $0.id == sessionId }
+            // 夹具只证明 UI 删除成功链路；真实 Host 行为由 Host/集成测试覆盖。
+            let payload = "{\"deleted\":true,\"sessionId\":\"\(sessionId)\"}"
+            return try JSONDecoder().decode(RACPV2SessionDeleteResult.self, from: Data(payload.utf8))
+        }
+#endif
+        guard let client, state.isOnline else { throw RACPClientError.notConnected }
+        let connection = connectionGeneration
+        let hostID = cacheHostID
+        PILog.debug(
+            "Session",
+            "delete request session=\(sessionId.prefix(8)) host=\(hostID.map { String($0.uuidString.prefix(8)) } ?? "-")"
+        )
+        invalidateCatalogLoads()
+        let result = try await client.deleteSession(
+            sessionId: sessionId,
+            confirmSessionId: confirmSessionId
+        )
+        guard self.client === client,
+              connectionGeneration == connection,
+              cacheHostID == hostID
+        else { throw ConnectionLifecycleError.connectionChanged }
+        guard result.deleted,
+              result.sessionId == sessionId,
+              result.sessionId == confirmSessionId
+        else { throw RACPClientError.protocolMismatch("删除回执未确认目标") }
+        PILog.debug("Session", "delete receipt ok session=\(sessionId.prefix(8))")
+        // Host 明确成功是唯一成功前提。缓存清理只是本机收尾：即使 flush 失败，
+        // 也不能把已经成功的服务器删除改报为失败，否则会话会留在界面且重试只会得到 NOT_FOUND。
+        // 使用请求开始时捕获的 hostID，避免等待期间切换 Host 后按新 cacheHostID
+        // 误清另一台 Host 的同 ID 会话缓存。
+        removeCachedSessions([sessionId], hostID: hostID)
+        let flushed = await cacheStore.flushResult()
+        if case .failed(let error) = flushed.outcome {
+            PILog.warn(
+                "Session",
+                "delete cache cleanup failed session=\(sessionId.prefix(8)) error=\(error.localizedDescription); host delete already succeeded"
+            )
+        }
+        // Host 已明确成功。连接在这之后变化时，不再把已验证的服务器删除改报为失败；
+        // 只跳过当前目录清理（避免误删切换后 Host 的同 ID 会话），本机 binding 收尾
+        // 仍由 SidebarView 用捕获的旧 hostID 完成。
+        if self.client === client,
+           connectionGeneration == connection,
+           cacheHostID == hostID {
+            sessions.removeAll { $0.id == sessionId }
+        } else {
+            PILog.warn(
+                "Session",
+                "delete local catalog commit skipped session=\(sessionId.prefix(8)) reason=connectionChanged"
+            )
+        }
+        return result
+    }
+
     func respondHostKey(_ confirmation: HostKeyConfirmation, operationID: UUID) {
         guard let prompt = hostKeyPrompt,
               prompt.operationID == operationID,
               let broker = brokers[prompt.operationID]
         else { return }
         if confirmation == .trust, prompt.status == .firstUse {
-            // 首次固定：写 Keychain 并记一条本地审计事件（AC-02.3 的固定动作）。
-            _ = KeychainStore.saveHostKey(prompt.key, account: prompt.account)
+            // 首次固定：必须先成功写入 Keychain，才能记录 pinned 审计并放行本次
+            // 握手。写入失败却继续 trust 会让用户误以为指纹已固定，下次仍按首次
+            // 连接处理，也失去 TOFU 的实际保护。
+            guard KeychainStore.saveHostKey(prompt.key, account: prompt.account) else {
+                hostKeyPrompt = nil
+                lastError = "无法保存主机指纹，已拒绝本次连接；请检查设备锁与签名后重试"
+                broker.respond(.reject)
+                return
+            }
             HostKeyAuditLog.append(
                 HostKeyAuditEvent(
                     kind: .pinned,
@@ -2535,13 +2910,47 @@ final class ConnectionModel: ObservableObject {
             let sanitizedState = Self.sanitizedForDisplay(newState)
             state = sanitizedState
             session.setOnline(sanitizedState.isOnline)
+            // 日志：连接时间轴。成功/失败带耗时与稳定分类；重连尝试只记 debug，避免刷屏。
+            switch sanitizedState {
+            case .online:
+                if let startedAt = connectLogStartedAt {
+                    connectLogStartedAt = nil
+                    PILog.info(
+                        "Connection",
+                        "connect ok host=\(cacheHostID.map { String($0.uuidString.prefix(8)) } ?? "-") route=\(connectionStatus.activeRoute?.rawValue ?? "-") elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+                    )
+                }
+            case .offline(let reason):
+                let hostLabel = cacheHostID.map { String($0.uuidString.prefix(8)) } ?? "-"
+                if let startedAt = connectLogStartedAt {
+                    connectLogStartedAt = nil
+                    PILog.warn(
+                        "Connection",
+                        "connect failed host=\(hostLabel) category=\(ConnectionFailureClassifier.classify(message: reason).rawValue) elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+                    )
+                } else {
+                    PILog.warn(
+                        "Connection",
+                        "tunnel offline host=\(hostLabel) category=\(ConnectionFailureClassifier.classify(message: reason).rawValue)"
+                    )
+                }
+            case .reconnecting(let attempt, let delay, let reason):
+                PILog.debug(
+                    "Connection",
+                    "reconnect attempt=\(attempt) delayMs=\(Int(delay * 1000)) host=\(cacheHostID.map { String($0.uuidString.prefix(8)) } ?? "-") category=\(ConnectionFailureClassifier.classify(message: reason).rawValue)"
+                )
+            default:
+                break
+            }
             if sanitizedState.isOnline {
                 // 新连接已经完成握手 + 身份验证：上一轮退避期间留下的「离线/通道已关闭」
                 // 不能再挂在「最近一次错误」里，否则界面显示在线却同时报离线，用户会以为
                 // 连接建立后立刻断开。真正的失败会在后续 refresh 或下一次状态变化时重新写入。
                 lastError = nil
                 await refreshRemote()
-                await session.refreshView()
+                await session.refreshView(source: "connectionOnline")
+                await refreshExtensionInventory()
+                if let id = session.attachedSessionId { await refreshSessionExtensions(id) }
                 scheduleCacheSessionState()
             } else {
                 cancelHostCatalogRefresh()
@@ -2557,10 +2966,27 @@ final class ConnectionModel: ObservableObject {
         case .hostChanged:
             scheduleHostCatalogRefresh(client: client, generation: generation)
         case .sessionChanged:
-            await session.refreshView()
+            guard let receipt = await client.beginSessionChangeConsumption() else { return }
+            await session.refreshView(source: "sessionEvent")
             scheduleCacheSessionState()
-        case .event:
-            break
+            let snapshotGeneration = await client.sessionSnapshotGeneration()
+            if extensionSnapshotGeneration != snapshotGeneration {
+                extensionSnapshotGeneration = snapshotGeneration
+                if let id = session.attachedSessionId { await refreshSessionExtensions(id) }
+            }
+            await client.finishSessionChangeConsumption(receipt)
+        case .event(let event):
+            if event.kind == "session.extensions.updated" {
+                let snapshot = await Task.detached { event.extensionSnapshot }.value
+                guard self.client === client, connectionGeneration == generation else { return }
+                if let snapshot, snapshot.sessionId == session.attachedSessionId,
+                   extensions.observe(snapshot, epoch: event.epoch, sequence: event.durableSequence) {
+                    await refreshSessionExtensions(snapshot.sessionId)
+                }
+            } else if event.kind == "turn.completed" || event.kind == "turn.failed"
+                        || event.kind == "turn.interrupted" || event.kind == "turn.canceled" {
+                if let id = session.attachedSessionId { await refreshSessionExtensions(id) }
+            }
         case .error(let code, _):
             lastError = ConnectionFailureClassifier.userMessage(forRACPCode: code)
         }
@@ -2733,12 +3159,12 @@ final class ConnectionModel: ObservableObject {
 
     /// 会话的完整只读缓存：items、cursor、审批卡与草稿。
     func cachedSession(sessionId: String) -> OfflineCachedSession? {
-        cacheStore.loadSnapshot().cachedSession(hostID: cacheHostID, sessionID: sessionId)
+        cacheStore.cachedSession(hostID: cacheHostID, sessionID: sessionId)
     }
 
     /// 缓存里出现过的会话 id（新→旧），离线时可以据此进入只读历史。
     func cachedSessionIds() -> [String] {
-        cacheStore.loadSnapshot().sessionIDs(hostID: cacheHostID)
+        cacheStore.sessionIDs(hostID: cacheHostID)
     }
 
     /// Drop cached sessions the authoritative catalog no longer lists for the
@@ -2746,26 +3172,25 @@ final class ConnectionModel: ObservableObject {
     /// or filtered list would purge sessions that still exist.
     private func reconcileOfflineCache(with remoteSessions: [RACPSessionSummary]) {
         guard let hostID = cacheHostID else { return }
-        let authoritative = Set(remoteSessions.map(\.id))
-        let stale = cacheStore.loadSnapshot()
-            .sessionIDs(hostID: hostID)
-            .filter { !authoritative.contains($0) }
-        removeCachedSessions(stale)
+        cacheStore.reconcile(hostID: hostID, authoritative: Set(remoteSessions.map(\.id)))
     }
 
-    func removeCachedSessions(_ sessionIDs: [String]) {
+    func removeCachedSessions(_ sessionIDs: [String], hostID explicitHostID: UUID? = nil) {
         guard !sessionIDs.isEmpty else { return }
-        let removed = Set(sessionIDs)
-        guard let hostID = cacheHostID else { return }
-        var snapshot = cacheStore.loadSnapshot()
-        for sessionID in removed {
-            snapshot.removeSessionAndDraft(hostID: hostID, sessionID: sessionID)
+        guard let hostID = explicitHostID ?? cacheHostID else {
+            PILog.warn(
+                "Session",
+                "cache removal skipped sessionIDs=\(sessionIDs.map { String($0.prefix(8)) }.joined(separator: ",")) reason=noCacheHost"
+            )
+            return
         }
-        cacheStore.save(snapshot)
+        cacheStore.removeSessions(hostID: hostID, sessionIDs: Set(sessionIDs))
+        extensions.removeSessions(Set(sessionIDs), hostID: hostID)
     }
 
     func removeCachedHost(_ hostID: UUID) {
         cacheStore.removeHost(hostID)
+        extensions.removeHost(hostID)
     }
 
     /// 把权威会话快照写进离线缓存：items、cursor、pending approvals 一起替换；
@@ -2783,132 +3208,26 @@ final class ConnectionModel: ObservableObject {
             hostID: hostID,
             sessionID: sessionID
         )
+        guard let permit = cacheStore.permit(for: lease, draft: false) else { return }
         let view = await client.sessionView()
-        guard self.client === client,
+        guard !Task.isCancelled,
+              self.client === client,
               connectionGeneration == generation,
               cacheClientID == clientID,
               isCurrentCacheWrite(lease),
               view.sessionId == sessionID
-        else { return }
+        else {
+            cacheStore.abandon(permit)
+            return
+        }
 
-        let now = Date()
-        let existingSnapshot = cacheStore.loadSnapshot()
-        let existingSession = existingSnapshot.cachedSession(
-            hostID: hostID,
-            sessionID: sessionID
+        let input = SessionCacheStore.SessionInput(
+            view: view, summary: session.attachedSummary,
+            mode: session.sessionMode.rawValue, permission: session.permissionMode.rawValue,
+            modelID: session.selectedModelId, providerID: session.selectedProviderId,
+            hostID: hostID, sessionID: sessionID
         )
-        // 视图是权威快照（`hasMoreHistory == false` 表示它已包含完整历史）时，
-        // 不能用「缓存旧条目 ∪ 新视图」合并：快照重建后已从权威状态消失的条目
-        // 会被旧缓存重新带回来。只有在分页未取完（可能还有更老的历史）时才保留
-        // 合并语义。
-        let existingEntries = view.hasMoreHistory ? (existingSession?.entries ?? []) : []
-        let existingDates = Dictionary(
-            existingEntries.map { ($0.id, $0.createdAt) },
-            uniquingKeysWith: { max($0, $1) }
-        )
-        var entriesWithOriginalDate: [(entry: SessionCacheStore.Entry, hasOriginalDate: Bool)] = []
-        for item in view.items {
-            let originalDate = Self.cacheCreatedAt(from: item)
-            let entry = SessionCacheStore.Entry(
-                id: item.id,
-                sessionId: sessionID,
-                hostID: hostID,
-                text: item.text ?? "",
-                createdAt: originalDate ?? existingDates[item.id] ?? now,
-                kind: item.kind,
-                role: item.role,
-                toolName: item.toolName,
-                status: item.status,
-                epoch: view.cursor?.epoch,
-                sequence: item.payload.value(at: ["sequence"])?.intValue
-                    ?? view.cursor?.sequence
-            )
-            entriesWithOriginalDate.append((entry, originalDate != nil))
-        }
-        let entries = OfflineSessionCachePolicy.merged(
-            existingEntries,
-            with: entriesWithOriginalDate.map(\.entry)
-        )
-        let keysWithOriginalDates = Set(
-            entriesWithOriginalDate
-                .filter { $0.hasOriginalDate }
-                .map {
-                    OfflineSessionCachePolicy.itemKey(
-                        hostID: hostID,
-                        sessionID: sessionID,
-                        itemID: $0.entry.id
-                    )
-                }
-        )
-        // 旧版本曾把“缓存写入时间”当消息时间；一旦服务端给出原始时间，必须用原时间替换它，
-        // 不能被 merge 的“较新时间优先”规则挡住。
-        let retained = entries.filter {
-            let key = OfflineSessionCachePolicy.itemKey(
-                hostID: $0.hostID,
-                sessionID: $0.sessionId,
-                itemID: $0.id
-            )
-            return !keysWithOriginalDates.contains(key)
-        }
-        let newEntries = OfflineSessionCachePolicy.merged(
-            retained,
-            with: entriesWithOriginalDate.map(\.entry)
-        )
-
-        var next = existingSnapshot
-        if let draft = existingSession?.draft {
-            next.removeSession(hostID: hostID, sessionID: sessionID)
-            next.drafts.removeAll {
-                $0.hostID == hostID && $0.sessionId == sessionID
-            }
-            next.drafts.append(draft)
-        } else {
-            next.removeSession(hostID: hostID, sessionID: sessionID)
-        }
-        next.entries.append(contentsOf: newEntries)
-        if let summary = session.attachedSummary {
-            next.sessions.append(
-                SessionCacheStore.Session(
-                    hostID: hostID,
-                    id: sessionID,
-                    title: summary.title,
-                    projectID: summary.projectId,
-                    mode: session.sessionMode.rawValue,
-                    permissionMode: session.permissionMode.rawValue,
-                    modelID: session.selectedModelId,
-                    providerID: session.selectedProviderId,
-                    epoch: view.cursor?.epoch,
-                    sequence: view.cursor?.sequence,
-                    updatedAt: now
-                )
-            )
-        }
-        if let cursor = view.cursor {
-            next.cursors.append(
-                SessionCacheStore.Cursor(
-                    hostID: hostID,
-                    sessionId: sessionID,
-                    epoch: cursor.epoch,
-                    sequence: cursor.sequence,
-                    updatedAt: now
-                )
-            )
-        }
-        next.approvals.append(contentsOf: view.pendingApprovals.map { card in
-            SessionCacheStore.Approval(
-                id: card.id,
-                sessionId: sessionID,
-                hostID: hostID,
-                payload: CacheFieldPolicy.redactedForCache(card.payload),
-                revision: card.revision,
-                status: card.status ?? "pending",
-                decision: card.payload.value(at: ["decision"])?.stringValue,
-                createdAt: Self.cacheCreatedAt(from: card.payload) ?? now
-            )
-        })
-
-        guard isCurrentCacheWrite(lease) else { return }
-        cacheStore.save(next)
+        _ = await cacheStore.saveSession(input, permit: permit)
     }
 
     /// Coalesce streaming/history and keystroke cache writes so disk I/O is not
@@ -2918,10 +3237,11 @@ final class ConnectionModel: ObservableObject {
         guard sessionCacheWriteTask == nil else { return }
         sessionCacheWriteTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(for: .milliseconds(250))
+                try await Task.sleep(for: .milliseconds(500))
             } catch {
                 return
             }
+            guard !Task.isCancelled else { return }
             guard let self else { return }
             self.sessionCacheWritePending = false
             await self.cacheSessionState()
@@ -2941,19 +3261,26 @@ final class ConnectionModel: ObservableObject {
         guard let lease = currentCacheWriteLease(sessionID: sessionID),
               isCurrentDraftWrite(lease)
         else { return }
+        if let previous = pendingDraftWrite, previous.lease != lease {
+            draftWriteTask?.cancel()
+            draftWriteTask = nil
+            flushPendingDraftWrite()
+        }
         pendingDraftWrite = PendingDraftWrite(
             lease: lease,
             sessionID: sessionID,
             text: text,
             idempotencyKey: idempotencyKey
         )
-        guard draftWriteTask == nil else { return }
+        draftWriteTask?.cancel()
+        let delay = draftWriteDebounce.delay()
         draftWriteTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(for: .milliseconds(250))
+                try await Task.sleep(for: delay)
             } catch {
                 return
             }
+            guard !Task.isCancelled else { return }
             guard let self else { return }
             self.flushPendingDraftWrite()
             self.draftWriteTask = nil
@@ -2961,46 +3288,60 @@ final class ConnectionModel: ObservableObject {
     }
 
     private func flushPendingDraftWrite() {
+        draftWriteDebounce.reset()
         guard let pending = pendingDraftWrite else { return }
         pendingDraftWrite = nil
         guard isCurrentDraftWrite(pending.lease) else { return }
-        var snapshot = cacheStore.loadSnapshot()
-        snapshot.drafts.removeAll {
-            $0.hostID == pending.lease.hostID && $0.sessionId == pending.sessionID
-        }
-        if !pending.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            guard let idempotencyKey = pending.idempotencyKey else { return }
-            snapshot.drafts.append(
-                SessionCacheStore.Draft(
-                    hostID: pending.lease.hostID,
-                    sessionId: pending.sessionID,
-                    text: pending.text,
-                    idempotencyKey: idempotencyKey,
-                    updatedAt: Date()
-                )
-            )
-        }
-        cacheStore.save(snapshot)
+        guard let permit = cacheStore.permit(for: pending.lease, draft: true) else { return }
+        cacheStore.saveDraft(sessionID: pending.sessionID, hostID: pending.lease.hostID,
+                             text: pending.text, idempotencyKey: pending.idempotencyKey, permit: permit)
+    }
+
+    /// Result of one cache flush barrier, kept together with the revision so a
+    /// stale failure cannot be applied after a newer publish.
+    private struct CacheFlushReport: Sendable {
+        let outcome: SessionCacheWorker.Outcome
+        let statusRevision: UInt64
+    }
+
+    private var hasPendingCacheMutations: Bool {
+        pendingDraftWrite != nil || draftWriteTask != nil
+            || sessionCacheWritePending || sessionCacheWriteTask != nil
+            || cacheFlushTask != nil || cacheStore.hasPendingMutations
     }
 
     /// Flush both coalesced caches before backgrounding, disconnecting, or switching sessions.
     func flushPendingCacheWrites() async {
+#if DEBUG
+        beforeCacheFlushHookForTesting?()
+#endif
         cacheFlushGeneration &+= 1
         let generation = cacheFlushGeneration
         let previous = cacheFlushTask
-        let task = Task { @MainActor [weak self] in
+        let task: Task<CacheFlushReport?, Never> = Task { @MainActor [weak self] in
             await previous?.value
-            guard let self else { return }
-            await self.performCacheFlush()
+            guard let self else { return nil }
+            return await self.performCacheFlush()
         }
         cacheFlushTask = task
-        await task.value
-        if cacheFlushGeneration == generation {
+        let report = await task.value
+        let isCurrent = cacheFlushGeneration == generation
+        if isCurrent {
             cacheFlushTask = nil
         }
+        // A cancelled/expired background lease may still finish its already
+        // queued IO, but it must not publish the older result over newer state.
+        guard isCurrent, !Task.isCancelled, let report else { return }
+#if DEBUG
+        if let afterCacheFlushBarrierHookForTesting {
+            await afterCacheFlushBarrierHookForTesting()
+        }
+#endif
+        guard cacheFlushGeneration == generation, !Task.isCancelled else { return }
+        applyCacheFlushReport(report)
     }
 
-    private func performCacheFlush() async {
+    private func performCacheFlush() async -> CacheFlushReport {
         draftWriteTask?.cancel()
         draftWriteTask = nil
         flushPendingDraftWrite()
@@ -3012,6 +3353,48 @@ final class ConnectionModel: ObservableObject {
         if hadPendingSessionWrite {
             await cacheSessionState()
         }
+        let flushed = await cacheStore.flushResult()
+        return CacheFlushReport(outcome: flushed.outcome, statusRevision: flushed.statusRevision)
+    }
+
+    private func applyCacheFlushReport(_ report: CacheFlushReport) {
+        applyCacheStatus(cacheStore.status)
+        // Only fall back to the barrier failure when no newer publish (a real
+        // recovery or a newer failure) has already superseded its revision.
+        guard case .failed(let error) = report.outcome,
+              cacheStatusRevision <= report.statusRevision,
+              offlineCacheLoadError == nil
+        else { return }
+        offlineCacheLoadError = error.localizedDescription
+    }
+
+    func waitForOfflineCacheReady() async {
+        await cacheStore.waitUntilReady()
+        guard !Task.isCancelled else { return }
+        applyCacheStatus(cacheStore.status)
+    }
+
+    private func applyCacheStatus(_ status: SessionCacheWorker.Status) {
+        guard status.revision > cacheStatusRevision else { return }
+        cacheStatusRevision = max(cacheStatusRevision, status.revision)
+        if offlineCacheReady != status.ready { offlineCacheReady = status.ready }
+        if offlineCacheLoadError != status.error { offlineCacheLoadError = status.error }
+    }
+
+#if DEBUG
+    func applyCacheStatusForTesting(_ status: SessionCacheWorker.Status) {
+        applyCacheStatus(status)
+    }
+
+    func cacheLeaseForTesting(sessionID: String) -> OfflineSessionCacheWriteLease? {
+        currentCacheWriteLease(sessionID: sessionID)
+    }
+#endif
+
+    private func updateCacheContext() {
+        cacheStore.updateContext(clientID: cacheClientID, generation: connectionGeneration,
+                                 hostID: cacheHostID, sessionID: session.attachedSessionId, active: client != nil)
+        syncExtensionContext()
     }
 
     private func currentCacheWriteLease(
@@ -3045,38 +3428,7 @@ final class ConnectionModel: ObservableObject {
             )
     }
 
-    private static func cacheCreatedAt(from item: RACPItem) -> Date? {
-        cacheCreatedAt(from: item.payload)
-    }
 
-    private static func cacheCreatedAt(from payload: JSONValue) -> Date? {
-        for key in ["createdAt", "created_at"] {
-            guard let value = payload.value(at: [key]) else { continue }
-            switch value {
-            case .number(let raw):
-                return dateFromEpoch(raw)
-            case .string(let raw):
-                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let epoch = Double(trimmed), let date = dateFromEpoch(epoch) {
-                    return date
-                }
-                let fractional = ISO8601DateFormatter()
-                fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                if let date = fractional.date(from: trimmed) { return date }
-                return ISO8601DateFormatter().date(from: trimmed)
-            default:
-                continue
-            }
-        }
-        return nil
-    }
-
-    private static func dateFromEpoch(_ raw: Double) -> Date? {
-        guard raw.isFinite, raw > 0 else { return nil }
-        // 同时接受秒与毫秒时间戳；1e11 秒在现实中不会出现。
-        let seconds = raw >= 100_000_000_000 ? raw / 1_000 : raw
-        return Date(timeIntervalSince1970: seconds)
-    }
 }
 
 // MARK: - 指纹核对的挂起点
@@ -3188,8 +3540,8 @@ enum ConnectionErrorText {
         let kind: ConnectionFailureKind
         switch error {
         case .invalidPrivateKey:
-            return "认证失败（401）："
-                + ConnectionDiagnosticRedactor.redact(error.description)
+            // R6：错误 = 发生了什么 + 下一步；401 这类状态码对用户没有意义。
+            return "认证失败：私钥无法使用，检查私钥格式与口令后重试。"
         case .hostKeyUnreadable, .hostKeyRejected, .hostKeyAlgorithmUnsupported:
             kind = .hostKey
         case .authenticationFailed:
@@ -3205,8 +3557,19 @@ enum ConnectionErrorText {
                 code: "ssh.networkFailure",
                 message: detail
             )
+        case .outputLimitExceeded:
+            return "远端命令输出异常增大，已中止以保护设备内存。"
         }
         return kind.userMessage
+    }
+
+    /// 会话归档/删除优先展示 Host 的原始原因；本地错误仍走既有映射。
+    static func describeSessionAction(_ error: Error) -> String {
+        if case RACPClientError.server(_, let message) = error,
+           let message, !message.isEmpty {
+            return ConnectionDiagnosticRedactor.redact(message)
+        }
+        return describe(error)
     }
 
     private static func describeRACP(_ error: RACPClientError) -> String {
@@ -3228,9 +3591,10 @@ enum ConnectionErrorText {
     private static func describeV2(_ error: RACPV2Error) -> String {
         switch error {
         case .notConnected:
-            return "服务器未连接（PI-adaptor 隧道未建立）：请到设置页恢复连接后重试。"
+            return "服务器未连接：先到设置页恢复连接，再重试。"
         case .protocolViolation(let reason):
-            return "服务器协议异常：" + ConnectionDiagnosticRedactor.redact(reason)
+            return "服务器返回的内容无法解析，更新 PI-adaptor 后重试："
+                + ConnectionDiagnosticRedactor.redact(reason)
         case .server(let code, let message):
             if let message, !message.isEmpty {
                 return ConnectionDiagnosticRedactor.redact(message)

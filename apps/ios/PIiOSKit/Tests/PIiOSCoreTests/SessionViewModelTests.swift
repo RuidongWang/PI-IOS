@@ -181,6 +181,14 @@ final class SessionViewModelTests: XCTestCase {
             )
         )
         XCTAssertEqual(delta.item?.id, "msg_1")
+
+        // Actually apply the delta and assert it lands on the same canonical row
+        // with the accumulated text; merely decoding the frame proved nothing.
+        _ = model.applyEvents([delta])
+        XCTAssertEqual(model.items.count, 1)
+        let updated = try XCTUnwrap(model.items.first)
+        XCTAssertEqual(updated.id, "msg_1")
+        XCTAssertEqual(updated.text, "真实回复")
     }
 
     // MARK: - 快照整体替换（AC-14.2）
@@ -694,6 +702,93 @@ final class SessionViewModelTests: XCTestCase {
         )
         XCTAssertEqual(viewModel.expiredApprovalIds, Set(["ap_stale"]), "现存于快照的卡片不得再标过期")
         XCTAssertEqual(viewModel.expectedRevisionForApproval(id: "ap_a"), 7)
+    }
+
+    func testSnapshotMergesActiveItemsByIDWithoutLosingStreamingContent() {
+        let viewModel = SessionViewModel()
+        viewModel.applySnapshot(
+            RACPSnapshot(
+                cursor: RACPCursor(epoch: "ep_active", sequence: 1),
+                revision: 1,
+                items: [item("user", text: "task"), item("answer", text: "historical")],
+                activeItems: [
+                    item("answer", text: "partial"),
+                    item("tool-active", text: "running tool"),
+                ],
+                activeTurn: RACPTurnRef(id: "turn-active", status: "running")
+            ),
+            replayComplete: true
+        )
+
+        XCTAssertEqual(viewModel.items.map(\.id), ["user", "answer", "tool-active"])
+        XCTAssertEqual(viewModel.item(id: "answer")?.text, "partial")
+        XCTAssertEqual(viewModel.activeItems.map(\.id), ["answer", "tool-active"])
+
+        let outcome = viewModel.applyEvents([
+            RACPEvent(
+                sequence: 2,
+                epoch: "ep_active",
+                item: item("answer", text: "partial"),
+                payload: .object([
+                    "kind": .string("item.delta"),
+                    "payload": .object(["delta": .string(" continues")]),
+                ])
+            ),
+        ])
+        XCTAssertEqual(outcome, .applied(appended: 0, updated: 1, ignored: 0))
+        XCTAssertEqual(viewModel.items.map(\.id), ["user", "answer", "tool-active"])
+        XCTAssertEqual(viewModel.item(id: "answer")?.text, "partial continues")
+    }
+
+    func testSnapshotDeduplicatesActiveOnlyIDsAndKeepsTheirOriginalOrder() {
+        let viewModel = SessionViewModel()
+        viewModel.applySnapshot(
+            RACPSnapshot(
+                cursor: RACPCursor(epoch: "ep_active", sequence: 1),
+                revision: 1,
+                items: [item("history", text: "old")],
+                activeItems: [
+                    item("active-a", text: "first"),
+                    item("active-b", text: "middle"),
+                    item("active-a", text: "latest"),
+                    item("history", text: "active replacement"),
+                ]
+            ),
+            replayComplete: true
+        )
+
+        XCTAssertEqual(viewModel.items.map(\.id), ["history", "active-a", "active-b"])
+        XCTAssertEqual(viewModel.item(id: "active-a")?.text, "latest")
+        XCTAssertEqual(viewModel.item(id: "history")?.text, "active replacement")
+    }
+
+    func testTurnCompletionClearsOnlyActiveProjectionNotMergedVisibleItems() {
+        let viewModel = SessionViewModel()
+        viewModel.applySnapshot(
+            RACPSnapshot(
+                cursor: RACPCursor(epoch: "ep_active", sequence: 1),
+                revision: 1,
+                activeItems: [item("answer", text: "completed body")],
+                activeTurn: RACPTurnRef(id: "turn-active", status: "running")
+            ),
+            replayComplete: true
+        )
+        XCTAssertEqual(viewModel.items.map(\.id), ["answer"])
+
+        viewModel.applyEvents([
+            RACPEvent(
+                sequence: 2,
+                epoch: "ep_active",
+                payload: .object([
+                    "kind": .string("turn.completed"),
+                    "turnId": .string("turn-active"),
+                ])
+            ),
+        ])
+
+        XCTAssertTrue(viewModel.activeItems.isEmpty)
+        XCTAssertNil(viewModel.activeTurnId)
+        XCTAssertEqual(viewModel.item(id: "answer")?.text, "completed body")
     }
 
     // MARK: - 工具

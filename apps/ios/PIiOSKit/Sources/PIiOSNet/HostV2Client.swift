@@ -45,6 +45,7 @@ public actor HostV2Client {
             guard connectionID == id else { throw RACPV2Error.notConnected }
             let socket = try await RACPWebSocket.connect(
                 on: channel,
+                lifecycle: transport.lifecycle,
                 path: "/v1/racp/ws",
                 subprotocol: RACPV2Protocol.subprotocol,
                 bearerToken: token
@@ -87,7 +88,7 @@ public actor HostV2Client {
     public func stream() -> AsyncStream<JSONValue> {
         eventContinuation?.finish()
         var continuation: AsyncStream<JSONValue>.Continuation!
-        let stream = AsyncStream<JSONValue> { continuation = $0 }
+        let stream = AsyncStream<JSONValue>(bufferingPolicy: .bufferingOldest(256)) { continuation = $0 }
         eventContinuation = continuation
         return stream
     }
@@ -206,12 +207,19 @@ public actor HostV2Client {
 
     private func attach(_ socket: any RACPSocket, id: UUID) {
         self.socket = socket
-        receiveTask = Task { [weak self] in
-            for await data in socket.inbound {
-                await self?.receive(data, connectionID: id)
+        let task = Task { [weak self] in
+            // Mark the reader so socket.close() never joins the task that is
+            // currently unwinding it. The transport/close owner joins it from
+            // outside instead.
+            await RACPInboundContext.$socketID.withValue(ObjectIdentifier(socket)) {
+                for await data in socket.inbound {
+                    await self?.receive(data, connectionID: id)
+                }
+                await self?.connectionEnded(id)
             }
-            await self?.connectionEnded(id)
         }
+        receiveTask = task
+        socket.registerInboundReader(task)
     }
 
     private func connectionEnded(_ id: UUID) async {

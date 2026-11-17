@@ -29,7 +29,7 @@ public enum CacheRecordKind: String, CaseIterable, Sendable {
         case .items:
             return [
                 "id", "session_id", "kind", "role", "text", "tool_name", "status",
-                "epoch", "sequence", "created_at",
+                "epoch", "sequence", "created_at", "turn_id",
             ]
         case .cursors:
             return ["session_id", "epoch", "sequence", "updated_at"]
@@ -136,11 +136,13 @@ public struct CacheItemRecord: Equatable, Sendable {
     public let id: String
     public let sessionId: String
     public let createdAt: Date
+    public let turnId: String?
 
-    public init(id: String, sessionId: String, createdAt: Date) {
+    public init(id: String, sessionId: String, createdAt: Date, turnId: String? = nil) {
         self.id = id
         self.sessionId = sessionId
         self.createdAt = createdAt
+        self.turnId = turnId
     }
 }
 
@@ -156,38 +158,49 @@ public struct CacheRetentionPlan: Equatable, Sendable {
 }
 
 /// 离线缓存保留策略的纯函数实现（不接 SQLite）：
-/// 单会话保留最新 **200** 条、最多 **20** 个会话，超限按 `created_at` 淘汰（契约 §6、AC-15.1）。
+/// 单会话保留最新 **200** 个完整轮次、最多 **20** 个会话；淘汰始终按整组执行。
 public enum CacheRetention {
-    public static let maxItemsPerSession = 200
+    public static let maxTurnsPerSession = 200
+    public static let defaultTurnsPerSession = maxTurnsPerSession
+    /// Compatibility aliases; the configured unit is now a complete turn.
+    public static let maxItemsPerSession = maxTurnsPerSession
+    public static let defaultItemsPerSession = defaultTurnsPerSession
     public static let maxSessions = 20
 
-    /// 单会话保留条数的默认值（= 契约 §6 的 200）。
-    /// 设置里的「离线缓存上限」没有给出值时用它。
-    public static let defaultItemsPerSession = maxItemsPerSession
-
-    /// 把设置里的「离线缓存上限」（`offlineCacheLimit`）转成单会话保留条数。
-    ///
-    /// 缓存层必须用这个值裁剪：`pruneItems` 的无参默认值恒为 200，若调用方不传设置值，
-    /// 用户在设置里选 1000 也会按 200 淘汰（AC-15.1）。缺省或非法值回落到默认 200。
-    public static func itemsPerSessionLimit(offlineCacheLimit: Int?) -> Int {
-        guard let offlineCacheLimit, offlineCacheLimit > 0 else { return defaultItemsPerSession }
+    public static func turnsPerSessionLimit(offlineCacheLimit: Int?) -> Int {
+        guard let offlineCacheLimit, offlineCacheLimit > 0 else { return defaultTurnsPerSession }
         return offlineCacheLimit
     }
 
-    /// 按设置里的上限裁剪单会话条数（`offlineCacheLimit` 为 `nil` 时用默认 200）。
-    public static func pruneItems(_ items: [CacheItemRecord], offlineCacheLimit: Int?) -> CacheRetentionPlan {
-        pruneItems(items, limit: itemsPerSessionLimit(offlineCacheLimit: offlineCacheLimit))
+    /// Compatibility alias for callers compiled before the unit became turns.
+    public static func itemsPerSessionLimit(offlineCacheLimit: Int?) -> Int {
+        turnsPerSessionLimit(offlineCacheLimit: offlineCacheLimit)
     }
 
-    /// 每个会话保留最新 `limit` 条，超出的按 `created_at` 从旧到新淘汰。
-    public static func pruneItems(_ items: [CacheItemRecord], limit: Int = maxItemsPerSession) -> CacheRetentionPlan {
+    /// 按设置里的上限裁剪单会话轮次数（`offlineCacheLimit` 为 `nil` 时用默认 200）。
+    public static func pruneItems(_ items: [CacheItemRecord], offlineCacheLimit: Int?) -> CacheRetentionPlan {
+        pruneItems(items, limit: turnsPerSessionLimit(offlineCacheLimit: offlineCacheLimit))
+    }
+
+    /// 每个会话保留最新 `limit` 组；组内所有 item 同去同留，活动轮也不拆分。
+    /// 纯函数的 nil-turn 兼容默认是一项一个单元，生产 Policy 必须显式补投影键。
+    public static func pruneItems(_ items: [CacheItemRecord], limit: Int = maxTurnsPerSession) -> CacheRetentionPlan {
         guard limit >= 0 else { return CacheRetentionPlan(kept: [], evicted: items.map(\.id)) }
         var kept: [String] = []
         var evicted: [String] = []
         for sessionId in orderedSessionIds(items) {
-            let sessionItems = items.filter { $0.sessionId == sessionId }.sorted(by: newestFirst)
-            kept.append(contentsOf: sessionItems.prefix(limit).map(\.id))
-            evicted.append(contentsOf: sessionItems.dropFirst(limit).map(\.id))
+            var groups: [String: [CacheItemRecord]] = [:]
+            for item in items where item.sessionId == sessionId {
+                groups[item.turnId ?? "item:\(item.id)", default: []].append(item)
+            }
+            let orderedGroups = groups.map { key, value in
+                (key: key, items: value.sorted(by: newestFirst), latest: value.map(\.createdAt).max() ?? .distantPast)
+            }.sorted { lhs, rhs in
+                if lhs.latest != rhs.latest { return lhs.latest > rhs.latest }
+                return lhs.key < rhs.key
+            }
+            kept.append(contentsOf: orderedGroups.prefix(limit).flatMap { $0.items.map(\.id) })
+            evicted.append(contentsOf: orderedGroups.dropFirst(limit).flatMap { $0.items.map(\.id) })
         }
         return CacheRetentionPlan(kept: kept, evicted: evicted)
     }
@@ -205,7 +218,7 @@ public enum CacheRetention {
         )
     }
 
-    /// 单会话裁剪：给定会话的记录整体保留策略（先按会话裁条数，再裁会话数）。
+    /// 单会话裁剪：给定会话的记录整体保留策略（先按会话裁轮次数，再裁会话数）。
     /// `offlineCacheLimit` 传设置里的「离线缓存上限」，`nil` 时按默认 200 裁。
     public static func prune(
         sessions: [CacheSessionRecord],

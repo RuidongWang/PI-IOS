@@ -22,18 +22,19 @@ final class KeychainCredentialPersistenceUITests: XCTestCase {
     func testPasswordCredentialIsPersistedToKeychain() throws {
         openServersScreen()
 
-        replace(app.textFields["192.168.1.10"].firstMatch, with: "127.0.0.1")
-        replace(app.textFields["22"].firstMatch, with: "1")
-        replace(app.textFields["pi"].firstMatch, with: "pi")
+        // 按 identifier 定位（quiet-v2 §7）：文案变了测试不该跟着改。
+        replace(app.textFields["servers.host"].firstMatch, with: "127.0.0.1")
+        replace(app.textFields["servers.port"].firstMatch, with: "1")
+        replace(app.textFields["servers.username"].firstMatch, with: "pi")
 
-        let password = app.secureTextFields["服务器登录密码"].firstMatch
+        let password = app.secureTextFields["servers.password"].firstMatch
         XCTAssertTrue(password.waitForExistence(timeout: 5), "密码输入框")
         password.tap()
         _ = app.keyboards.firstMatch.waitForExistence(timeout: 3)
         password.typeText("keychain-regression-password")
         dismissKeyboard()
 
-        let save = app.buttons["保存并测试连接"].firstMatch
+        let save = app.buttons["servers.saveAndTest"].firstMatch
         scrollUntilHittable(save)
         save.tap()
 
@@ -70,7 +71,7 @@ final class KeychainCredentialPersistenceUITests: XCTestCase {
 
         let add = app.buttons["settings.addServer"].firstMatch.exists
             ? app.buttons["settings.addServer"].firstMatch
-            : app.buttons["＋ 添加服务器"].firstMatch
+            : app.buttons["添加服务器"].firstMatch
         XCTAssertTrue(add.waitForExistence(timeout: 5), "添加入口")
         add.tap()
         XCTAssertTrue(app.navigationBars["服务器"].waitForExistence(timeout: 5), "新增服务器页")
@@ -79,9 +80,9 @@ final class KeychainCredentialPersistenceUITests: XCTestCase {
     /// 保存会先创建本机记录再测连接；测试结束把这条 127.0.0.1 记录删掉，
     /// 避免污染模拟器上已有的服务器列表。
     private func deleteCreatedHost() {
-        let delete = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS %@", "删除这台服务器")
-        ).firstMatch
+        let delete = app.buttons["servers.delete"].firstMatch.exists
+            ? app.buttons["servers.delete"].firstMatch
+            : app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "删除这台服务器")).firstMatch
         scrollUntilHittable(delete)
         guard delete.exists, delete.isHittable else { return }
         delete.tap()

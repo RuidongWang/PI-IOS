@@ -150,17 +150,17 @@ public enum BootstrapRunnerError: Error, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .malformedProbe:
-            return "服务器平台探测输出不完整"
+            return "无法识别服务器平台"
         case let .architectureMismatch(expected, actual):
-            return "发布产物架构 \(expected.rawValue) 与服务器架构 \(actual.rawValue) 不一致"
-        case let .remoteCommandFailed(command, exitStatus):
-            return "远端安装命令失败（退出码 \(exitStatus)）：\(command)"
+            return "安装包架构 \(expected.rawValue) 与服务器 \(actual.rawValue) 不一致"
+        case let .remoteCommandFailed(_, exitStatus):
+            return "安装命令失败（退出码 \(exitStatus)）"
         case let .malformedState(detail):
-            return "bootstrap 状态文件无法解析：\(detail)"
+            return "安装状态无法读取（\(detail)）"
         case .malformedPairingFile:
-            return "配对文件格式不正确"
+            return "配对信息格式不正确"
         case .timedOut:
-            return "bootstrap 超过 15 分钟仍未完成"
+            return "安装超过 15 分钟未完成"
         }
     }
 }
@@ -192,11 +192,11 @@ enum BootstrapRuntimeIdentityError: Error, Equatable {
             port,
             unitName
         ):
-            return "运行身份不匹配：期望 \(expected) \(expectedVersion)，实际 \(actual) \(actualVersion)；"
-                + "服务 \(unitName)，端口 \(port)。"
+            return "运行身份不匹配：期望 \(expected) \(expectedVersion)，实际 \(actual) \(actualVersion)。"
+                + "端口 \(port)。"
         case let .versionMismatch(expected, actual, serverName, port, unitName):
-            return "运行版本不匹配：\(serverName) 期望 \(expected)，实际 \(actual)；"
-                + "服务 \(unitName)，端口 \(port)。"
+            return "运行版本不匹配：\(serverName) 期望 \(expected)，实际 \(actual)。"
+                + "端口 \(port)。"
         }
     }
 }
@@ -470,7 +470,7 @@ public final class BootstrapRunner {
             guard material.token.hasPrefix("ppt2.")
                     || (allowLegacyPPT1 && material.token.hasPrefix("ppt1.")) else {
                 return .failed(
-                    "本次 PI-adaptor 安装只接受当前进程生成的 ppt2 配对令牌；已拒绝旧 ppt1 令牌。"
+                    "配对令牌类型已过期。重试安装。"
                 )
             }
             _ = try BootstrapPairingMaterial(
@@ -497,7 +497,7 @@ public final class BootstrapRunner {
             }
             return .paired(device)
         } catch {
-            return .failed("客户端配对失败：\(error.localizedDescription)")
+            return .failed("配对失败：\(error.localizedDescription)")
         }
     }
 
@@ -532,12 +532,12 @@ public final class BootstrapRunner {
     private static func verificationFailureDetail(
         _ error: Error,
         port: Int,
-        unitName: String
+        unitName _: String
     ) -> String {
         if let mismatch = error as? BootstrapRuntimeIdentityError {
             return mismatch.displayText
         }
-        return "设备身份与 ping 验证失败；目标 \(unitName)，端口 \(port)。\(error.localizedDescription)"
+        return "设备验证失败（端口 \(port)）：\(error.localizedDescription)"
     }
 
     private struct ProbeIdentity {

@@ -334,10 +334,10 @@ public enum RACPPermissionMode: String, Codable, CaseIterable, Sendable {
     case auto
 }
 
+/// PI-adaptor 的会话模式只有 Agent / Plan；Goal 是审批类型，不是可配置的会话模式。
 public enum RACPSessionMode: String, Codable, CaseIterable, Sendable {
     case agent
     case plan
-    case goal
 }
 
 public enum RACPThinkingLevel: String, Codable, CaseIterable, Sendable {

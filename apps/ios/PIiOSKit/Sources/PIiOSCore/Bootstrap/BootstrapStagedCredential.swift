@@ -86,6 +86,15 @@ public struct BootstrapStagedCredential: Codable, Equatable, Sendable {
     }
 }
 
+/// Result of revoking a staged device token. Only `.revoked` and `.notFound`
+/// mean it is safe to delete the local recovery record.
+public enum BootstrapStagingRevokeResult: Equatable, Sendable {
+    case revoked
+    case notFound
+    case failed
+    case unknown
+}
+
 public enum BootstrapStagingRecoveryAction: Equatable, Sendable {
     /// Promotion reached the primary token but staging cleanup did not complete.
     case clearOnly
@@ -115,16 +124,24 @@ public enum BootstrapStagingRecoveryCoordinator {
         staging: [BootstrapStagedCredential],
         activeDeviceId: String?,
         activeDeviceToken: String?,
-        revoke: @Sendable (BootstrapStagedCredential) async -> Void,
+        revoke: @Sendable (BootstrapStagedCredential) async -> BootstrapStagingRevokeResult,
         clear: @Sendable (BootstrapStagedCredential) async -> Bool
     ) async -> [BootstrapStagedCredential] {
         var remaining: [BootstrapStagedCredential] = []
         for attempt in staging {
-            if attempt.recoveryAction(
+            let action = attempt.recoveryAction(
                 activeDeviceId: activeDeviceId,
                 activeDeviceToken: activeDeviceToken
-            ) == .revokeThenClear {
-                await revoke(attempt)
+            )
+            if action == .revokeThenClear {
+                let result = await revoke(attempt)
+                // A failed or unknown revoke must keep the record: deleting it
+                // would lose the only token able to retry the revocation, while
+                // the remote device may still be active.
+                guard result == .revoked || result == .notFound else {
+                    remaining.append(attempt)
+                    continue
+                }
             }
             if !(await clear(attempt)) {
                 remaining.append(attempt)

@@ -2,6 +2,8 @@ import XCTest
 
 /// 批量工具调用折叠：连续 6 次工具调用汇总为一条默认折叠的分组，
 /// 展开后逐条显示紧凑工具行，再点单条查看完整结果；最终回复不受折叠影响。
+///
+/// quiet-v2：分组标题/状态、单条工具标题都按 identifier 定位。
 final class ToolBatchGroupUITests: XCTestCase {
     private let app = XCUIApplication()
 
@@ -25,17 +27,24 @@ final class ToolBatchGroupUITests: XCTestCase {
         XCTAssertTrue(group.waitForExistence(timeout: 8))
         XCTAssertEqual(group.value as? String, "collapsed", "分组默认必须折叠")
 
-        XCTAssertTrue(app.staticTexts["6 次工具调用"].exists, "折叠行要给出数量提示")
-        XCTAssertTrue(app.staticTexts["bash ×6"].exists, "折叠行要给出工具名汇总")
-        XCTAssertTrue(app.staticTexts["已完成"].exists, "折叠行要给出组状态")
+        XCTAssertEqual(app.staticTexts["toolGroup.batch_tool_1.title"].label, "6 次工具调用")
+        XCTAssertEqual(app.staticTexts["toolGroup.batch_tool_1.status"].label, "已完成")
+        XCTAssertTrue(
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "bash ×6")).firstMatch.exists,
+            "折叠行要给出工具名汇总"
+        )
 
         let child = app.descendants(matching: .any)["toolCard.batch_tool_1.toggle"]
         XCTAssertFalse(child.exists, "折叠时不应渲染组内工具行")
-        XCTAssertTrue(app.staticTexts["以下是 CPU 分析："].exists, "最终回复必须保持展开")
+        XCTAssertTrue(
+            app.descendants(matching: .any)["conversation.agentMessage.batch_final"].exists,
+            "最终回复必须保持展开"
+        )
         snapshot("tool-batch-collapsed")
 
         group.tap()
         XCTAssertTrue(child.waitForExistence(timeout: 2), "展开分组后应看到组内工具行")
+        XCTAssertEqual(app.staticTexts["toolCard.batch_tool_1.title"].label, "bash")
         snapshot("tool-batch-expanded")
 
         child.tap()
@@ -46,7 +55,7 @@ final class ToolBatchGroupUITests: XCTestCase {
         group.tap()
         XCTAssertTrue(child.waitForNonExistence(timeout: 2), "再次点击分组应整体收起")
         XCTAssertEqual(group.value as? String, "collapsed")
-        XCTAssertTrue(app.staticTexts["以下是 CPU 分析："].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["conversation.agentMessage.batch_final"].exists)
     }
 
     private func snapshot(_ name: String) {

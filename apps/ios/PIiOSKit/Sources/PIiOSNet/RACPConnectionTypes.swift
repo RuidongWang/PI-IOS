@@ -209,6 +209,19 @@ public struct RACPSocketTermination: Error, Equatable, Sendable, CustomStringCon
     public var description: String { "RACP socket terminated: \(category.rawValue) (\(closeCode))" }
 }
 
+extension RACPSocketTermination {
+    /// 用户主动 stop/配对结束：关闭流并保持离线，不触发自动重连。
+    static var localCanceled: RACPSocketTermination {
+        RACPSocketTermination(closeCode: 1000, reason: "", category: .canceled)
+    }
+
+    /// 发送 deadline、取消仍挂起的 send 或实际写故障：回收原 generation 的
+    /// socket 以解除底层写等待。这不是用户 stop，必须继续自动重连。
+    static var transportAborted: RACPSocketTermination {
+        RACPSocketTermination(closeCode: 1006, reason: "", category: .socketInterrupted)
+    }
+}
+
 /// 线程安全的单次终态；支持多个等待者，且只接受第一个结果。
 final class RACPSocketTerminationState: @unchecked Sendable {
     private let lock = NSLock()

@@ -215,6 +215,7 @@ struct RACPHostSubscriptionTracker: Equatable, Sendable {
         "session.created",
         "session.changed",
         "session.archived",
+        "session.deleted",
         "host.changed",
     ]
 
@@ -478,6 +479,9 @@ private enum SnapshotRebuildOutcome: Equatable {
 }
 
 public actor RACPClient {
+    /// Upper bound for events buffered while an attach snapshot is rebuilt.
+    private static let maxBufferedSessionEventsDuringAttach = 10_000
+
     private let configuration: RACPConfiguration
     private let confirmer: any HostKeyConfirming
     private let backoff: ReconnectBackoff
@@ -489,6 +493,9 @@ public actor RACPClient {
     private let continuation: AsyncStream<RACPClientUpdate>.Continuation
     private let statusUpdates: AsyncStream<ConnectionStatus>
     private let statusContinuation: AsyncStream<ConnectionStatus>.Continuation
+    private let sessionChangeClientID = UUID()
+    private var sessionChangeCoalescingEnabled = false
+    private var sessionChangeDelivery = SessionChangeDelivery()
     private var runTask: Task<Void, Never>?
     private var subscriptionTerminalReason: String?
 
@@ -515,6 +522,9 @@ public actor RACPClient {
     private var sessionAttachGeneration = 0
     private var historyRequest: (id: UUID, attach: Int, snapshot: UInt64, socket: ObjectIdentifier)?
     private var sessionEventsSuspended = false
+    /// Visible publication is independent from transport-event suspension. The token
+    /// lets an old attach clear only its own suspension after a newer attach starts.
+    private var initialHistoryPublicationSuspension: (id: UUID, attach: Int)?
     private var pendingSessionSubscriptionAttempt: UUID?
     private var pendingSessionSubscriptionSessionId: String?
     private var pendingSessionSubscriptionGeneration: Int?
@@ -542,10 +552,10 @@ public actor RACPClient {
         self.connectionFactory = LiveRACPConnectionFactory()
         self.suppliedTransport = nil
         var sink: AsyncStream<RACPClientUpdate>.Continuation!
-        self.updates = AsyncStream<RACPClientUpdate> { sink = $0 }
+        self.updates = AsyncStream<RACPClientUpdate>(bufferingPolicy: .bufferingOldest(256)) { sink = $0 }
         self.continuation = sink
         var statusSink: AsyncStream<ConnectionStatus>.Continuation!
-        self.statusUpdates = AsyncStream<ConnectionStatus> { statusSink = $0 }
+        self.statusUpdates = AsyncStream<ConnectionStatus>(bufferingPolicy: .bufferingOldest(64)) { statusSink = $0 }
         self.statusContinuation = statusSink
     }
 
@@ -563,10 +573,10 @@ public actor RACPClient {
         self.connectionFactory = connectionFactory
         self.suppliedTransport = nil
         var sink: AsyncStream<RACPClientUpdate>.Continuation!
-        self.updates = AsyncStream<RACPClientUpdate> { sink = $0 }
+        self.updates = AsyncStream<RACPClientUpdate>(bufferingPolicy: .bufferingOldest(256)) { sink = $0 }
         self.continuation = sink
         var statusSink: AsyncStream<ConnectionStatus>.Continuation!
-        self.statusUpdates = AsyncStream<ConnectionStatus> { statusSink = $0 }
+        self.statusUpdates = AsyncStream<ConnectionStatus>(bufferingPolicy: .bufferingOldest(64)) { statusSink = $0 }
         self.statusContinuation = statusSink
     }
 
@@ -596,10 +606,10 @@ public actor RACPClient {
         self.connectionFactory = LiveRACPConnectionFactory()
         self.suppliedTransport = suppliedTransport
         var sink: AsyncStream<RACPClientUpdate>.Continuation!
-        self.updates = AsyncStream<RACPClientUpdate> { sink = $0 }
+        self.updates = AsyncStream<RACPClientUpdate>(bufferingPolicy: .bufferingOldest(256)) { sink = $0 }
         self.continuation = sink
         var statusSink: AsyncStream<ConnectionStatus>.Continuation!
-        self.statusUpdates = AsyncStream<ConnectionStatus> { statusSink = $0 }
+        self.statusUpdates = AsyncStream<ConnectionStatus>(bufferingPolicy: .bufferingOldest(64)) { statusSink = $0 }
         self.statusContinuation = statusSink
     }
 
@@ -626,10 +636,10 @@ public actor RACPClient {
         self.connectionFactory = LiveRACPConnectionFactory()
         self.suppliedTransport = nil
         var sink: AsyncStream<RACPClientUpdate>.Continuation!
-        self.updates = AsyncStream<RACPClientUpdate> { sink = $0 }
+        self.updates = AsyncStream<RACPClientUpdate>(bufferingPolicy: .bufferingOldest(256)) { sink = $0 }
         self.continuation = sink
         var statusSink: AsyncStream<ConnectionStatus>.Continuation!
-        self.statusUpdates = AsyncStream<ConnectionStatus> { statusSink = $0 }
+        self.statusUpdates = AsyncStream<ConnectionStatus>(bufferingPolicy: .bufferingOldest(64)) { statusSink = $0 }
         self.statusContinuation = statusSink
         self.socket = testingSocket
         self.state = .online
@@ -648,6 +658,14 @@ public actor RACPClient {
 
     func pendingRequestCountForTesting() -> Int {
         pending.count
+    }
+
+    func emitUpdateForTesting(_ update: RACPClientUpdate) async {
+        await emit(update)
+    }
+
+    func sessionChangeDeliveryStatisticsForTesting() -> SessionChangeDelivery.Statistics {
+        sessionChangeDelivery.statistics
     }
 
     func verifyDeviceIdentityForTesting() async throws -> RACPDeviceIdentity {
@@ -707,6 +725,54 @@ public actor RACPClient {
 
     /// 只取状态/事件流，不启动连接（用于界面先订阅再决定何时连）。
     public func stream() -> AsyncStream<RACPClientUpdate> { updates }
+
+    /// Opt in only when the single stream consumer uses begin/finish below.
+    /// Legacy consumers keep lossless direct delivery by default. The catch-up
+    /// signal also covers changes queued before the consumer enabled coalescing.
+    public func enableSessionChangeCoalescing() {
+        guard !sessionChangeCoalescingEnabled else { return }
+        sessionChangeCoalescingEnabled = true
+        guard initialHistoryPublicationSuspension == nil else { return }
+        if sessionChangeDelivery.invalidate(sessionChangeKey) {
+            continuation.yield(.sessionChanged)
+        }
+    }
+
+    /// Called when a payload-free sessionChanged signal is taken from the stream.
+    /// A nil receipt is a revoked/redundant queued signal and can be skipped.
+    public func beginSessionChangeConsumption() -> UUID? {
+        if initialHistoryPublicationSuspension != nil {
+            if sessionChangeCoalescingEnabled {
+                // The stream signal has already been consumed by the caller. Drop
+                // exactly its revoked receipt placeholder, but never expose a receipt
+                // or allow it to suppress the final post-backfill publication.
+                _ = sessionChangeDelivery.begin(sessionChangeKey)
+                sessionChangeDelivery.revoke()
+            }
+            return nil
+        }
+        guard sessionChangeCoalescingEnabled else { return UUID() }
+        return sessionChangeDelivery.begin(sessionChangeKey)
+    }
+
+    /// Must run after refreshing the view/cache. Changes arriving during that
+    /// work cause another delivery; an obsolete generation/session receipt is inert.
+    public func finishSessionChangeConsumption(_ receipt: UUID) {
+        guard sessionChangeCoalescingEnabled,
+              initialHistoryPublicationSuspension == nil else { return }
+        if sessionChangeDelivery.finish(receipt, key: sessionChangeKey) {
+            continuation.yield(.sessionChanged)
+        }
+    }
+
+    private var sessionChangeKey: SessionChangeDelivery.Key {
+        SessionChangeDelivery.Key(
+            client: sessionChangeClientID,
+            generation: status.activeGeneration ?? status.candidateGeneration,
+            session: sessionId ?? subscribedSessionId,
+            attachmentGeneration: sessionAttachGeneration
+        )
+    }
 
     public func stop() async {
         runTask?.cancel()
@@ -961,34 +1027,126 @@ public actor RACPClient {
             throw error
         }
         guard attachGeneration == sessionAttachGeneration else { return nil }
-        if switchesSession {
-            viewModel.resetForSession()
-        }
-        // 契约 §3.2 规则 1：`replayComplete=false` 也必须整体替换，并丢弃未完成草稿。
-        if let snapshot = result.snapshot {
-            if switchesSession || snapshot.revision >= viewModel.revision {
-                _ = viewModel.applySnapshot(snapshot, replayComplete: result.replayComplete ?? false)
+
+        // Candidate snapshots may reduce replay/live events before their earliest turn
+        // is complete, but none of them may become visibly published in that state.
+        let publicationID = UUID()
+        initialHistoryPublicationSuspension = (publicationID, attachGeneration)
+        // Revoke even a same-generation receipt queued before this token. Otherwise
+        // begin/finish could consume it against the candidate's incomplete reducer.
+        sessionChangeDelivery.revoke()
+        // A replay rebuild belongs to its attachment. The new candidate starts with
+        // its own clean rebuild state; the old defer is ownership-guarded below.
+        isRebuildingSnapshot = false
+        bufferedSessionEventsDuringAttach.removeAll()
+        defer {
+            // A newer attach installs a different token. Never clear that newer token.
+            if initialHistoryPublicationSuspension?.id == publicationID {
+                initialHistoryPublicationSuspension = nil
             }
         }
-        self.attachedSession = result.session
-        self.sessionId = sessionId
-        self.subscribedSessionId = sessionId
-        if result.snapshot == nil, let activeTurnId = result.session.activeTurnId {
-            viewModel.recordActiveTurn(id: activeTurnId)
+
+        do {
+            if switchesSession {
+                viewModel.resetForSession()
+            }
+            // 契约 §3.2 规则 1：`replayComplete=false` 也必须整体替换，并丢弃未完成草稿。
+            if let snapshot = result.snapshot {
+                if switchesSession || snapshot.revision >= viewModel.revision {
+                    _ = viewModel.applySnapshot(snapshot, replayComplete: result.replayComplete ?? false)
+                }
+            }
+            self.attachedSession = result.session
+            self.sessionId = sessionId
+            self.subscribedSessionId = sessionId
+            if result.snapshot == nil, let activeTurnId = result.session.activeTurnId {
+                viewModel.recordActiveTurn(id: activeTurnId)
+            }
+
+            if subscribe {
+                try await subscribeSession(sessionId: sessionId, after: viewModel.cursor)
+            } else {
+                sessionEventsSuspended = false
+            }
+            guard attachGeneration == sessionAttachGeneration,
+                  initialHistoryPublicationSuspension?.id == publicationID
+            else { return nil }
+
+            // Subscribe may have replaced the initial response with a newer replay
+            // snapshot. Decide from that final reducer, not the first response.
+            if viewModel.hasMoreHistory,
+               !ConversationTurnPolicy.hasTaskBoundary(viewModel.items) {
+                // The recent window usually starts in the middle of an older turn.
+                // Hiding that incomplete prefix keeps the first visible row at a
+                // real user task without walking the entire session backwards on
+                // every attach (the old behavior made long sessions take 10–30s).
+                // Omitted rows remain reachable through `loadEarlierHistory`.
+                let hidden = viewModel.trimIncompleteLeadingTurn()
+                if hidden == 0 {
+                    _ = try await assembleEarlierHistory(
+                        limit: RACPSessionHistoryParams.defaultLimit,
+                        emitUpdate: false
+                    )
+                } else {
+                    PILog.debug(
+                        "History",
+                        "attach trimmed incomplete leading turn items=\(hidden) hasMore=true"
+                    )
+                }
+            } else if !viewModel.hasMoreHistory,
+                      !ConversationTurnPolicy.hasTaskBoundary(viewModel.items) {
+                PILog.warn("History", "history exhausted without task boundary stagedItems=0")
+            }
+            guard attachGeneration == sessionAttachGeneration,
+                  initialHistoryPublicationSuspension?.id == publicationID
+            else { return nil }
+
+            initialHistoryPublicationSuspension = nil
+            await emit(.sessionChanged)
+            return result.snapshot != nil
+        } catch {
+            // Only the still-current candidate may invalidate itself. An old failure
+            // must never clear a newer attachment, reducer, or publication token.
+            guard attachGeneration == sessionAttachGeneration,
+                  initialHistoryPublicationSuspension?.id == publicationID
+            else { throw error }
+            invalidateCandidateAttachment(attachGeneration: attachGeneration)
+            throw error
         }
-        await emit(.sessionChanged)
-        if subscribe {
-            try await subscribeSession(sessionId: sessionId, after: viewModel.cursor)
-        } else {
-            sessionEventsSuspended = false
-        }
-        return result.snapshot != nil
+    }
+
+    /// Invalidate every visible and replay-owned piece of a failed candidate without
+    /// closing a socket that a newer attachment may already be using.
+    private func invalidateCandidateAttachment(attachGeneration: Int) {
+        guard sessionAttachGeneration == attachGeneration else { return }
+        sessionAttachGeneration &+= 1
+        sessionId = nil
+        subscribedSessionId = nil
+        attachedSession = nil
+        subscriptionId = nil
+        viewModel.resetForSession()
+        sessionEventsSuspended = true
+        if historyRequest?.attach == attachGeneration { historyRequest = nil }
+        pendingSessionSubscriptionAttempt = nil
+        pendingSessionSubscriptionSessionId = nil
+        pendingSessionSubscriptionGeneration = nil
+        pendingSessionAckDuringSubscribe = nil
+        pendingSessionAck = nil
+        isRebuildingSnapshot = false
+        bufferedSessionEventsDuringAttach.removeAll()
+        rebuildingSnapshots.removeAll()
+        sessionChangeDelivery.revoke()
     }
 
     /// 手动补取更早历史；返回实际前置的条数。历史页不参与实时游标/快照恢复。
     /// 被会话切换、快照替换或换 socket 取代时丢弃响应，绝不关闭活动连接。
     @discardableResult
     public func loadEarlierHistory(limit: Int = RACPSessionHistoryParams.defaultLimit) async throws -> Int {
+        try await assembleEarlierHistory(limit: limit, emitUpdate: true)
+    }
+
+    /// Stage all pages needed to complete the earliest turn, then prepend and publish once.
+    private func assembleEarlierHistory(limit: Int, emitUpdate: Bool) async throws -> Int {
         guard state.isOnline, !promotionFenced, let socket, let sessionId,
               !sessionEventsSuspended, !isRebuildingSnapshot else {
             throw RACPClientError.notConnected
@@ -1006,38 +1164,58 @@ public actor RACPClient {
         defer {
             if historyRequest?.id == requestID { historyRequest = nil }
         }
-        let beforeItemID = viewModel.items.first?.id
-        // 先保留成功/失败结果，统一检查代次；旧快照的错误也不能污染新视图。
-        let response: Result<RACPSessionHistoryResult, Error>
-        do {
-            response = .success(try await request(
-                .sessionHistory,
-                params: RACPSessionHistoryParams(
-                    sessionId: sessionId,
-                    beforeItemId: beforeItemID,
-                    limit: max(1, min(limit, RACPSessionHistoryParams.maxLimit))
-                )
-            ))
-        } catch {
-            response = .failure(error)
-        }
-        try Task.checkCancellation()
-        guard self.socket === socket, self.sessionId == sessionId,
-              state.isOnline, !promotionFenced, !sessionEventsSuspended, !isRebuildingSnapshot,
-              sessionAttachGeneration == attach,
-              viewModel.historySnapshotGeneration == snapshot,
-              viewModel.items.first?.id == beforeItemID,
-              historyRequest?.id == requestID else { throw CancellationError() }
-        let result = try response.get()
-        let hasMore = result.hasMore ?? false
-        if hasMore {
-            let existing = Set(viewModel.items.map(\.id))
-            guard result.items.contains(where: { !existing.contains($0.id) }) else {
+        let originalFirstItemID = viewModel.items.first?.id
+        var staged: [RACPItem] = []
+        var hasMore = true
+
+        while true {
+            let beforeItemID = staged.first?.id ?? originalFirstItemID
+            // 先保留成功/失败结果，统一检查代次；旧快照的错误也不能污染新视图。
+            let response: Result<RACPSessionHistoryResult, Error>
+            do {
+                response = .success(try await request(
+                    .sessionHistory,
+                    params: RACPSessionHistoryParams(
+                        sessionId: sessionId,
+                        beforeItemId: beforeItemID,
+                        limit: max(1, min(limit, RACPSessionHistoryParams.maxLimit))
+                    )
+                ))
+            } catch {
+                response = .failure(error)
+            }
+            try Task.checkCancellation()
+            guard self.socket === socket, self.sessionId == sessionId,
+                  state.isOnline, !promotionFenced, !sessionEventsSuspended, !isRebuildingSnapshot,
+                  sessionAttachGeneration == attach,
+                  viewModel.historySnapshotGeneration == snapshot,
+                  viewModel.items.first?.id == originalFirstItemID,
+                  historyRequest?.id == requestID else { throw CancellationError() }
+
+            let result = try response.get()
+            hasMore = result.hasMore ?? false
+            var seen = Set((viewModel.items + staged).map(\.id))
+            let newItems = result.items.filter { seen.insert($0.id).inserted }
+            if hasMore, newItems.isEmpty {
                 throw RACPClientError.malformedFrame("历史分页没有向前推进，请重试打开会话")
             }
+            staged.insert(contentsOf: newItems, at: 0)
+
+            if !hasMore || ConversationTurnPolicy.hasUsableTaskBoundary(staged + viewModel.items) {
+                break
+            }
         }
-        let inserted = viewModel.prependHistory(result.items, hasMore: hasMore)
-        await emit(.sessionChanged)
+
+        if !hasMore, !ConversationTurnPolicy.hasUsableTaskBoundary(staged + viewModel.items) {
+            PILog.warn("History", "history exhausted without task boundary stagedItems=\(staged.count)")
+        }
+        // No await occurs between the final ownership check and this single commit.
+        let inserted = viewModel.prependHistory(staged, hasMore: hasMore)
+        let hidden = viewModel.trimIncompleteLeadingTurn()
+        if hidden > 0 {
+            PILog.debug("History", "trimmed incomplete leading turn items=\(hidden) hasMore=\(hasMore)")
+        }
+        if emitUpdate { await emit(.sessionChanged) }
         return inserted
     }
 
@@ -1066,7 +1244,7 @@ public actor RACPClient {
                     // A live old subscription could keep delivering unscoped
                     // frames. Drop the whole socket rather than risk applying
                     // them to a replacement subscription on the same socket.
-                    await socket.close()
+                    await socket.abort(.transportAborted)
                     throw RACPClientError.notConnected
                 }
                 return
@@ -1106,7 +1284,7 @@ public actor RACPClient {
                 // The server may have installed the subscription even though
                 // the response timed out. Drop the uncertain socket so a new
                 // subscription replays from the durable cursor.
-                await socket.close()
+                await socket.abort(.transportAborted)
                 throw RACPClientError.notConnected
             }
             let outcome = await rebuildFromSnapshot(from: socket)
@@ -1114,7 +1292,7 @@ public actor RACPClient {
                attachGeneration == sessionAttachGeneration,
                self.sessionId == sessionId,
                self.socket === socket {
-                await socket.close()
+                await socket.abort(.transportAborted)
             }
             return
         }
@@ -1132,7 +1310,7 @@ public actor RACPClient {
                 pendingSessionSubscriptionSessionId = nil
                 pendingSessionSubscriptionGeneration = nil
                 pendingSessionAckDuringSubscribe = nil
-                await socket.close()
+                await socket.abort(.transportAborted)
                 throw error
             }
             return
@@ -1153,7 +1331,7 @@ public actor RACPClient {
         }
         guard !result.subscriptionId.isEmpty else {
             if ownsPendingAttempt {
-                await socket.close()
+                await socket.abort(.transportAborted)
                 throw RACPClientError.malformedFrame("events/subscribe 未返回 subscriptionId")
             }
             return
@@ -1181,8 +1359,14 @@ public actor RACPClient {
             isRebuildingSnapshot = true
             bufferedSessionEventsDuringAttach.removeAll()
             defer {
-                isRebuildingSnapshot = false
-                bufferedSessionEventsDuringAttach.removeAll()
+                // An old replay must never clear a replacement attachment's flag or
+                // buffer, including when both attachments use the same session id.
+                if attachGeneration == sessionAttachGeneration,
+                   self.sessionId == sessionId,
+                   self.socket === socket {
+                    isRebuildingSnapshot = false
+                    bufferedSessionEventsDuringAttach.removeAll()
+                }
             }
             let attachResult: RACPSessionAttachResult = try await request(
                 .sessionAttach,
@@ -1507,6 +1691,47 @@ public actor RACPClient {
         )
     }
 
+    /// 归档或恢复会话。这里只发送 Host 请求，不提前修改本地目录或缓存。
+    public func archiveSession(
+        sessionId: String,
+        archived: Bool
+    ) async throws -> RACPV2SessionResult {
+        let params: JSONValue = .object([
+            "sessionId": .string(sessionId),
+            "archived": .bool(archived),
+            "context": .object([
+                "requestId": .string("req_\(UUID().uuidString)"),
+                "idempotencyKey": .string("session_archive_\(UUID().uuidString)"),
+            ]),
+        ])
+        return try await v2Request(
+            method: RACPV2Method.sessionArchive.rawValue,
+            params: params
+        )
+    }
+
+    /// 删除会话。双 ID 必须在发送前一致，Host 明确成功后才由上层清理本机状态。
+    public func deleteSession(
+        sessionId: String,
+        confirmSessionId: String
+    ) async throws -> RACPV2SessionDeleteResult {
+        guard !sessionId.isEmpty, sessionId == confirmSessionId else {
+            throw RACPClientError.protocolMismatch("删除确认目标不一致")
+        }
+        let params: JSONValue = .object([
+            "sessionId": .string(sessionId),
+            "confirmSessionId": .string(confirmSessionId),
+            "context": .object([
+                "requestId": .string("req_\(UUID().uuidString)"),
+                "idempotencyKey": .string("session_delete_\(UUID().uuidString)"),
+            ]),
+        ])
+        return try await v2Request(
+            method: RACPV2Method.sessionDelete.rawValue,
+            params: params
+        )
+    }
+
     /// 中止正在运行的 turn（AC-09.1）。
     public func interruptTurn(turnId: String) async throws {
         let _: RACPTurnResult = try await request(
@@ -1680,6 +1905,9 @@ public actor RACPClient {
         return result.revoked
     }
 
+    /// Lets additive projections re-query after attach/rebuild without polling on every delta.
+    public func sessionSnapshotGeneration() -> UInt64 { viewModel.historySnapshotGeneration }
+
     public func sessionView() -> RACPSessionView {
         RACPSessionView(
             sessionId: sessionId,
@@ -1800,13 +2028,20 @@ public actor RACPClient {
         let box = PendingRequest(recoveryScope: nil, method: method)
         pending[id] = box
         do {
-            try await socket.send(text: text)
-            let value = try await box.wait(timeout: timeout, method: method)
+            let value = try await box.wait(
+                timeout: timeout,
+                method: method,
+                send: { try await socket.send(text: text) },
+                // Recycle only this generation to unblock a stuck write. This
+                // is a transport failure, not a user stop: classifying it as
+                // canceled would terminate the state stream without reconnect.
+                abandonSend: { Task { await socket.abort(.transportAborted) } }
+            )
             pending.removeValue(forKey: id)
             return value
         } catch {
             pending.removeValue(forKey: id)
-            let mapped: Error = error is RACPClientError || error is RACPProviderDiscoveryError
+            let mapped: Error = error is CancellationError || error is RACPClientError || error is RACPProviderDiscoveryError
                 ? error
                 : RACPClientError.notConnected
             box.resolve(.failure(mapped))
@@ -1838,7 +2073,6 @@ public actor RACPClient {
         let box = PendingRequest(recoveryScope: recoveryScope, method: method.rawValue)
         pending[id] = box
         do {
-            try await socket.send(text: text)
             // SSH 的同一字节流中，大响应会把后面的 pong 一起挡住。仅历史读取与
             // 内部心跳按真实入站进度延续空闲预算，写操作/握手期限保持不变。
             let progress = (allowReceiveProgress || method == .sessionAttach || method == .sessionHistory)
@@ -1847,13 +2081,17 @@ public actor RACPClient {
                 timeout: timeout,
                 method: method.rawValue,
                 receiveProgress: progress,
-                maximumDuration: allowReceiveProgress ? 60 : 120
+                maximumDuration: allowReceiveProgress
+                    ? racpHeartbeatProgressCeiling
+                    : racpResponseProgressCeiling,
+                send: { try await socket.send(text: text) },
+                abandonSend: { Task { await socket.abort(.transportAborted) } }
             )
             pending.removeValue(forKey: id)
             return value
         } catch {
             pending.removeValue(forKey: id)
-            let mappedError: Error = error is RACPClientError || error is RACPProviderDiscoveryError
+            let mappedError: Error = error is CancellationError || error is RACPClientError || error is RACPProviderDiscoveryError
                 ? error
                 : RACPClientError.notConnected
             box.resolve(.failure(mappedError))
@@ -2051,7 +2289,7 @@ public actor RACPClient {
                 consecutiveFailures += 1
                 if consecutiveFailures >= 2 {
                     heartbeatFailureGeneration = generation
-                    await expectedSocket.close()
+                    await expectedSocket.abort(.transportAborted)
                     return
                 }
             }
@@ -2071,7 +2309,8 @@ public actor RACPClient {
         switch error {
         case .authenticationFailed, .tunnelRefused, .hostKeyAlgorithmUnsupported, .hostKeyUnreadable:
             return true
-        case .closedByPeer, .invalidPrivateKey, .hostKeyRejected, .timedOut, .channelClosed, .networkFailure:
+        case .closedByPeer, .invalidPrivateKey, .hostKeyRejected, .timedOut, .channelClosed, .networkFailure,
+             .outputLimitExceeded:
             return false
         }
     }
@@ -2097,11 +2336,14 @@ public actor RACPClient {
         transport = newConnection.transport
         let socket = newConnection.socket
         self.socket = socket
-        Task { [weak self] in
-            for await message in socket.inbound {
-                await self?.receive(message, from: socket)
+        let reader = Task { [weak self] in
+            await RACPInboundContext.$socketID.withValue(ObjectIdentifier(socket)) {
+                for await message in socket.inbound {
+                    await self?.receive(message, from: socket)
+                }
             }
         }
+        socket.registerInboundReader(reader)
         await emitPhase(.handshaking(route))
         try await handshake()
     }
@@ -2167,7 +2409,12 @@ public actor RACPClient {
         guard let text = String(data: data, encoding: .utf8), let socket else {
             throw RACPClientError.malformedFrame("初始化通知编码失败")
         }
-        try await socket.send(text: text)
+        try await sendRACPMessageWithDeadline(
+            text,
+            to: socket,
+            timeout: 10,
+            phase: "RACP 初始化通知"
+        )
         // ready 只表示 initialize 完成；online 必须由认证 ping + host/session 恢复后发布。
         await emit(.ready(info))
     }
@@ -2198,6 +2445,7 @@ public actor RACPClient {
         status.activeRoute = nil
         status.activeGeneration = nil
         status.candidateGeneration = nil
+        sessionChangeDelivery.revoke()
         failAllPending(with: error ?? RACPClientError.notConnected)
         if !state.isOnline || reason != nil {
             await emit(.state(.offline(reason: reason)))
@@ -2377,6 +2625,14 @@ public actor RACPClient {
         case .session:
             if isRebuildingSnapshot {
                 bufferedSessionEventsDuringAttach.append(event)
+                if bufferedSessionEventsDuringAttach.count > Self.maxBufferedSessionEventsDuringAttach {
+                    // Bound the attach replay buffer. If a slow consumer lets it
+                    // grow this far, drop the socket so the reconnect path takes a
+                    // fresh authoritative snapshot instead of exhausting memory.
+                    bufferedSessionEventsDuringAttach.removeAll()
+                    await socket.close()
+                    return
+                }
                 if let sessionLease, let durableSequence = event.durableSequence {
                     let ack = PendingEventAck(
                         subscriptionId: sessionLease,
@@ -2417,7 +2673,7 @@ public actor RACPClient {
                 Task { [weak self] in
                     guard let self else { return }
                     if await self.rebuildFromSnapshot(from: socket) == .failed {
-                        await socket.close()
+                        await socket.abort(.transportAborted)
                     }
                 }
             }
@@ -2495,11 +2751,11 @@ public actor RACPClient {
                         subscriptionTerminalReason = reason
                         await emit(.error(code: code, message: message))
                     }
-                    await socket.close()
+                    await socket.abort(.transportAborted)
                     break
                 }
                 if await rebuildFromSnapshot(from: socket) == .failed {
-                    await socket.close()
+                    await socket.abort(.transportAborted)
                 }
                 break
             }
@@ -2520,7 +2776,7 @@ public actor RACPClient {
             let code = subscriptionError.normalizedCode
             if code.isRetryable {
                 await emit(.error(code: code, message: subscriptionError.message))
-                await socket.close()
+                await socket.abort(.transportAborted)
                 return
             }
             guard Self.canRecoverClosedSubscription(code) else {
@@ -2549,7 +2805,7 @@ public actor RACPClient {
             do {
                 try await subscribeHost()
             } catch {
-                await socket.close()
+                await socket.abort(.transportAborted)
             }
             return
         }
@@ -2561,7 +2817,7 @@ public actor RACPClient {
         do {
             try await subscribeSession(sessionId: sessionId, after: after)
         } catch {
-            await socket.close()
+            await socket.abort(.transportAborted)
         }
     }
 
@@ -2578,7 +2834,7 @@ public actor RACPClient {
         subscriptionTerminalReason = reason
         await emit(.error(code: code, message: error.message))
         runTask?.cancel()
-        await socket.close()
+        await socket.abort(.transportAborted)
     }
 
     private func queueHostAck(_ ack: PendingEventAck, from socket: any RACPSocket) async {
@@ -2627,7 +2883,7 @@ public actor RACPClient {
                         subscriptionTerminalReason = reason
                         await emit(.error(code: code, message: message))
                     }
-                    await socket.close()
+                    await socket.abort(.transportAborted)
                     break
                 }
                 hostSubscription.resetAfterCursorExpired()
@@ -2645,7 +2901,7 @@ public actor RACPClient {
                 do {
                     try await subscribeHost()
                 } catch {
-                    await socket.close()
+                    await socket.abort(.transportAborted)
                 }
                 break
             }
@@ -2665,11 +2921,16 @@ public actor RACPClient {
         guard rebuildingSnapshots.insert(sessionId).inserted else { return .inProgress }
         defer { rebuildingSnapshots.remove(sessionId) }
         viewModel.discardCursorForSnapshotRebuild()
+        let generationBeforeAttach = viewModel.historySnapshotGeneration
         do {
             let includedSnapshot = try await attach(sessionId: sessionId, subscribe: true)
             guard self.socket === socket, self.sessionId == sessionId else { return .superseded }
             guard let includedSnapshot else { return .superseded }
-            return includedSnapshot ? .rebuilt : .failed
+            // attach's public Bool describes only its first response. A replay may
+            // apply the authoritative snapshot later; prepend/live events never
+            // advance this generation, so its change proves an actual replacement.
+            let appliedSnapshot = viewModel.historySnapshotGeneration != generationBeforeAttach
+            return (includedSnapshot || appliedSnapshot) ? .rebuilt : .failed
         } catch {
             guard self.socket === socket, self.sessionId == sessionId else { return .superseded }
             return .failed
@@ -2685,6 +2946,15 @@ public actor RACPClient {
         if case let .state(newState) = update {
             state = newState
         }
+        // Suppress before both coalescer invalidation and continuation.yield: no
+        // queued signal may expose an incomplete initial candidate snapshot.
+        if case .sessionChanged = update, initialHistoryPublicationSuspension != nil {
+            return
+        }
+        if case .sessionChanged = update, sessionChangeCoalescingEnabled {
+            guard sessionChangeDelivery.invalidate(sessionChangeKey) else { return }
+        }
+        // Reliable updates are always yielded directly, in their original order.
         continuation.yield(update)
     }
 
@@ -2805,6 +3075,7 @@ public actor RACPClient {
             case .timedOut: return .connectTimeout
             case .channelClosed, .closedByPeer: return .socketInterrupted
             case .tunnelRefused, .networkFailure: return .tcp
+            case .outputLimitExceeded: return .protocol
             }
         }
         if let error = error as? RACPWebSocketError {
@@ -2983,21 +3254,50 @@ struct RACPAuthenticatedPingResult: Decodable, Sendable {
 
 // MARK: - 辅助
 
+let racpResponseProgressCeiling: TimeInterval = 120
+let racpHeartbeatProgressCeiling: TimeInterval = 60
+
+private final class RACPSocketBox: @unchecked Sendable {
+    let socket: any RACPSocket
+
+    init(_ socket: any RACPSocket) {
+        self.socket = socket
+    }
+}
+
+/// Bounded write for messages without a JSON-RPC response (for example
+/// `notifications/initialized`). A stalled NIO write must not hang the caller,
+/// and abandoning it requires closing the original socket generation.
+func sendRACPMessageWithDeadline(
+    _ text: String,
+    to socket: any RACPSocket,
+    timeout: TimeInterval,
+    phase: String
+) async throws {
+    let box = RACPSocketBox(socket)
+    do {
+        try await withNetworkDeadline(
+            seconds: timeout,
+            timeoutError: { RACPClientError.timedOut(phase) }
+        ) {
+            try await box.socket.send(text: text)
+        }
+    } catch {
+        Task { await box.socket.abort(.transportAborted) }
+        throw error
+    }
+}
+
 private func withTimeoutValue<T: Sendable>(
     seconds: TimeInterval,
     phase: String,
     _ body: @escaping @Sendable () async throws -> T
 ) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask { try await body() }
-        group.addTask {
-            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            throw RACPClientError.timedOut(phase)
-        }
-        let result = try await group.next()!
-        group.cancelAll()
-        return result
-    }
+    try await withNetworkDeadline(
+        seconds: seconds,
+        timeoutError: { RACPClientError.timedOut(phase) },
+        operation: body
+    )
 }
 
 /// 一次请求-响应的等待者：按 JSON-RPC `id` 关联，不按到达顺序（契约 §3 请求-响应关联）。
@@ -3007,77 +3307,140 @@ final class PendingRequest: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<JSONValue, Error>?
     private var settled: Result<JSONValue, Error>?
-    private var timeoutTask: Task<Void, Never>?
+    private var tasks: [Task<Void, Never>] = []
+    private var sending = false
+    private var sentAt: ContinuousClock.Instant?
+    private var sentBytes: UInt64?
+    private var abandonSend: (@Sendable () -> Void)?
 
     fileprivate init(recoveryScope: RequestRecoveryScope? = nil, method: String? = nil) {
         self.recoveryScope = recoveryScope
         self.method = method
     }
 
+#if DEBUG
+    static func testing(method: String) -> PendingRequest {
+        PendingRequest(recoveryScope: nil, method: method)
+    }
+#endif
+
     func resolve(_ result: Result<JSONValue, Error>) {
-        lock.lock()
-        guard settled == nil else { lock.unlock(); return }
-        settled = result
-        timeoutTask?.cancel()
-        timeoutTask = nil
-        let continuation = self.continuation
-        self.continuation = nil
-        lock.unlock()
+        finish(result, abandonIfSending: false)
+    }
+
+    private func finish(_ result: Result<JSONValue, Error>, abandonIfSending: Bool) {
+        let completion = lock.withLock { () -> (CheckedContinuation<JSONValue, Error>?, [Task<Void, Never>], (@Sendable () -> Void)?)? in
+            guard settled == nil else { return nil }
+            settled = result
+            let close = abandonIfSending && sending ? abandonSend : nil
+            let completion = (continuation, tasks, close)
+            continuation = nil
+            tasks = []
+            abandonSend = nil
+            return completion
+        }
+        guard let (continuation, tasks, close) = completion else { return }
+        tasks.forEach { $0.cancel() }
+        // Start physical close before waking the caller, without joining cleanup
+        // from the inbound reader that may have won the response race.
+        close?()
         continuation?.resume(with: result)
     }
 
-    /// 默认仍为固定期限。可观测 SSH 分块时，允许持续推进的只读大响应延续
-    /// 空闲期限，但 absolute deadline 始终不变；任何停止入站的连接仍及时超时。
+    private func didSend(progress: RACPReceiveProgress?) {
+        lock.withLock {
+            sending = false
+            sentAt = .now
+            sentBytes = progress?.snapshot().bytes
+        }
+    }
+
+    /// The timer is armed before the independent sender starts. The send phase
+    /// has a fixed deadline, even when unrelated bytes are arriving. Only the
+    /// existing read/heartbeat whitelist can extend response idle time; its
+    /// absolute ceiling always starts at the original request instant.
     func wait(
         timeout: TimeInterval,
         method: String,
         receiveProgress: RACPReceiveProgress? = nil,
-        maximumDuration: TimeInterval = 120
+        maximumDuration: TimeInterval = 120,
+        send: (@Sendable () async throws -> Void)? = nil,
+        abandonSend: (@Sendable () -> Void)? = nil
     ) async throws -> JSONValue {
         let started = ContinuousClock.now
-        let initialBytes = receiveProgress?.snapshot().bytes
+        let interval = max(0, timeout)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                lock.lock()
-                if let settled {
-                    lock.unlock()
-                    continuation.resume(with: settled)
+                let existing = lock.withLock { () -> Result<JSONValue, Error>? in
+                    if let settled { return settled }
+                    self.continuation = continuation
+                    self.sending = send != nil
+                    self.abandonSend = abandonSend
+                    if send == nil {
+                        sentAt = started
+                        sentBytes = receiveProgress?.snapshot().bytes
+                    }
+                    return nil
+                }
+                if let existing {
+                    continuation.resume(with: existing)
                     return
                 }
-                self.continuation = continuation
-                lock.unlock()
-                let task = Task { [weak self] in
+                let timer = Task { [weak self] in
+                    let sendDeadline = started + .seconds(interval)
                     let absoluteDeadline = started + .seconds(
-                        receiveProgress == nil ? timeout : max(timeout, maximumDuration)
+                        receiveProgress == nil ? interval : max(interval, maximumDuration)
                     )
                     var lastProgressAt = started
-                    var observedBytes = initialBytes
+                    var observedBytes: UInt64?
                     while !Task.isCancelled {
-                        if let progress = receiveProgress?.snapshot(), progress.bytes != observedBytes {
-                            observedBytes = progress.bytes
-                            lastProgressAt = max(started, progress.lastReceivedAt ?? started)
+                        guard let self else { return }
+                        let phase = self.lock.withLock { (self.sending, self.sentAt, self.sentBytes) }
+                        if !phase.0, let sentAt = phase.1 {
+                            // Discard all progress observed before send completed.
+                            if observedBytes == nil {
+                                observedBytes = phase.2
+                                lastProgressAt = max(lastProgressAt, sentAt)
+                            }
+                            if let receiveProgress {
+                                let progress = receiveProgress.snapshot()
+                                if progress.bytes != observedBytes {
+                                    observedBytes = progress.bytes
+                                    lastProgressAt = max(sentAt, progress.lastReceivedAt ?? sentAt)
+                                }
+                            }
                         }
-                        let deadline = min(absoluteDeadline, lastProgressAt + .seconds(timeout))
+                        let deadline = phase.0 ? sendDeadline
+                            : min(absoluteDeadline, lastProgressAt + .seconds(interval))
                         if ContinuousClock.now >= deadline {
-                            self?.resolve(.failure(RACPClientError.timedOut(method)))
+                            self.finish(.failure(RACPClientError.timedOut(method)), abandonIfSending: true)
                             return
                         }
-                        do {
-                            try await Task.sleep(until: deadline, clock: .continuous)
-                        } catch { return }
+                        do { try await Task.sleep(until: deadline, clock: .continuous) }
+                        catch { return }
                     }
                 }
-                lock.lock()
-                if settled == nil {
-                    timeoutTask = task
-                    lock.unlock()
-                } else {
-                    lock.unlock()
-                    task.cancel()
+                var workers = [timer]
+                if let send {
+                    workers.append(Task { [self] in
+                        guard !Task.isCancelled else { return }
+                        do {
+                            try await send()
+                            didSend(progress: receiveProgress)
+                        } catch {
+                            finish(.failure(error), abandonIfSending: true)
+                        }
+                    })
                 }
+                let completed = lock.withLock { () -> Bool in
+                    guard settled == nil else { return true }
+                    tasks = workers
+                    return false
+                }
+                if completed { workers.forEach { $0.cancel() } }
             }
         } onCancel: {
-            self.resolve(.failure(CancellationError()))
+            self.finish(.failure(CancellationError()), abandonIfSending: true)
         }
     }
 }

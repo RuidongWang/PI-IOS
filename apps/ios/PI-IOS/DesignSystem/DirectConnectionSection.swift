@@ -71,17 +71,13 @@ struct DirectConnectionSection: View {
         .accessibilityElement(children: .contain)
     }
 
-    // MARK: - Configuration
+    // MARK: - 配置
 
     private var configurationGroup: some View {
-        PIGroup(
-            "Direct / 直连",
-            footer: "地址只来自手工输入；保存地址不会自动启用直连。切换仅 SSH 不删除配对或证书 pin。"
-        ) {
+        PIGroup("直连") {
             VStack(alignment: .leading, spacing: PISpacing.s12) {
                 PIFormField(
-                    label: "WSS ENDPOINT",
-                    hint: "精确路径 /v1/racp/ws；不允许账号、query、fragment 或末尾斜杠。",
+                    label: "直连地址",
                     error: endpointError
                 ) {
                     TextField("wss://host:9443/v1/racp/ws", text: $endpoint)
@@ -101,8 +97,7 @@ struct DirectConnectionSection: View {
 
             VStack(alignment: .leading, spacing: PISpacing.s8) {
                 Text("连接模式")
-                    .font(PIFont.metaSmall)
-                    .tracking(0.4)
+                    .font(PIFont.caption)
                     .foregroundStyle(PIColor.text2)
                 Picker(
                     "连接模式",
@@ -117,62 +112,28 @@ struct DirectConnectionSection: View {
                 .pickerStyle(.segmented)
                 .disabled(isBusy)
                 .accessibilityIdentifier("directConnection.preference")
-                Text(preferenceDetail)
-                    .font(PIFont.caption)
-                    .foregroundStyle(PIColor.text2)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, PISpacing.s16)
             .padding(.vertical, PISpacing.s12)
         }
     }
 
-    private var preferenceDetail: String {
-        switch preference {
-        case .sshOnly:
-            return "只使用 SSH 隧道，不尝试 Direct；既有配对与已授权 pin 保留。"
-        case .directPreferred:
-            return "每个新连接意图至多先尝试一次 Direct；只有完整认证、hostId 核对与恢复成功才发布在线。"
-        }
-    }
-
-    // MARK: - Route and phase
+    // MARK: - 通路与阶段
 
     @ViewBuilder
     private var statusBanner: some View {
         switch status.phase {
         case .online(let route):
-            PIStatusBanner(
-                kind: .success,
-                text: "连接已在线 · \(routeTitle(route))",
-                detail: "该状态来自 ConnectionPhase.online；恢复未完成前不会在这里显示在线。"
-            )
+            PIStatusBanner(kind: .success, text: "在线 · \(routeTitle(route))")
         case .failed:
-            PIStatusBanner(
-                kind: .danger,
-                text: "连接未完成",
-                detail: "下方分别保留 Direct 与 SSH 的阶段和稳定错误分类，不以最后一次错误覆盖前一条。"
-            )
+            PIStatusBanner(kind: .danger, text: "连接失败")
         case .fallingBack:
-            PIStatusBanner(
-                kind: .warning,
-                text: "正在回退到 SSH",
-                detail: phaseTitle(status.phase)
-            )
+            PIStatusBanner(kind: .warning, text: "正在回退到 SSH")
         case .offline:
-            if hasRouteFailures {
-                PIStatusBanner(
-                    kind: .warning,
-                    text: "当前离线",
-                    detail: "请查看两条通路各自的失败分类；界面不会据此自动信任新证书或身份。"
-                )
-            } else {
-                PIStatusBanner(
-                    kind: .info,
-                    text: "尚未连接",
-                    detail: "配置与证书授权不等于在线。发起连接后，这里才显示实际 route 与 phase。"
-                )
-            }
+            PIStatusBanner(
+                kind: hasRouteFailures ? .warning : .info,
+                text: hasRouteFailures ? "当前离线" : "尚未连接"
+            )
         default:
             PIStatusBanner(
                 kind: .info,
@@ -183,20 +144,19 @@ struct DirectConnectionSection: View {
     }
 
     private var routeGroup: some View {
-        PIGroup("通路与阶段") {
+        PIGroup("通路") {
             PIListRow(
-                title: "当前活动通路",
-                subtitle: status.activeRoute == nil ? "尚未发布活动通路" : "由 ConnectionStatus.activeRoute 提供",
+                title: "当前通路",
                 value: status.activeRoute.map(routeTitle) ?? "无",
                 icon: "point.3.connected.trianglepath.dotted",
-                iconTint: status.activeRoute == nil ? PIColor.text3 : PIColor.accent,
+                iconTint: status.activeRoute == nil ? PIColor.text3 : PIColor.text2,
                 isEnabled: false,
                 showsDivider: true
             )
             .accessibilityIdentifier("directConnection.activeRoute")
 
             PIListRow(
-                title: "当前阶段",
+                title: "阶段",
                 subtitle: phaseTitle(status.phase),
                 icon: "dot.radiowaves.left.and.right",
                 iconTint: phaseTint,
@@ -207,9 +167,8 @@ struct DirectConnectionSection: View {
 
             if status.promotionFenced {
                 PIListRow(
-                    title: "通路提升保护",
-                    subtitle: "candidate 正在最终核对；旧 SSH 的新业务写与心跳暂时受围栏保护。",
-                    value: "FENCED",
+                    title: "切换保护",
+                    value: "进行中",
                     icon: "lock.shield",
                     iconTint: PIColor.warning,
                     isEnabled: false,
@@ -221,7 +180,7 @@ struct DirectConnectionSection: View {
             if let failure = status.directFailure {
                 PIListRow(
                     title: "Direct 失败",
-                    subtitle: failureDetail(failure),
+                    subtitle: failureText(failure),
                     icon: "bolt",
                     iconTint: PIColor.danger,
                     isEnabled: false,
@@ -233,7 +192,7 @@ struct DirectConnectionSection: View {
             if let failure = status.sshFailure {
                 PIListRow(
                     title: "SSH 失败",
-                    subtitle: failureDetail(failure),
+                    subtitle: failureText(failure),
                     icon: "lock.shield",
                     iconTint: PIColor.danger,
                     isEnabled: false,
@@ -253,7 +212,7 @@ struct DirectConnectionSection: View {
         case .offline:
             return hasRouteFailures ? PIColor.warning : PIColor.text3
         default:
-            return PIColor.accent
+            return PIColor.text2
         }
     }
 
@@ -261,15 +220,14 @@ struct DirectConnectionSection: View {
         status.directFailure != nil || status.sshFailure != nil
     }
 
-    private func failureDetail(_ failure: RouteFailure) -> String {
-        var lines = [
-            "阶段：\(phaseTitle(failure.phase))",
-            "分类：\(failure.category.rawValue) · \(failureCategoryTitle(failure.category))"
-        ]
+    /// R6：失败只写「发生了什么 + 下一步」，不写阶段枚举与稳定错误码。
+    private func failureText(_ failure: RouteFailure) -> String {
+        var text = failureCategoryTitle(failure.category)
         if let retryAfterMs = failure.retryAfterMs {
-            lines.append("建议等待：\(retryAfterMs) ms（仅展示，不由此视图自动重试）")
+            let seconds = Double(retryAfterMs) / 1000
+            text += " · \(seconds.formatted(.number.precision(.fractionLength(0...1)))) 秒后重试"
         }
-        return lines.joined(separator: "\n")
+        return text
     }
 
     private func routeTitle(_ route: ConnectionRoute) -> String {
@@ -286,15 +244,15 @@ struct DirectConnectionSection: View {
         case .connecting(let route):
             return "正在建立 \(routeTitle(route)) 连接"
         case .handshaking(let route):
-            return "\(routeTitle(route)) 协议握手"
+            return "\(routeTitle(route)) 握手"
         case .authenticating(let route):
-            return "\(routeTitle(route)) 设备认证"
+            return "\(routeTitle(route)) 认证"
         case .verifyingIdentity(let route):
-            return "\(routeTitle(route)) 已认证 ping 与 hostId 核对"
+            return "\(routeTitle(route)) 核对身份"
         case .restoring(let route):
-            return "\(routeTitle(route)) 恢复 host 与当前会话"
+            return "\(routeTitle(route)) 恢复会话"
         case .fallingBack:
-            return "Direct 通路失败，正在启动一次 SSH 回退"
+            return "Direct 失败，回退到 SSH"
         case .online(let route):
             return "在线 · \(routeTitle(route))"
         case .reconnecting(let route, let attempt, let delay):
@@ -309,40 +267,36 @@ struct DirectConnectionSection: View {
         switch category {
         case .configuration: return "本机配置不完整"
         case .offline: return "本机无网络"
-        case .dns: return "DNS 解析失败"
+        case .dns: return "服务器地址解析失败"
         case .tcp: return "TCP 连接失败"
-        case .connectTimeout: return "连接或恢复超时"
-        case .socketInterrupted: return "Socket 异常中断"
+        case .connectTimeout: return "连接超时"
+        case .socketInterrupted: return "连接被中断"
         case .heartbeatFailed: return "心跳连续失败"
-        case .tlsTrust: return "叶证书 pin、有效期、SAN 或 hostname 校验失败"
+        case .tlsTrust: return "证书校验失败"
         case .authentication: return "设备认证失败"
         case .deviceRevoked: return "设备已撤销"
         case .hostKey: return "SSH 主机密钥校验失败"
-        case .hostIdentity: return "adaptor hostId 不一致或缺失"
-        case .protocol: return "协议或子协议不匹配"
-        case .endpoint: return "endpoint 配置错误"
+        case .hostIdentity: return "服务器身份不一致"
+        case .protocol: return "版本不匹配"
+        case .endpoint: return "地址格式不对"
         case .permission: return "权限不足"
-        case .validation: return "请求校验失败"
+        case .validation: return "请求被拒绝"
         case .notFound: return "资源不存在"
         case .conflict: return "请求冲突"
-        case .rateLimited: return "连接或消息频率受限"
+        case .rateLimited: return "请求太频繁"
         case .providerUpstream: return "Provider 上游失败"
         case .business: return "业务请求失败"
-        case .internal: return "内部错误"
+        case .internal: return "服务器内部错误"
         case .canceled: return "操作已取消"
         }
     }
 
-    // MARK: - Certificate and host identity
+    // MARK: - 证书与身份
 
     private var trustGroup: some View {
-        PIGroup(
-            "证书与身份",
-            footer: "指纹必须是实际单张叶证书完整 DER 的 SHA-256，不是 PEM、SPKI 或 SSH 主机指纹。只有可信 SSH 提供的候选元数据才可授权。"
-        ) {
+        PIGroup("证书") {
             PIListRow(
                 title: trustState.title,
-                subtitle: trustState.detail,
                 icon: trustState.icon,
                 iconTint: trustState.tint,
                 isEnabled: false,
@@ -352,27 +306,27 @@ struct DirectConnectionSection: View {
 
             VStack(alignment: .leading, spacing: PISpacing.s16) {
                 trustValue(
-                    title: "完整证书 SHA-256",
+                    title: "证书 SHA-256",
                     value: trustPin?.certificateSHA256,
                     emptyText: "尚未取得证书 pin",
                     identifier: "directConnection.certificateSHA256"
                 )
                 trustValue(
-                    title: hasHostIdentityMismatch ? "候选证书 hostId" : "adaptor hostId",
+                    title: hasHostIdentityMismatch ? "候选 hostId" : "adaptor hostId",
                     value: trustPin?.hostId ?? adaptorHostId,
-                    emptyText: "尚未取得可信 adaptor hostId",
+                    emptyText: "尚未取得 hostId",
                     identifier: "directConnection.hostId"
                 )
                 if hasHostIdentityMismatch, let adaptorHostId {
                     trustValue(
-                        title: "已记录的可信 adaptor hostId",
+                        title: "已记录的 hostId",
                         value: adaptorHostId,
                         emptyText: "无",
                         identifier: "directConnection.recordedHostId"
                     )
                 }
                 if isTrustAuthorized, !hasHostIdentityMismatch, let authorizedAt = trustPin?.authorizedAt {
-                    Text("授权时间：\(authorizedAt.formatted(date: .abbreviated, time: .standard))")
+                    Text("授权时间 \(authorizedAt.formatted(date: .abbreviated, time: .standard))")
                         .font(PIFont.caption)
                         .foregroundStyle(PIColor.text3)
                 }
@@ -391,12 +345,7 @@ struct DirectConnectionSection: View {
                 }
                 .accessibilityIdentifier("directConnection.authorize")
                 if !canPerformAuthorization {
-                    Text(authorizationUnavailableText)
-                        .font(PIFont.caption)
-                        .foregroundStyle(PIColor.text3)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Text(authorizationGuidanceText)
+                    Text(authorizationBlockedReason)
                         .font(PIFont.caption)
                         .foregroundStyle(PIColor.text3)
                         .fixedSize(horizontal: false, vertical: true)
@@ -405,7 +354,7 @@ struct DirectConnectionSection: View {
                     HStack(spacing: PISpacing.s8) {
                         ProgressView()
                             .controlSize(.small)
-                            .tint(PIColor.accent)
+                            .tint(PIColor.text2)
                         Text("正在等待调用方完成操作…")
                             .font(PIFont.caption)
                             .foregroundStyle(PIColor.text2)
@@ -430,67 +379,36 @@ struct DirectConnectionSection: View {
 
     private var authorizationButtonTitle: String {
         if hasHostIdentityMismatch {
-            return "经可信 SSH 诊断并重新授权"
+            return "重新核对并授权"
         }
-        return isTrustAuthorized && trustPin != nil ? "重新经可信 SSH 授权" : "经可信 SSH 获取并授权"
+        return isTrustAuthorized && trustPin != nil ? "重新授权" : "经 SSH 授权"
     }
 
-    private var authorizationGuidanceText: String {
+    /// 不能授权时只给下一步，不解释实现（R6）。
+    private var authorizationBlockedReason: String {
         if hasHostIdentityMismatch {
-            return "只允许通过此回调重新取得并核对可信元数据；不会在这里覆盖旧 pin 或 hostId。"
-        }
-        return "回调应取得并核对候选 pin/hostId；只有用户明确授权后才可保存，不能自动接受新证书。"
-    }
-
-    private var authorizationUnavailableText: String {
-        if hasHostIdentityMismatch {
-            return "候选 pin 与已记录 hostId 不一致；请由调用方重新经可信 SSH 诊断，不能覆盖旧身份。"
+            return "先经可信 SSH 重新核对身份"
         }
         if isBusy {
-            return "另一项操作正在进行，完成后才能再次授权。"
+            return "另一项操作进行中"
         }
-        return authorizationDisabledReason ?? "当前无法建立可信 SSH 授权，请先检查 SSH 配置与设备配对。"
+        return authorizationDisabledReason ?? "先完成 SSH 配对"
     }
 
-    private var trustState: (title: String, detail: String, icon: String, tint: Color) {
+    private var trustState: (title: String, icon: String, tint: Color) {
         if hasHostIdentityMismatch {
-            return (
-                "hostId 不一致",
-                "候选证书元数据与可信记录不匹配；不会自动覆盖既有 pin 或身份。",
-                "exclamationmark.octagon",
-                PIColor.danger
-            )
+            return ("hostId 不一致", "exclamationmark.octagon", PIColor.danger)
         }
         if isTrustAuthorized, trustPin != nil {
-            return (
-                "已授权此叶证书",
-                "本机已保存完整 DER SHA-256 pin；授权本身不代表当前在线。",
-                "checkmark.shield",
-                PIColor.success
-            )
+            return ("已授权", "checkmark.shield", PIColor.success)
         }
         if trustPin != nil {
-            return (
-                "等待你明确授权",
-                "逐字核对完整 SHA-256 与 hostId；确认动作只通过下方回调发出。",
-                "person.badge.key",
-                PIColor.warning
-            )
+            return ("待你授权", "person.badge.key", PIColor.warning)
         }
         if isTrustAuthorized {
-            return (
-                "授权状态缺少证书 pin",
-                "不能仅凭授权标记启用 Direct；需要重新经可信 SSH 取得完整元数据。",
-                "exclamationmark.triangle",
-                PIColor.danger
-            )
+            return ("缺少证书 pin", "exclamationmark.triangle", PIColor.danger)
         }
-        return (
-            "尚未取得 Direct 信任信息",
-            "使用下方授权回调经已认证且主机密钥可信的 SSH 获取；公共 WSS 响应没有信任效力。",
-            "shield",
-            PIColor.text3
-        )
+        return ("未取得证书", "shield", PIColor.text3)
     }
 
     private func trustValue(
@@ -502,8 +420,7 @@ struct DirectConnectionSection: View {
         let visibleValue = value.flatMap { $0.isEmpty ? nil : $0 }
         return VStack(alignment: .leading, spacing: PISpacing.s4) {
             Text(title)
-                .font(PIFont.metaSmall)
-                .tracking(0.4)
+                .font(PIFont.caption)
                 .foregroundStyle(PIColor.text2)
             Text(visibleValue ?? emptyText)
                 .font(PIFont.codeMono)
@@ -515,13 +432,10 @@ struct DirectConnectionSection: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: - Explicit direct retry
+    // MARK: - 手动重试
 
     private var retryGroup: some View {
-        PIGroup(
-            "手动重试",
-            footer: "重试只发出新的 Direct candidate 请求；新通路完成认证与恢复前，调用方必须保持当前 SSH，不做后台自动切路。"
-        ) {
+        PIGroup("重试") {
             VStack(alignment: .leading, spacing: PISpacing.s8) {
                 PIPrimaryButton(
                     title: "重试直连",
@@ -531,12 +445,7 @@ struct DirectConnectionSection: View {
                     onRetryDirect()
                 }
                 if !canPerformDirectRetry {
-                    Text(retryUnavailableText)
-                        .font(PIFont.caption)
-                        .foregroundStyle(PIColor.text3)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Text("点击只触发 onRetryDirect 回调；此视图不会自行改 route、phase 或在线状态。")
+                    Text(retryBlockedReason)
                         .font(PIFont.caption)
                         .foregroundStyle(PIColor.text3)
                         .fixedSize(horizontal: false, vertical: true)
@@ -551,14 +460,14 @@ struct DirectConnectionSection: View {
         canRetryDirect && !isBusy && !hasHostIdentityMismatch
     }
 
-    private var retryUnavailableText: String {
+    private var retryBlockedReason: String {
         if hasHostIdentityMismatch {
-            return "hostId 不一致时不能重试；请先完成可信 SSH 诊断与重新授权。"
+            return "先重新核对身份再重试"
         }
         if isBusy {
-            return "另一项连接操作正在进行。"
+            return "另一项操作进行中"
         }
-        return retryDisabledReason ?? "仅当调用方确认 SSH 仍在线且 endpoint、pin、hostId 均已验证时才可重试。"
+        return retryDisabledReason ?? "SSH 在线且证书已验证时可重试"
     }
 }
 

@@ -63,13 +63,12 @@ final class LiveChatUITests: XCTestCase {
         let prompt = "Reply with exactly \(marker)"
         // Prefer the stable identifier: the composer's accessibility type flips
         // between TextField/TextView, so a label-only query is flaky.
-        let composer = app.textFields["conversation.composer"].exists
-            ? app.textFields["conversation.composer"]
-            : app.textFields["给 Agent 的指令"]
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        let composer = app.textFields["conversation.composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 10), "输入框必须有稳定 identifier")
         composer.tap()
         composer.typeText(prompt)
-        let send = app.buttons["发送"]
+        // quiet-v2：发送/中止按钮按 identifier 定位，文案不再参与定位。
+        let send = app.buttons["conversation.send"]
         XCTAssertTrue(send.waitForExistence(timeout: 5))
         XCTAssertTrue(send.isEnabled)
         send.tap()

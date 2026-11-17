@@ -156,6 +156,12 @@ fixture_markers=(
   online-project-lifecycle
   online-upstream-import
   online-model-config
+  extensions-loaded
+  extensions-offline
+  extensions-unsupported
+  extensions-never-run
+  extensions-empty
+  extensions-error
   download-twice
   pair-expired
   sudo-failure

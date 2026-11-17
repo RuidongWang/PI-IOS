@@ -294,6 +294,11 @@ public enum SSHPrivateKeyParser {
         guard let salt = kdfReader.readSSHString(), let rounds = kdfReader.readUInt32() else {
             throw SSHPrivateKeyError.malformed("bcrypt KDF 参数不完整")
         }
+        // bcrypt rounds are attacker-controlled in a key file. Without an upper
+        // bound a malicious key can burn unbounded CPU before any connection.
+        guard rounds >= 1, rounds <= 2_000_000 else {
+            throw SSHPrivateKeyError.malformed("bcrypt 轮数超出允许范围")
+        }
         let keyAndIV: Data
         do {
             keyAndIV = try BCryptPBKDF.derive(
@@ -442,6 +447,11 @@ public enum SSHPrivateKeyParser {
         }
         guard let startRange = trimmed.range(of: beginMarker) else {
             throw SSHPrivateKeyError.unsupportedFormat("不是 OpenSSH 私钥")
+        }
+        // The end marker must come after the begin marker; otherwise the range
+        // below is reversed and `String` range access traps at runtime.
+        guard startRange.lowerBound < endRange.lowerBound else {
+            throw SSHPrivateKeyError.malformed("私钥开始/结束标记顺序错误")
         }
         let payload = trimmed[startRange.upperBound..<endRange.lowerBound]
         return payload.filter { !$0.isWhitespace }

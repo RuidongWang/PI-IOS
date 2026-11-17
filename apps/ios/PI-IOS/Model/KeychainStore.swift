@@ -453,12 +453,57 @@ enum KeychainStore {
         return String(data: data, encoding: .utf8)
     }
 
+    /// 区分「确实不存在」和「读取失败」。仅凭 `loadProviderKey` 的 nil 无法判断
+    /// Keychain 是否暂时不可用，删除流程会误以为已经清理干净。
+    static func providerKeyStatus(hostID: UUID, providerId: String) -> OSStatus {
+        var query = baseQuery(
+            service: Service.providerKey,
+            account: providerKeyAccount(hostID: hostID, providerId: providerId)
+        )
+        query[kSecReturnData as String] = false
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        return SecItemCopyMatching(query as CFDictionary, nil)
+    }
+
     @discardableResult
     static func deleteProviderKey(hostID: UUID, providerId: String) -> Bool {
         delete(
             service: Service.providerKey,
             account: providerKeyAccount(hostID: hostID, providerId: providerId)
         )
+    }
+
+    /// 枚举并删除某个 Host UUID 下的全部 Provider 密钥。
+    ///
+    /// 改绑 Host（换服务器 / 换 adaptor 端口）或删除 Host 时，Host UUID 可能被
+    /// 复用；只删除当前 `modelProviders` 里记录的 providerId 会漏掉 legacy ID 和
+    /// 早已从本机投影中移除的密钥，导致新端点复用同名 providerId 时取到旧密钥。
+    /// 因此这里按账号前缀枚举，覆盖所有历史 ID。
+    ///
+    /// 返回 false 表示至少一条密钥删除失败（或 Keychain 无法枚举），调用方必须
+    /// 提示用户而不是宣称清理完成。
+    @discardableResult
+    static func deleteAllProviderKeys(hostID: UUID) -> Bool {
+        let prefix = "provider-key:\(hostID.uuidString.lowercased()):"
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Service.providerKey,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { return true }
+        guard status == errSecSuccess, let entries = item as? [[String: Any]] else { return false }
+        var allDeleted = true
+        for entry in entries {
+            guard let account = entry[kSecAttrAccount as String] as? String,
+                  account.hasPrefix(prefix) else { continue }
+            if !delete(service: Service.providerKey, account: account) {
+                allDeleted = false
+            }
+        }
+        return allDeleted
     }
 }
 

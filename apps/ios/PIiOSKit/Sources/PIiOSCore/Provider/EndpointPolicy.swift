@@ -27,6 +27,24 @@ public enum EndpointPolicy {
         public var displayReason: String? { rejection?.message }
     }
 
+    /// 非阻断的一致性提示：默认 PI-adaptor 只接受回环 HTTP，并拒绝私网
+    /// 地址；客户端仍允许这些输入（例如用户明确配置 allowPrivateHosts），
+    /// 但应在提交前提示可能被 Host 拒绝，避免“本地通过、服务器失败”。
+    public static func hostCompatibilityWarning(baseUrl: String?) -> String? {
+        guard let baseUrl, !baseUrl.trimmingCharacters(in: .whitespaces).isEmpty,
+              let url = URL(string: baseUrl), let host = url.host?.lowercased() else { return nil }
+        if url.scheme?.lowercased() == "http", host != "localhost", !host.hasSuffix(".localhost"),
+           host != "127.0.0.1", host != "::1" {
+            return "该地址使用明文 HTTP；默认 PI-adaptor 仅允许回环 HTTP，提交可能被拒绝。"
+        }
+        if let octets = ipv4Octets(host), octets[0] == 10
+            || (octets[0] == 172 && (16...31).contains(octets[1]))
+            || (octets[0] == 192 && octets[1] == 168) {
+            return "该地址是私网 IP；默认 PI-adaptor 会拒绝私网端点，提交可能被拒绝。"
+        }
+        return nil
+    }
+
     /// 预校验入口。`baseUrl` 允许为 `nil`/空串（见 `vendorsAllowingImplicitBaseURL`）。
     public static func validate(baseUrl: String?, vendorKey: String) -> Validation {
         let key = vendorKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
