@@ -38,3 +38,8 @@ __pycache__/
 /AGENTS.md
 /apps/ios/design/
 /.pi/
+
+# 本地草稿与打包产物：1.3G 的 .tmp 实验目录、release 打包区、编辑器本地配置
+/.tmp/
+/release/
+/.claude/
