@@ -48,14 +48,32 @@ scan() {
   local hits
 
   if command -v rg >/dev/null 2>&1; then
-    hits=$(rg -n -e "$pattern" "${rg_flags[@]}" . || true)
+    if ! hits=$(rg -n -e "$pattern" "${rg_flags[@]}" .); then
+      local rg_status=$?
+      # 1 = no match; anything else is a scan error and must fail closed.
+      if [[ $rg_status -ne 1 ]]; then
+        echo "check-secrets: rg scan failed (status $rg_status)" >&2
+        status=1
+        return
+      fi
+      hits=""
+    fi
     if [[ -n "$skip" && -n "$hits" ]]; then
       hits=$(printf '%s\n' "$hits" | rg -v -e "$skip" || true)
     fi
   else
-    hits=$(grep -RInE -- "$pattern" "${grep_excludes[@]}" . || true)
+    # Exclude options must precede `--`; after `--` they are treated as paths.
+    if ! hits=$(grep -RInE "${grep_excludes[@]}" -e "$pattern" .); then
+      local grep_status=$?
+      if [[ $grep_status -ne 1 ]]; then
+        echo "check-secrets: grep scan failed (status $grep_status)" >&2
+        status=1
+        return
+      fi
+      hits=""
+    fi
     if [[ -n "$skip" && -n "$hits" ]]; then
-      hits=$(printf '%s\n' "$hits" | grep -vE -- "$skip" || true)
+      hits=$(printf '%s\n' "$hits" | grep -vE -e "$skip" || true)
     fi
   fi
 

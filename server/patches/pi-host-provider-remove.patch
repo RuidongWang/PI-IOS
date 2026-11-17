@@ -1570,6 +1570,11 @@ index 0000000..6dc0181
 +    if (!wasDefault && after.defaultProviderId !== payload.providerId) {
 +      return { ok: true, removed: { providerId: payload.providerId, effect: "deleted", secretCleared: true, ...counts } };
 +    }
++    // Another entry point may have moved the default away while we were
++    // deleting. Never overwrite that newer choice with our transfer target.
++    if (after.defaultProviderId && after.defaultProviderId !== payload.providerId) {
++      return { ok: true, removed: { providerId: payload.providerId, effect: "deleted", secretCleared: true, ...counts } };
++    }
 +    if (plan.eligible > 0 && !plan.comparable) {
 +      return {
 +        ok: false,
@@ -1818,10 +1823,13 @@ index 0000000..6dc0181
 +    observedAt,
 +  });
 +
++  // Unknown inputs take precedence: if providers.list/settings.get failed we
++  // cannot claim "no candidate" as a fact. Only a fully known snapshot may
++  // report `no_candidate`.
++  if (unknownInputs.length > 0) return result(null, "unknown", effectiveOf());
 +  // §5.6.2: no pin and no candidate — "which provider" itself is undetermined,
 +  // so the reason is `no_candidate`, never `provider_missing`.
 +  if (!pinned.providerId && !target) return result(false, "no_candidate", null);
-+  if (unknownInputs.length > 0) return result(null, "unknown", effectiveOf());
 +  if (!target) return result(null, "unknown", null);
 +
 +  checks.providerKnown = Boolean(row);

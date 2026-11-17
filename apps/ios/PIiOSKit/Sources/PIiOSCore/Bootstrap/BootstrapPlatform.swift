@@ -61,14 +61,14 @@ public enum BootstrapPlatformProbe {
         let system = unameSystem.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !system.isEmpty else {
             return .unsupported(
-                reason: BootstrapUnsupportedReason(message: "无法探测服务器平台（uname -s 为空），未下载任何文件")
+                reason: BootstrapUnsupportedReason(message: "无法识别服务器平台，未下载任何文件")
             )
         }
         guard system == supportedPlatform else {
             let shown = unameSystem.trimmingCharacters(in: .whitespacesAndNewlines)
             return .unsupported(
                 reason: BootstrapUnsupportedReason(
-                    message: "当前仅支持 Linux，检测到的平台是「\(shown)」，不会下载或安装任何文件"
+                    message: "当前仅支持 Linux。检测到「\(shown)」，未下载任何文件。"
                 )
             )
         }
@@ -78,7 +78,7 @@ public enum BootstrapPlatformProbe {
             let shown = unameMachine.trimmingCharacters(in: .whitespacesAndNewlines)
             return .unsupported(
                 reason: BootstrapUnsupportedReason(
-                    message: "当前仅支持 x86_64 / arm64，检测到的架构是「\(shown)」，不会下载任何 tarball"
+                    message: "当前仅支持 x86_64 / arm64。检测到「\(shown)」，未下载任何文件。"
                 )
             )
         }

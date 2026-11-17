@@ -33,7 +33,12 @@ protocol RACPSocket: AnyObject {
     var terminationError: RACPSocketTermination { get async }
     func send(text: String) async throws
     func close() async
+    /// Terminates the socket with an explicit local intent. Failure recycling
+    /// must not be recorded as a user cancel, otherwise the connection loop
+    /// treats it as terminal and stops reconnecting.
+    func abort(_ termination: RACPSocketTermination) async
     func waitUntilClosed() async
+    func registerInboundReader(_ reader: Task<Void, Never>)
 }
 
 /// 仅保存字节计数和单调时钟，不保存报文或凭证。NIO 与 actor 通过锁内快照共享。
@@ -63,7 +68,12 @@ final class RACPReceiveProgress: @unchecked Sendable {
 }
 
 extension RACPSocket {
+    func registerInboundReader(_ reader: Task<Void, Never>) {}
     var receiveProgress: RACPReceiveProgress? { nil }
+
+    /// Legacy/test sockets keep their old physical-close behavior. Production
+    /// sockets override this to preserve the intended termination category.
+    func abort(_ termination: RACPSocketTermination) async { await close() }
 
     var terminationError: RACPSocketTermination {
         get async {
@@ -73,13 +83,21 @@ extension RACPSocket {
     }
 }
 
-public final class RACPWebSocket: RACPSocket {
+public final class RACPWebSocket: RACPSocket, @unchecked Sendable {
     /// 契约 §2.1 的上游常量。
     public static let path = "/v1/racp/ws"
     public static let subprotocol = "pi-racp.v1.jsonrpc"
 
     private let channel: Channel
     private let handler: WebSocketClientHandler
+    private let lifecycle: SSHConnectionLifecycle
+    let lifecycleID = UUID()
+    private let closeTask = NetworkCloseTask()
+    private let lock = NSLock()
+    private var closing = false
+    private var reader: Task<Void, Never>?
+    private let socketClosed: NetworkResult<Void>
+    private let closeGrace: TimeInterval
     private let continuation: AsyncStream<Data>.Continuation
     private let terminationState: RACPSocketTerminationState
     let receiveProgress: RACPReceiveProgress?
@@ -93,6 +111,25 @@ public final class RACPWebSocket: RACPSocket {
         bearerToken: String?,
         timeout: TimeInterval = 10
     ) async throws -> RACPWebSocket {
+        try await connect(
+            on: channel,
+            lifecycle: SSHConnectionLifecycle(parent: channel, shutdown: {}),
+            path: path,
+            subprotocol: subprotocol,
+            bearerToken: bearerToken,
+            timeout: timeout
+        )
+    }
+
+    static func connect(
+        on channel: Channel,
+        lifecycle: SSHConnectionLifecycle,
+        path: String = RACPWebSocket.path,
+        subprotocol: String = RACPWebSocket.subprotocol,
+        bearerToken: String?,
+        timeout: TimeInterval = 10,
+        closeGrace: TimeInterval = 0.2
+    ) async throws -> RACPWebSocket {
         let key = WebSocketHandshake.makeKey()
         let request = WebSocketHandshake.request(
             path: path,
@@ -103,6 +140,12 @@ public final class RACPWebSocket: RACPSocket {
         )
         let expectedAccept = WebSocketHandshake.accept(for: key)
         let ready = channel.eventLoop.makePromise(of: Void.self)
+        // Capture channel closure while the event loop is definitely alive. After
+        // the owner seals the lifecycle and shuts the group down, awaiting NIO's
+        // `closeFuture` would submit its completion to a dead loop: a logged
+        // ERROR (fatalError under SWIFTNIO_STRICT) and, for `get()`, a wait that
+        // can never be resumed.
+        let socketClosed = NetworkResult<Void>()
         var continuation: AsyncStream<Data>.Continuation!
         let stream = AsyncStream<Data> { continuation = $0 }
         let terminationState = RACPSocketTerminationState()
@@ -112,7 +155,11 @@ public final class RACPWebSocket: RACPSocket {
             expectedAccept: expectedAccept,
             expectedSubprotocol: subprotocol,
             receiveProgress: receiveProgress,
+            closeGrace: closeGrace,
             onText: { continuation.yield($0) },
+            onTermination: { termination in
+                terminationState.finish(termination)
+            },
             onClosed: { termination in
                 terminationState.finish(termination)
                 continuation.finish()
@@ -120,6 +167,7 @@ public final class RACPWebSocket: RACPSocket {
             ready: ready
         )
         try await channel.eventLoop.submit {
+            channel.closeFuture.whenComplete { _ in socketClosed.succeed(()) }
             try channel.pipeline.syncOperations.addHandler(handler)
         }.get()
         do {
@@ -128,20 +176,41 @@ public final class RACPWebSocket: RACPSocket {
             }
         } catch {
             ConnectionDiagnostics.shared.record(kind: .sshStage, detail: "ws.upgrade-failed")
+            // Same shutdown ordering as performClose: only submit the physical
+            // close while the lifecycle still accepts cleanup. Once sealed the
+            // owner has already closed the parent/child, so do not schedule on
+            // a shut-down loop.
+            if lifecycle.executeCleanup({ channel.close(promise: nil) }) {
+                _ = try? await Self.joinClosed(socketClosed)
+            }
             throw error
         }
         ConnectionDiagnostics.shared.record(kind: .sshStage, detail: "ws.upgraded")
-        continuation.onTermination = { _ in
-            channel.eventLoop.execute { _ = channel.close() }
-        }
-        return RACPWebSocket(
+        let socket = RACPWebSocket(
             channel: channel,
             handler: handler,
             inbound: stream,
             continuation: continuation,
             terminationState: terminationState,
-            receiveProgress: receiveProgress
+            receiveProgress: receiveProgress,
+            lifecycle: lifecycle,
+            socketClosed: socketClosed,
+            closeGrace: closeGrace
         )
+        let registered = lifecycle.registerChild(socket.lifecycleID) { [weak socket] in
+            socket?.requestClose() ?? Task {}
+        }
+        guard registered else {
+            // The lifecycle owner is already shutting down. Request close but
+            // do not join: cleanup may have been sealed, and the owner still
+            // owns physical channel/parent teardown.
+            _ = socket.requestClose(.localCanceled)
+            throw RACPWebSocketError.closed
+        }
+        continuation.onTermination = { [weak socket] _ in
+            _ = socket?.requestClose()
+        }
+        return socket
     }
 
     private init(
@@ -150,7 +219,10 @@ public final class RACPWebSocket: RACPSocket {
         inbound: AsyncStream<Data>,
         continuation: AsyncStream<Data>.Continuation,
         terminationState: RACPSocketTerminationState,
-        receiveProgress: RACPReceiveProgress
+        receiveProgress: RACPReceiveProgress,
+        lifecycle: SSHConnectionLifecycle,
+        socketClosed: NetworkResult<Void>,
+        closeGrace: TimeInterval
     ) {
         self.channel = channel
         self.handler = handler
@@ -158,6 +230,9 @@ public final class RACPWebSocket: RACPSocket {
         self.continuation = continuation
         self.terminationState = terminationState
         self.receiveProgress = receiveProgress
+        self.lifecycle = lifecycle
+        self.socketClosed = socketClosed
+        self.closeGrace = closeGrace
     }
 
     public var terminationError: RACPSocketTermination {
@@ -170,26 +245,145 @@ public final class RACPWebSocket: RACPSocket {
         let bytes = try WebSocketFrameEncoder.encode(frame, maskKey: WebSocketFrameEncoder.randomMaskKey())
         var buffer = channel.allocator.buffer(capacity: bytes.count)
         buffer.writeBytes(bytes)
-        try await channel.writeAndFlush(buffer).get()
+        // Admission and the actual write submission share the same lock with
+        // close scheduling. A text frame admitted before close is therefore
+        // ordered before the close frame; a frame arriving after close can
+        // never be written behind it.
+        let write = lock.withLock { () -> EventLoopFuture<Void>? in
+            guard !closing else { return nil }
+            return channel.writeAndFlush(buffer)
+        }
+        guard let write else { throw RACPWebSocketError.closed }
+        try await write.get()
     }
 
-    /// 主动关闭（先发 close 帧再关通道）。
+    /// Every caller joins the same completion. A caller inside the inbound reader
+    /// only requests close and returns, so cleanup never joins that reader itself.
     public func close() async {
-        terminationState.finish(RACPSocketTermination(closeCode: 1000, reason: "", category: .canceled))
-        let frame = WebSocketFrame(opcode: .close, payload: Data())
-        if let bytes = try? WebSocketFrameEncoder.encode(frame, maskKey: WebSocketFrameEncoder.randomMaskKey()) {
-            var buffer = channel.allocator.buffer(capacity: bytes.count)
-            buffer.writeBytes(bytes)
-            _ = try? await channel.writeAndFlush(buffer).get()
+        await close(termination: .localCanceled)
+    }
+
+    func abort(_ termination: RACPSocketTermination) async {
+        await close(termination: termination)
+    }
+
+    private func close(termination: RACPSocketTermination) async {
+        let completion = requestClose(termination)
+        if RACPInboundContext.socketID != ObjectIdentifier(self) {
+            await completion.value
         }
-        continuation.finish()
-        try? await channel.close().get()
     }
 
     /// 通道关闭（含对端断开）时恢复，用于驱动退避重连。
     public func waitUntilClosed() async {
-        try? await channel.closeFuture.get()
+        _ = try? await Self.joinClosed(socketClosed)
     }
+
+    /// Upper bound for joining the physical close. It must outlive a normal
+    /// grace-window force close but never hang cleanup forever.
+    static let closeJoinTimeout: TimeInterval = 2
+
+    /// Waits for the completion captured on the event loop at connect time.
+    /// Never awaits NIO's `closeFuture` here: once the lifecycle owner has shut
+    /// the group down, submitting that future's completion logs
+    /// `Cannot schedule tasks on an EventLoop that has already shut down`
+    /// (fatalError under SWIFTNIO_STRICT) and can leave the waiter suspended.
+    private static func joinClosed(_ socketClosed: NetworkResult<Void>) async throws {
+        try await withNetworkDeadline(
+            seconds: closeJoinTimeout,
+            timeoutError: { RACPWebSocketError.closed }
+        ) {
+            try await socketClosed.wait()
+        }
+    }
+
+    func registerInboundReader(_ reader: Task<Void, Never>) {
+        let cancel = lock.withLock { () -> Bool in
+            guard !closing else { return true }
+            self.reader = reader
+            return false
+        }
+        if cancel { reader.cancel() }
+    }
+
+    @discardableResult
+    fileprivate func requestClose(
+        _ termination: RACPSocketTermination = .localCanceled
+    ) -> Task<Void, Never> {
+        // Enter CLOSING and settle the local termination in the same critical
+        // section. The first result wins: a remote close already recorded by
+        // the inbound handler must not be rewritten as a local user cancel.
+        let shouldScheduleCloseFrame = lock.withLock { () -> Bool in
+            guard !closing else { return false }
+            closing = true
+            terminationState.finish(termination)
+            return true
+        }
+        // Called after the lock is released, so any send admitted before this
+        // point has already submitted its write and the close frame follows it.
+        if shouldScheduleCloseFrame {
+            scheduleCloseFrameAndForce()
+        }
+        return closeTask.request { [self] in
+            await performClose()
+        }
+    }
+
+    private func performClose() async {
+        let reader = lock.withLock { self.reader }
+        reader?.cancel()
+        continuation.finish()
+        // The owner must not report CLOSED or unregister the child merely
+        // because a caller's bounded wait expired. This replayable result was
+        // captured while the loop was alive, so joining it submits no NIO work.
+        // stopBestEffort/closeBounded can still stop waiting while this owned
+        // cleanup task remains joinable until physical channel closure.
+        _ = try? await socketClosed.wait()
+        reader?.cancel()
+        await reader?.value
+        lock.withLock { self.reader = nil }
+        lifecycle.removeChild(lifecycleID)
+    }
+
+    /// Closing must not await a close-frame flush. The frame is best effort and
+    /// the channel is force-closed when the grace window expires.
+    private func scheduleCloseFrameAndForce() {
+        let scheduled = lifecycle.executeCleanup { [self] in
+            // The lifecycle owner closes/seals the parent before shutting the
+            // event loop down. Once cleanup is rejected or the channel is
+            // already inactive there is nothing left to schedule; falling back
+            // to channel.close() would submit to a possibly shut-down loop.
+            guard channel.isActive else { return }
+            let frame = WebSocketFrame(opcode: .close, payload: Data())
+            if let bytes = try? WebSocketFrameEncoder.encode(
+                frame,
+                maskKey: WebSocketFrameEncoder.randomMaskKey()
+            ) {
+                var buffer = channel.allocator.buffer(capacity: bytes.count)
+                buffer.writeBytes(bytes)
+                channel.writeAndFlush(buffer, promise: nil)
+            }
+            let force: () -> Void = { channel.close(promise: nil) }
+            if closeGrace > 0 {
+                let milliseconds = Int64((closeGrace * 1_000).rounded(.up))
+                channel.eventLoop.scheduleTask(in: .milliseconds(milliseconds), force)
+            } else {
+                force()
+            }
+        }
+        _ = scheduled
+    }
+
+#if DEBUG
+    var hasInboundReaderForTesting: Bool { lock.withLock { reader != nil } }
+
+    /// Exercises the sealed-lifecycle close path without relying on
+    /// nondeterministic callback ordering. Must be a no-op once cleanup is
+    /// rejected; never fall back to scheduling on a shut-down loop.
+    func scheduleCloseForTesting() {
+        scheduleCloseFrameAndForce()
+    }
+#endif
 }
 
 // MARK: - 握手文本
@@ -271,10 +465,15 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
     private let expectedAccept: String
     private let expectedSubprotocol: String
     private let receiveProgress: RACPReceiveProgress
+    private let closeGrace: TimeInterval
     private let onText: @Sendable (Data) -> Void
+    private let onTermination: @Sendable (RACPSocketTermination) -> Void
     private let onClosed: @Sendable (RACPSocketTermination) -> Void
     private let ready: EventLoopPromise<Void>
     private var buffered = Data()
+    /// HTTP upgrade response headers are untrusted and can arrive in unbounded
+    /// chunks before the terminating CRLFCRLF. Cap the pre-upgrade buffer.
+    private static let maximumHandshakeBytes = 16 * 1024
     private var decoder = WebSocketFrameDecoder()
     private var upgraded = false
     private var upgradeFailure: Error?
@@ -285,7 +484,9 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
         expectedAccept: String,
         expectedSubprotocol: String,
         receiveProgress: RACPReceiveProgress,
+        closeGrace: TimeInterval,
         onText: @escaping @Sendable (Data) -> Void,
+        onTermination: @escaping @Sendable (RACPSocketTermination) -> Void,
         onClosed: @escaping @Sendable (RACPSocketTermination) -> Void,
         ready: EventLoopPromise<Void>
     ) {
@@ -293,7 +494,9 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
         self.expectedAccept = expectedAccept
         self.expectedSubprotocol = expectedSubprotocol
         self.receiveProgress = receiveProgress
+        self.closeGrace = closeGrace
         self.onText = onText
+        self.onTermination = onTermination
         self.onClosed = onClosed
         self.ready = ready
     }
@@ -315,6 +518,12 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
         if upgraded { receiveProgress.record(bytes: buffer.readableBytes) }
         buffered.append(Data(buffer.readableBytesView))
         if !upgraded {
+            if buffered.count > Self.maximumHandshakeBytes {
+                upgradeFailure = RACPWebSocketError.protocolViolation("WebSocket 升级响应头超过上限")
+                ready.fail(upgradeFailure!)
+                context.close(promise: nil)
+                return
+            }
             guard let response = WebSocketHandshake.parse(buffered) else { return }
             let terminator = Data("\r\n\r\n".utf8)
             let consumed = buffered.range(of: terminator)!.upperBound
@@ -351,14 +560,21 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
                     onText(frame.payload)
                 case .binary:
                     // 契约 §2.1：只接受文本帧，二进制帧以 1003 关闭。
-                    closeTermination = RACPSocketTermination(closeCode: 1003, reason: "text only")
+                    recordTermination(
+                        RACPSocketTermination(closeCode: 1003, reason: "text only")
+                    )
                     var payload = context.channel.allocator.buffer(capacity: 2)
                     payload.writeInteger(UInt16(1003))
                     sendClose(context: context, payload: payload)
                 case .ping:
                     sendPong(context: context, payload: frame.payload)
                 case .close:
-                    closeTermination = RACPSocketTermination(closePayload: frame.payload)
+                    // Record the remote first terminal state as soon as it is
+                    // observed, before a concurrent local close can settle the
+                    // state as "canceled".
+                    recordTermination(
+                        RACPSocketTermination(closePayload: frame.payload)
+                    )
                     context.close(promise: nil)
                 case .pong, .continuation:
                     break
@@ -367,12 +583,23 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
         } catch {
             upgradeFailure = error
             if case WebSocketFramingError.payloadTooLarge = error {
-                closeTermination = RACPSocketTermination(closeCode: 1009, reason: "payload too large")
+                recordTermination(
+                    RACPSocketTermination(closeCode: 1009, reason: "payload too large")
+                )
             } else {
-                closeTermination = RACPSocketTermination(closeCode: 1002, reason: "")
+                recordTermination(
+                    RACPSocketTermination(closeCode: 1002, reason: "")
+                )
             }
             context.close(promise: nil)
         }
+    }
+
+    private func recordTermination(_ termination: RACPSocketTermination) {
+        if closeTermination == nil {
+            closeTermination = termination
+        }
+        onTermination(termination)
     }
 
     func channelInactive(context: ChannelHandlerContext) {
@@ -411,8 +638,14 @@ private final class WebSocketClientHandler: ChannelDuplexHandler, @unchecked Sen
         ) else { return }
         var buffer = context.channel.allocator.buffer(capacity: bytes.count)
         buffer.writeBytes(bytes)
-        context.writeAndFlush(wrapOutboundOut(buffer)).whenComplete { _ in
-            context.close(promise: nil)
+        context.writeAndFlush(wrapOutboundOut(buffer), promise: nil)
+
+        let force: () -> Void = { context.close(promise: nil) }
+        if closeGrace > 0 {
+            let milliseconds = Int64((closeGrace * 1_000).rounded(.up))
+            context.eventLoop.scheduleTask(in: .milliseconds(milliseconds), force)
+        } else {
+            force()
         }
     }
 }

@@ -136,7 +136,7 @@ public struct BootstrapInstallVerificationAdapter: BootstrapDeviceVerificationCa
             case .tunnelRefused, .closedByPeer, .channelClosed, .networkFailure, .timedOut:
                 return true
             case .authenticationFailed, .hostKeyRejected, .invalidPrivateKey,
-                 .hostKeyAlgorithmUnsupported, .hostKeyUnreadable:
+                 .hostKeyAlgorithmUnsupported, .hostKeyUnreadable, .outputLimitExceeded:
                 return false
             }
         }

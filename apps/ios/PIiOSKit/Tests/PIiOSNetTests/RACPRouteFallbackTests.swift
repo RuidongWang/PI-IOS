@@ -343,6 +343,83 @@ final class RACPRouteFallbackTests: XCTestCase {
         await client.stop()
     }
 
+    func testAbandonedStalledSendAfterOnlineReconnectsAndKeepsStatusStreamAlive() async throws {
+        let first = ScriptedSocket()
+        let second = ScriptedSocket()
+        let factory = ScriptedFactory(results: [
+            .success(RACPConnection(socket: first, route: .ssh)),
+            .success(RACPConnection(socket: second, route: .ssh)),
+        ])
+        let client = makeClient(factory: factory, preference: .sshOnly)
+        let recorder = ConnectionStatusRecorder()
+        let statusStream = await client.statusStream()
+        let collector = Task {
+            for await status in statusStream {
+                recorder.record(status)
+            }
+            recorder.markFinished()
+        }
+
+        await client.start()
+        let firstStatus = try await waitForStatus(client) { $0.phase == .online(.ssh) }
+        let firstGeneration = try XCTUnwrap(firstStatus.activeGeneration)
+
+        // Once online, make the next write hang like an uncooperative NIO
+        // future. The request deadline must abandon it and recycle only the
+        // owning socket, then the loop must reconnect instead of terminating
+        // the state stream as a local cancel.
+        first.stallSends()
+        let request = Task { () -> JSONValue in
+            try await client.v2Request(
+                method: "provider/list",
+                params: .object([:]),
+                timeout: 0.2
+            )
+        }
+        await fulfillment(of: [first.stalledSendStarted], timeout: 2)
+        do {
+            _ = try await request.value
+            XCTFail("the stalled send must settle through the request deadline")
+        } catch let error as RACPClientError {
+            XCTAssertEqual(error, .timedOut("provider/list"))
+        }
+
+        var status = await client.connectionStatus()
+        let deadline = ContinuousClock.now + .seconds(3)
+        while (status.phase != .online(.ssh)
+               || status.activeGeneration == firstGeneration
+               || factory.routes() != [.ssh, .ssh]), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+            status = await client.connectionStatus()
+        }
+        XCTAssertEqual(status.phase, .online(.ssh), "最后状态：\(status)")
+        XCTAssertNotEqual(status.activeGeneration, firstGeneration)
+        XCTAssertEqual(factory.routes(), [.ssh, .ssh])
+
+        let statuses = recorder.snapshot
+        XCTAssertFalse(
+            recorder.finished,
+            "the abandoned send must not finish the state stream"
+        )
+        XCTAssertEqual(
+            statuses.filter { $0.phase == .online(.ssh) }.count,
+            2,
+            "expected a second online milestone on the same live stream: \(statuses.map(\.phase))"
+        )
+        XCTAssertTrue(statuses.map(\.phase).contains { phase in
+            if case .reconnecting = phase { return true }
+            return false
+        })
+        XCTAssertFalse(statuses.contains { status in
+            if case .failed = status.phase { return true }
+            return false
+        })
+
+        await client.stop()
+        await collector.value
+        XCTAssertTrue(recorder.finished, "stop must be the only stream termination")
+    }
+
     func testDirectSuccessNeedsNoSSHConfiguration() async throws {
         let direct = ScriptedSocket()
         let factory = ScriptedFactory(results: [.success(RACPConnection(socket: direct, route: .direct))])
@@ -476,6 +553,28 @@ private final class ScriptedFactory: RACPConnectionFactory, @unchecked Sendable 
     }
 }
 
+private final class ConnectionStatusRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var statuses: [ConnectionStatus] = []
+    private var didFinish = false
+
+    func record(_ status: ConnectionStatus) {
+        lock.withLock { statuses.append(status) }
+    }
+
+    func markFinished() {
+        lock.withLock { didFinish = true }
+    }
+
+    var snapshot: [ConnectionStatus] {
+        lock.withLock { statuses }
+    }
+
+    var finished: Bool {
+        lock.withLock { didFinish }
+    }
+}
+
 private final class ScriptedSocket: RACPSocket, @unchecked Sendable {
     let inbound: AsyncStream<Data>
     private let continuation: AsyncStream<Data>.Continuation
@@ -483,6 +582,10 @@ private final class ScriptedSocket: RACPSocket, @unchecked Sendable {
     private let lock = NSLock()
     private var closed = false
     private var closeCalls = 0
+    private var stallNextSend = false
+    private var stalledSendContinuation: CheckedContinuation<Void, Error>?
+    private var stalledSendReleased = false
+    let stalledSendStarted = XCTestExpectation(description: "stalled send started")
 
     var pingHostID = "host_1"
     var pingErrorCode: String?
@@ -520,6 +623,18 @@ private final class ScriptedSocket: RACPSocket, @unchecked Sendable {
         lock.lock()
         methods.append(method)
         lock.unlock()
+        if consumeStall() {
+            stalledSendStarted.fulfill()
+            try await withCheckedThrowingContinuation { continuation in
+                let resumeNow = lock.withLock { () -> Bool in
+                    if stalledSendReleased { return true }
+                    stalledSendContinuation = continuation
+                    return false
+                }
+                if resumeNow { continuation.resume(returning: ()) }
+            }
+            return
+        }
         guard let id = object["id"] else { return }
         if method == "connection/ping" {
             if ignorePing { return }
@@ -589,25 +704,50 @@ private final class ScriptedSocket: RACPSocket, @unchecked Sendable {
             try? await Task.sleep(for: .seconds(30))
             return
         }
-        lock.lock()
-        guard !closed else {
-            lock.unlock()
-            return
-        }
-        closed = true
-        closeCalls += 1
-        lock.unlock()
-        continuation.finish()
-        termination.finish(RACPSocketTermination(closeCode: 1000, reason: "", category: .canceled))
+        await finish(RACPSocketTermination(closeCode: 1000, reason: "", category: .canceled))
+    }
+
+    func abort(_ termination: RACPSocketTermination) async {
+        await finish(termination)
     }
 
     func waitUntilClosed() async {
         _ = await terminationError
     }
 
+    /// Turns the next send into an uncooperative write, like a NIO future that
+    /// ignores task cancellation. Only abort/close can release it.
+    func stallSends() {
+        lock.withLock { stallNextSend = true }
+    }
+
     func terminate(closeCode: Int, reason: String) {
         continuation.finish()
         termination.finish(RACPSocketTermination(closeCode: closeCode, reason: reason))
+    }
+
+    private func consumeStall() -> Bool {
+        lock.withLock { () -> Bool in
+            guard stallNextSend else { return false }
+            stallNextSend = false
+            return true
+        }
+    }
+
+    private func finish(_ termination: RACPSocketTermination) async {
+        let (shouldFinish, waiter) = lock.withLock { () -> (Bool, CheckedContinuation<Void, Error>?) in
+            guard !closed else { return (false, nil) }
+            closed = true
+            closeCalls += 1
+            stalledSendReleased = true
+            let waiter = stalledSendContinuation
+            stalledSendContinuation = nil
+            return (true, waiter)
+        }
+        guard shouldFinish else { return }
+        waiter?.resume(returning: ())
+        continuation.finish()
+        self.termination.finish(termination)
     }
 
     private func yieldResult(id: Any, result: [String: Any]) {

@@ -81,6 +81,9 @@ final class ProviderDeletionOutcomeTests: XCTestCase {
             let outcome = ProviderDeletionOutcome.blocked(reason)
             XCTAssertFalse(outcome.isCompleted)
             XCTAssertTrue(outcome.keepsRecoveryContext)
+            // The blocked path must never remove the local mapping or key.
+            XCTAssertFalse(outcome.removesLocalRecord)
+            XCTAssertFalse(outcome.clearsLocalKey)
         }
     }
 
@@ -179,7 +182,7 @@ final class ProviderDeletionOutcomeTests: XCTestCase {
         XCTAssertEqual(presentation.tone, .failure)
         XCTAssertNil(presentation.headline)
         XCTAssertTrue(presentation.message.contains(ProviderRemoveFailureCode.removeFailed.displayMessage))
-        XCTAssertTrue(presentation.message.contains("本机映射与密钥线索已保留"))
+        XCTAssertTrue(presentation.message.contains("本机记录与密钥未改动"))
     }
 
     func testUnparseablePresentationKeepsRecoveryContextVisible() {
@@ -190,7 +193,7 @@ final class ProviderDeletionOutcomeTests: XCTestCase {
         )
         XCTAssertEqual(presentation.tone, .failure)
         XCTAssertTrue(presentation.message.contains("服务器回执无法解析"))
-        XCTAssertTrue(presentation.message.contains("本机映射与密钥线索已保留"))
+        XCTAssertTrue(presentation.message.contains("本机记录与密钥未改动"))
     }
 
     func testBlockedPresentationsAreDistinct() {

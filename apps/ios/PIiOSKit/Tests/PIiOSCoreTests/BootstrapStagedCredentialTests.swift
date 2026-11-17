@@ -95,7 +95,7 @@ final class BootstrapStagedCredentialTests: XCTestCase {
             staging: [staged],
             activeDeviceId: staged.deviceId,
             activeDeviceToken: staged.deviceToken,
-            revoke: { _ in await calls.recordRevoke() },
+            revoke: { _ in await calls.recordRevoke(); return .revoked },
             clear: { _ in await calls.recordClear() }
         )
         XCTAssertEqual(firstRemaining, [staged])
@@ -108,7 +108,7 @@ final class BootstrapStagedCredentialTests: XCTestCase {
             staging: firstRemaining,
             activeDeviceId: staged.deviceId,
             activeDeviceToken: staged.deviceToken,
-            revoke: { _ in await calls.recordRevoke() },
+            revoke: { _ in await calls.recordRevoke(); return .revoked },
             clear: { _ in await calls.recordClear() }
         )
         XCTAssertTrue(secondRemaining.isEmpty)

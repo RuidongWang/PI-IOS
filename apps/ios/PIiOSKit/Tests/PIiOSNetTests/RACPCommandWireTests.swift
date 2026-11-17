@@ -145,6 +145,18 @@ final class RACPCommandWireTests: XCTestCase {
         XCTAssertNotNil(payload["context"], "v2 契约要求写操作携带 context")
     }
 
+    func testSessionConfigureSupportsExactlyTheHostSessionModes() throws {
+        // Goal 是审批类型；会话配置只能生成 Host 支持的 agent / plan。
+        XCTAssertEqual(RACPSessionMode.allCases.map(\.rawValue), ["agent", "plan"])
+
+        for mode in RACPSessionMode.allCases {
+            let params = RACPSessionConfigureParams(sessionId: "ses_1", mode: mode)
+            let object = try encodedObject(.sessionConfigure, params: params)
+            let payload = try XCTUnwrap(object["params"] as? [String: Any])
+            XCTAssertEqual(payload["mode"] as? String, mode.rawValue)
+        }
+    }
+
     func testSessionConfigureSendsModelThinkingAndPermissionMode() throws {
         let params = RACPSessionConfigureParams(
             sessionId: "ses_1",

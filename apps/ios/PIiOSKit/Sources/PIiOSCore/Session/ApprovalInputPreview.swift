@@ -31,6 +31,23 @@ public enum ApprovalInputPreview {
         return bounded(rendered, limit: limit)
     }
 
+    /// 授权详情用的完整参数文本。与摘要不同，这里不隐藏任何字段：审批人必须
+    /// 能看到将被执行的全部参数。仍设硬上限保护 UI（64 KiB），超限明确标记。
+    public static let fullTextLimit = 64 * 1024
+
+    public static func fullText(from payload: JSONValue) -> String? {
+        guard let input = payload.value(at: ["input"]), input != .null else { return nil }
+        let rendered: String
+        if case let .string(command) = input {
+            rendered = command
+        } else {
+            rendered = render(input)
+        }
+        guard !rendered.isEmpty else { return nil }
+        guard rendered.count > fullTextLimit else { return rendered }
+        return String(rendered.prefix(fullTextLimit)) + "\n…（完整参数超过 64 KiB，已截断）"
+    }
+
     /// 紧凑、确定性的 JSON 渲染：对象键排序，保证同一输入在不同设备上一致。
     static func render(_ value: JSONValue) -> String {
         switch value {

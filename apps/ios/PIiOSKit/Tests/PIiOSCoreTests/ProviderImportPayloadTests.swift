@@ -33,6 +33,9 @@ final class ProviderImportPayloadTests: XCTestCase {
         )
 
         let sourceId = payload.providers[0].sourceId
+        // Independent known vector (computed offline from the contract's
+        // canonical string), not copied back from the implementation.
+        XCTAssertEqual(sourceId, "14d53a9a2984764da07e47b92bc5e9c2")
         XCTAssertEqual(sourceId.count, 32, "sourceId 为 sha256 前 16 字节的十六进制")
         XCTAssertTrue(sourceId.allSatisfy { $0.isHexDigit && !$0.isUppercase })
 
@@ -216,7 +219,7 @@ final class ProviderImportPayloadTests: XCTestCase {
     }
 
     func testAC04_2_rejectsDisallowedAuthKind() {
-        for authKind in ["none", "azure_api_key", "oauth"] {
+        for authKind in ["azure_api_key", "oauth"] {
             var input = Self.validInput()
             input.authKind = authKind
             let issues = ProviderImportValidation.issues(in: ProviderImportPayload.make(inputs: [input]))
@@ -224,10 +227,24 @@ final class ProviderImportPayloadTests: XCTestCase {
                 issues.contains { $0.kind == .invalidEnumValue && $0.path.hasSuffix("authKind") },
                 "authKind=\(authKind) 应被拒绝：\(issues)"
             )
-            if authKind == "none" {
-                XCTAssertTrue(issues.contains { $0.kind == .secretNotAllowed })
-            }
         }
+        // `none` 是 Host 支持的、无密钥的 Provider：编辑既有记录必须可用，
+        // 但不得携带 secretValue。
+        var noneWithSecret = Self.validInput()
+        noneWithSecret.authKind = "none"
+        let withSecretIssues = ProviderImportValidation.issues(
+            in: ProviderImportPayload.make(inputs: [noneWithSecret])
+        )
+        XCTAssertTrue(withSecretIssues.contains { $0.kind == .secretNotAllowed }, "\(withSecretIssues)")
+        XCTAssertFalse(
+            withSecretIssues.contains { $0.kind == .invalidEnumValue && $0.path.hasSuffix("authKind") },
+            "\(withSecretIssues)"
+        )
+        var noneInput = Self.validInput()
+        noneInput.authKind = "none"
+        noneInput.secretValue = nil
+        let noneIssues = ProviderImportValidation.issues(in: ProviderImportPayload.make(inputs: [noneInput]))
+        XCTAssertFalse(noneIssues.contains { $0.kind == .invalidEnumValue && $0.path.hasSuffix("authKind") }, "\(noneIssues)")
     }
 
     func testAC04_2_rejectsInvalidTypeAndProtocol() {

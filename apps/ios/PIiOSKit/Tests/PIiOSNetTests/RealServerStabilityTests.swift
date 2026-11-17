@@ -96,11 +96,14 @@ final class RealServerStabilityTests: XCTestCase {
         let restartIsolatedHost = env["PI_RESTART_ISOLATED_HOST"] == "1"
         if restartIsolatedHost {
             guard let isolatedPID = env["PI_ISOLATED_HOST_PID"], Int(isolatedPID) != nil,
-                  let isolatedPIDFile = env["PI_ISOLATED_HOST_PID_FILE"] else {
-                throw XCTSkip("重启探针需要隔离实例 PID 与专用 PID 文件")
+                  !isolatedPID.isEmpty, isolatedPID.allSatisfy(\.isNumber),
+                  let isolatedPIDFile = env["PI_ISOLATED_HOST_PID_FILE"],
+                  isolatedPIDFile.hasPrefix("/tmp/"),
+                  !isolatedPIDFile.contains("'"), !isolatedPIDFile.contains("\n") else {
+                // A non-fatal XCTAssert would still run the remote kill/restart
+                // below with untrusted values. Abort the test instead.
+                throw XCTSkip("重启探针的 PID/PID 文件不合法，已拒绝执行远端操作")
             }
-            XCTAssertTrue(isolatedPID.allSatisfy(\.isNumber))
-            XCTAssertTrue(isolatedPIDFile.hasPrefix("/tmp/"))
         }
         for _ in 0..<120 {
             try await Task.sleep(nanoseconds: 500_000_000)
@@ -132,7 +135,7 @@ final class RealServerStabilityTests: XCTestCase {
                         process.waitUntilExit()
                         return process.terminationStatus
                     }
-                    let stopped = try sshProbe("test \"$(cat \(pidFile))\" = \(isolatedPID) && kill -TERM \(isolatedPID)")
+                    let stopped = try sshProbe("test \"$(cat '\(pidFile)')\" = '\(isolatedPID)' && kill -TERM '\(isolatedPID)'")
                     XCTAssertEqual(stopped, 0, "隔离实例正常关闭失败")
                     let restarted = try sshProbe("cd /tmp/pi-ios-release-003/pi-adaptor-0.0.3-linux-x64; nohup node dist/main.js --home /tmp/pi-ios-release-003/home --port 19450 </dev/null >>/tmp/pi-ios-release-003/host.log 2>&1 &")
                     XCTAssertEqual(restarted, 0, "隔离实例重启失败")
@@ -186,6 +189,6 @@ final class RealServerStabilityTests: XCTestCase {
 
 private struct ProbeHostKeyConfirmer: HostKeyConfirming {
     func confirmHostKey(_ key: SSHHostKey, status: HostKeyTrustStatus) async -> HostKeyConfirmation {
-        .trust
+        TestHostKeyPolicy.confirm(key)
     }
 }

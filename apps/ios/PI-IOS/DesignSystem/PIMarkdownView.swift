@@ -9,28 +9,44 @@ import PIiOSCore
 /// 模型在终端场景里几乎必然返回表格与围栏代码块，纯 `Text` 只会把 `|`、`**`、`` ` `` 原样显示。
 struct PIMarkdownView: View {
     let text: String
+    /// 稳定的无障碍标识（`域.对象`）。测试按它定位消息块，不再依赖正文文案。
+    var identifier: String? = nil
+
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         let blocks = PIMarkdownBlockCache.shared.blocks(for: text)
-        VStack(alignment: .leading, spacing: PISpacing.s12) {
+        VStack(alignment: .leading, spacing: 0) {
             ForEach(blocks.indices, id: \.self) { index in
                 block(blocks[index])
+                    .padding(.top, topPadding(for: blocks, at: index))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .textSelection(.enabled)
+        .modifier(PIMarkdownIdentifier(identifier: identifier))
+    }
+
+    private func topPadding(for blocks: [MarkdownBlock], at index: Int) -> CGFloat {
+        guard index > 0 else { return 0 }
+        if case .heading(let level, _) = blocks[index] {
+            return level <= 2 ? PISpacing.s16 : PISpacing.s12
+        }
+        if case .heading(_, _) = blocks[index - 1] {
+            return PISpacing.s8
+        }
+        return PISpacing.s12
     }
 
     @ViewBuilder
     private func block(_ block: MarkdownBlock) -> some View {
         switch block {
         case .heading(let level, let text):
-            Text(PIMarkdownInline.attributed(text, role: .heading(level: level)))
+            Text(PIMarkdownInline.attributed(text, role: .heading(level: level), dynamicTypeSize: dynamicTypeSize))
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, level <= 2 ? PISpacing.s4 : 0)
 
         case .paragraph(let text):
-            Text(PIMarkdownInline.attributed(text, role: .body))
+            Text(PIMarkdownInline.attributed(text, role: .body, dynamicTypeSize: dynamicTypeSize))
                 .lineSpacing(5)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -45,11 +61,12 @@ struct PIMarkdownView: View {
             codeBlock(language: language, code: code)
 
         case .quote(let text):
+            // quiet-v2 §2：accent 只用于可交互，引用条改为发丝线分层。
             HStack(alignment: .top, spacing: PISpacing.s8) {
-                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .fill(PIColor.accentBorder)
-                    .frame(width: 3)
-                Text(PIMarkdownInline.attributed(text, role: .quote))
+                Rectangle()
+                    .fill(PIColor.separator)
+                    .frame(width: 2)
+                Text(PIMarkdownInline.attributed(text, role: .quote, dynamicTypeSize: dynamicTypeSize))
                     .fixedSize(horizontal: false, vertical: true)
             }
             .fixedSize(horizontal: false, vertical: true)
@@ -68,7 +85,7 @@ struct PIMarkdownView: View {
     private func listRow(_ item: MarkdownListItem) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: PISpacing.s8) {
             marker(item.marker)
-            Text(PIMarkdownInline.attributed(item.text, role: .list))
+            Text(PIMarkdownInline.attributed(item.text, role: .list, dynamicTypeSize: dynamicTypeSize))
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -81,18 +98,19 @@ struct PIMarkdownView: View {
         switch marker {
         case .bullet:
             Text("•")
-                .font(PIFont.body)
+                .font(PIMarkdownTypography.font(role: .list, dynamicTypeSize: dynamicTypeSize))
                 .foregroundStyle(PIColor.text2)
                 .frame(minWidth: 10, alignment: .leading)
         case .ordered(let number):
             Text("\(number).")
-                .font(PIFont.body)
+                .font(PIMarkdownTypography.font(role: .list, dynamicTypeSize: dynamicTypeSize))
                 .foregroundStyle(PIColor.text2)
                 .frame(minWidth: 18, alignment: .trailing)
         case .task(let checked):
             Image(systemName: checked ? "checkmark.square.fill" : "square")
-                .font(.system(size: 13, weight: .regular))
-                .foregroundStyle(checked ? PIColor.accent : PIColor.text3)
+                .font(PIMarkdownTypography.font(role: .list, dynamicTypeSize: dynamicTypeSize))
+                // 勾选是状态，不是可交互元素：不上 accent。
+                .foregroundStyle(checked ? PIColor.text2 : PIColor.text3)
                 .frame(minWidth: 10, alignment: .leading)
         }
     }
@@ -100,16 +118,16 @@ struct PIMarkdownView: View {
     private func codeBlock(language: String?, code: String) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if let language, !language.isEmpty {
-                Text(language.uppercased())
-                    .font(PIFont.metaSmall)
-                    .tracking(0.8)
-                    .foregroundStyle(PIColor.text3)
+                // quiet-v2 §3：不写 tracking、不做全大写；语言名只是机器数据的标签。
+                Text(language)
+                    .font(PIMarkdownTypography.font(role: .language, dynamicTypeSize: dynamicTypeSize, monospaced: true))
+                    .foregroundStyle(PIColor.text2)
                     .padding(.horizontal, PISpacing.s12)
                     .padding(.top, PISpacing.s8)
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code.trimmingCharacters(in: .newlines))
-                    .font(.system(size: 13, design: .monospaced))
+                    .font(PIMarkdownTypography.font(role: .code, dynamicTypeSize: dynamicTypeSize, monospaced: true))
                     .foregroundStyle(PIColor.text)
                     .textSelection(.enabled)
                     .padding(PISpacing.s12)
@@ -118,27 +136,32 @@ struct PIMarkdownView: View {
             .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(PIColor.surface3, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
+        .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
                 .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
         )
     }
 
-    /// 表格：横向可滚动，列为按内容量出的固定宽度。
-    ///
-    /// 之前用 `Grid` + `fixedSize(horizontal:)` 放在横向 `ScrollView` 里：测量阶段拿到
-    /// 的是无限宽度提案，每行只按单行高度排版；真正布局时单元格又被 `maxWidth` 收窄成
-    /// 多行，行高没跟上，长文本就压到下一行上。这里先把每列宽度算出来，行内单元格再用
-    /// 显式宽度排版，测量与布局使用同一约束，行高自然由最高单元格决定。
     private func tableView(header: [String], rows: [[String]]) -> some View {
-        let columnCount = max(header.count, rows.map(\.count).max() ?? 0)
-        let widths = (0..<max(columnCount, 1)).map { column in
-            tableColumnWidth(
-                header: column < header.count ? header[column] : "",
-                rows: rows.map { column < $0.count ? $0[column] : "" }
-            )
-        }
+        PIMarkdownTableView(header: header, rows: rows, dynamicTypeSize: dynamicTypeSize)
+    }
+}
+
+/// 固定列宽让同一 GridRow 按最高单元格撑高；外框留在滚动容器上，宽表只滚动内部内容。
+private struct PIMarkdownTableView: View {
+    let header: [String]
+    let rows: [[String]]
+    let dynamicTypeSize: DynamicTypeSize
+
+    @State private var availableWidth: CGFloat = 0
+
+    private static let cellHorizontalPadding: CGFloat = PISpacing.s12
+    private static let cellVerticalPadding: CGFloat = PISpacing.s12
+    private static let cellLineSpacing: CGFloat = 4
+
+    var body: some View {
+        let widths = columnWidths
         return ScrollView(.horizontal, showsIndicators: false) {
             Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
@@ -146,7 +169,8 @@ struct PIMarkdownView: View {
                         tableCell(
                             column < header.count ? header[column] : "",
                             role: .tableHeader,
-                            isHeader: true
+                            isHeader: true,
+                            showsDivider: !rows.isEmpty
                         )
                         .frame(width: widths[column], alignment: .leading)
                     }
@@ -157,65 +181,94 @@ struct PIMarkdownView: View {
                             tableCell(
                                 column < rows[row].count ? rows[row][column] : "",
                                 role: .tableCell,
-                                isHeader: false
+                                isHeader: false,
+                                showsDivider: row < rows.count - 1
                             )
                             .frame(width: widths[column], alignment: .leading)
                         }
                     }
                 }
             }
-            // 列宽已固定，网格宽度就是各列之和；GridRow 会把同一行的单元格拉成一致高度，
-            // 表头底色与分隔线不会因为某格多行而断开。
             .fixedSize(horizontal: true, vertical: false)
-            .clipShape(RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
-                    .strokeBorder(PIColor.separatorStrong, lineWidth: PIMetrics.hairline)
-            )
         }
         .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipShape(RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
+        )
+        .background(
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { updateAvailableWidth(proxy.size.width) }
+                    .onChange(of: proxy.size.width) { _, newWidth in
+                        updateAvailableWidth(newWidth)
+                    }
+            }
+        )
     }
 
-    /// 列宽 = 最长内容的单行宽度（含单元格左右内边距），夹在 [56, 220]。
-    private func tableColumnWidth(header: String, rows: [String]) -> CGFloat {
-        let font = UIFont.systemFont(
-            ofSize: PIMarkdownTextRole.tableCell.size,
-            weight: .semibold
-        )
-        var widest: CGFloat = 0
-        for value in [header] + rows {
-            let plain = value
-                .replacingOccurrences(of: "**", with: "")
-                .replacingOccurrences(of: "__", with: "")
-                .replacingOccurrences(of: "~~", with: "")
-                .replacingOccurrences(of: "`", with: "")
-            let width = (plain as NSString).size(withAttributes: [.font: font]).width
-            widest = max(widest, width)
+    /// 内容较窄时均分剩余宽度；内容较宽时保留固有列宽，仅由内部 ScrollView 横滚。
+    private var columnWidths: [CGFloat] {
+        let columnCount = max(header.count, rows.map(\.count).max() ?? 0)
+        let base = (0..<max(columnCount, 1)).map { column in
+            intrinsicColumnWidth(
+                header: column < header.count ? header[column] : "",
+                rows: rows.map { column < $0.count ? $0[column] : "" }
+            )
         }
-        let horizontalPadding = Self.tableCellHorizontalPadding * 2
+        let remaining = availableWidth - base.reduce(0, +)
+        guard remaining > 0 else { return base }
+        let expansion = remaining / CGFloat(base.count)
+        return base.map { $0 + expansion }
+    }
+
+    /// UIFont 测量与 Text 使用同一 Dynamic Type 档位，切换字号后由 body 重新计算。
+    private func intrinsicColumnWidth(header: String, rows: [String]) -> CGFloat {
+        let headerFont = PIMarkdownTypography.uiFont(role: .tableHeader, dynamicTypeSize: dynamicTypeSize)
+        let cellFont = PIMarkdownTypography.uiFont(role: .tableCell, dynamicTypeSize: dynamicTypeSize)
+        var widest = measuredWidth(of: header, font: headerFont)
+        for value in rows {
+            widest = max(widest, measuredWidth(of: value, font: cellFont))
+        }
+        let horizontalPadding = Self.cellHorizontalPadding * 2
         return min(max(widest.rounded(.up) + horizontalPadding, 56), 220)
     }
 
-    /// 单元格内边距：横向留白比正文更宽，纵向留白支撑多行文本的呼吸感。
-    private static let tableCellHorizontalPadding: CGFloat = PISpacing.s12
-    private static let tableCellVerticalPadding: CGFloat = PISpacing.s12
-    /// 单元格内多行文本的行间追加量；13pt 字号下 4pt 能让换行不糊成一片。
-    private static let tableCellLineSpacing: CGFloat = 4
+    private func measuredWidth(of value: String, font: UIFont) -> CGFloat {
+        let plain = value
+            .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "__", with: "")
+            .replacingOccurrences(of: "~~", with: "")
+            .replacingOccurrences(of: "`", with: "")
+        return (plain as NSString).size(withAttributes: [.font: font]).width
+    }
 
-    private func tableCell(_ text: String, role: PIMarkdownTextRole, isHeader: Bool) -> some View {
-        Text(PIMarkdownInline.attributed(text, role: role))
-            .lineSpacing(Self.tableCellLineSpacing)
+    private func updateAvailableWidth(_ width: CGFloat) {
+        guard width > 0, abs(width - availableWidth) > 0.5 else { return }
+        availableWidth = width
+    }
+
+    private func tableCell(
+        _ text: String,
+        role: PIMarkdownTextRole,
+        isHeader: Bool,
+        showsDivider: Bool
+    ) -> some View {
+        Text(PIMarkdownInline.attributed(text, role: role, dynamicTypeSize: dynamicTypeSize))
+            .lineSpacing(Self.cellLineSpacing)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, Self.tableCellHorizontalPadding)
-            .padding(.vertical, Self.tableCellVerticalPadding)
-            // 撑满整行高度：同一行里短单元格的分隔线才会和最长的齐平，
-            // 否则每格按自己的文本高度画线，分隔线会呈阶梯状错开。
+            .padding(.horizontal, Self.cellHorizontalPadding)
+            .padding(.vertical, Self.cellVerticalPadding)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(isHeader ? PIColor.surface3 : Color.clear)
+            .background(isHeader ? PIColor.surface2 : Color.clear)
             .overlay(alignment: .bottom) {
-                Rectangle()
-                    .fill(PIColor.separator)
-                    .frame(height: 1)
+                if showsDivider {
+                    Rectangle()
+                        .fill(PIColor.separator)
+                        .frame(height: PIMetrics.hairline)
+                }
             }
     }
 }
@@ -229,40 +282,57 @@ enum PIMarkdownTextRole {
     case quote
     case tableHeader
     case tableCell
+    case code
+    case language
 
-    /// 字号沿用 design-system.md §2.2：正文 15，标题按层级收缩，表格/代码用小一号。
+    /// Large 基准：H1 20 / H2 17 / H3 16 / 正文 16 / 表格与代码 13。
     var size: CGFloat {
         switch self {
-        case .body, .list:
-            return 15
+        case .body, .list, .quote:
+            return 16
         case .heading(let level):
             switch level {
-            case 1: return 21
-            case 2: return 18
+            case 1: return 20
+            case 2: return 17
             case 3: return 16
             default: return 15
             }
-        case .quote:
-            return 15
-        case .tableHeader, .tableCell:
+        case .tableHeader, .tableCell, .code:
             return 13
+        case .language:
+            return 12
         }
     }
 
-    var weight: Font.Weight {
+    var weight: UIFont.Weight {
         switch self {
-        case .heading:
-            return .semibold
-        case .tableHeader:
+        case .heading, .tableHeader:
             return .semibold
         default:
             return .regular
         }
     }
 
+    var textStyle: UIFont.TextStyle {
+        switch self {
+        case .heading(let level):
+            switch level {
+            case 1: return .title3
+            case 2: return .headline
+            default: return .callout
+            }
+        case .body, .list, .quote:
+            return .callout
+        case .tableHeader, .tableCell, .code:
+            return .footnote
+        case .language:
+            return .caption1
+        }
+    }
+
     var color: Color {
         switch self {
-        case .quote:
+        case .quote, .language:
             return PIColor.text2
         default:
             return PIColor.text
@@ -277,6 +347,65 @@ enum PIMarkdownTextRole {
         case .quote: return "quote"
         case .tableHeader: return "th"
         case .tableCell: return "td"
+        case .code: return "code"
+        case .language: return "language"
+        }
+    }
+}
+
+private enum PIMarkdownTypography {
+    static func font(
+        role: PIMarkdownTextRole,
+        dynamicTypeSize: DynamicTypeSize,
+        weight: UIFont.Weight? = nil,
+        monospaced: Bool = false,
+        sizeAdjustment: CGFloat = 0
+    ) -> Font {
+        Font(uiFont(
+            role: role,
+            dynamicTypeSize: dynamicTypeSize,
+            weight: weight,
+            monospaced: monospaced,
+            sizeAdjustment: sizeAdjustment
+        ))
+    }
+
+    static func uiFont(
+        role: PIMarkdownTextRole,
+        dynamicTypeSize: DynamicTypeSize,
+        weight: UIFont.Weight? = nil,
+        monospaced: Bool = false,
+        sizeAdjustment: CGFloat = 0
+    ) -> UIFont {
+        let size = max(role.size + sizeAdjustment, 1)
+        let weight = weight ?? role.weight
+        let base = monospaced
+            ? UIFont.monospacedSystemFont(ofSize: size, weight: weight)
+            : UIFont.systemFont(ofSize: size, weight: weight)
+        let traits = UITraitCollection(
+            preferredContentSizeCategory: dynamicTypeSize.piMarkdownContentSizeCategory
+        )
+        return UIFontMetrics(forTextStyle: role.textStyle)
+            .scaledFont(for: base, compatibleWith: traits)
+    }
+}
+
+private extension DynamicTypeSize {
+    var piMarkdownContentSizeCategory: UIContentSizeCategory {
+        switch self {
+        case .xSmall: return .extraSmall
+        case .small: return .small
+        case .medium: return .medium
+        case .large: return .large
+        case .xLarge: return .extraLarge
+        case .xxLarge: return .extraExtraLarge
+        case .xxxLarge: return .extraExtraExtraLarge
+        case .accessibility1: return .accessibilityMedium
+        case .accessibility2: return .accessibilityLarge
+        case .accessibility3: return .accessibilityExtraLarge
+        case .accessibility4: return .accessibilityExtraExtraLarge
+        case .accessibility5: return .accessibilityExtraExtraExtraLarge
+        default: return .large
         }
     }
 }
@@ -284,8 +413,13 @@ enum PIMarkdownTextRole {
 // MARK: - 行内语法
 
 enum PIMarkdownInline {
-    static func attributed(_ text: String, role: PIMarkdownTextRole) -> AttributedString {
-        let key = "\(role.cacheKey)|\(text)" as NSString
+    static func attributed(
+        _ text: String,
+        role: PIMarkdownTextRole,
+        dynamicTypeSize: DynamicTypeSize
+    ) -> AttributedString {
+        let contentSizeCategory = dynamicTypeSize.piMarkdownContentSizeCategory.rawValue
+        let key = "\(role.cacheKey)|\(contentSizeCategory)|\(text)" as NSString
         if let cached = PIMarkdownInlineCache.shared.value(forKey: key) {
             return cached
         }
@@ -301,25 +435,27 @@ enum PIMarkdownInline {
             value = AttributedString(text)
         }
 
-        let baseFont = Font.system(size: role.size, weight: role.weight)
-        value.font = baseFont
+        value.font = PIMarkdownTypography.font(role: role, dynamicTypeSize: dynamicTypeSize)
         value.foregroundColor = role.color
 
         for run in value.runs {
-            guard let intent = run.inlinePresentationIntent else {
-                if run.link != nil {
-                    value[run.range].foregroundColor = PIColor.accent
+            let intent = run.inlinePresentationIntent
+            let isStrong = intent?.contains(.stronglyEmphasized) == true
+            let isEmphasized = intent?.contains(.emphasized) == true
+            let isCode = intent?.contains(.code) == true
+            if isStrong || isEmphasized || isCode {
+                let weight = isStrong ? (role.weight == .regular ? .semibold : .bold) : role.weight
+                var font = PIMarkdownTypography.font(
+                    role: role,
+                    dynamicTypeSize: dynamicTypeSize,
+                    weight: weight,
+                    monospaced: isCode,
+                    sizeAdjustment: isCode ? -0.5 : 0
+                )
+                if isEmphasized {
+                    font = font.italic()
                 }
-                continue
-            }
-            if intent.contains(.stronglyEmphasized) {
-                value[run.range].font = .system(size: role.size, weight: role.weight == .regular ? .semibold : .bold)
-            }
-            if intent.contains(.emphasized) {
-                value[run.range].font = .system(size: role.size, weight: role.weight).italic()
-            }
-            if intent.contains(.code) {
-                value[run.range].font = .system(size: role.size - 0.5, design: .monospaced)
+                value[run.range].font = font
             }
             if run.link != nil {
                 value[run.range].foregroundColor = PIColor.accent
@@ -357,6 +493,23 @@ final class PIMarkdownBlockCache {
         let blocks = MarkdownParser.blocks(from: text)
         cache.setObject(MarkdownBlockBox(blocks), forKey: key, cost: text.utf8.count)
         return blocks
+    }
+}
+
+private struct PIMarkdownIdentifier: ViewModifier {
+    let identifier: String?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let identifier {
+            // `.contain` 让容器成为真实的无障碍元素（否则 identifier 可能落不到节点上），
+            // 子文本仍然逐段可读、可选中。
+            content
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier(identifier)
+        } else {
+            content
+        }
     }
 }
 

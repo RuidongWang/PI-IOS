@@ -69,21 +69,27 @@ final class OfflineHostCacheUITests: XCTestCase {
         XCTAssertTrue(cachedRow("fixture-shared-session").exists)
         XCTAssertFalse(cachedRow("fixture-session-\(absent)").exists)
         assertNoContext(from: absent)
-        XCTAssertTrue(app.staticTexts["离线：下面是可以只读查看的缓存会话。"].exists)
+        // quiet-v2 R9：离线状态只解释一次——选择器直接显示连接状态，行内副标题写只读。
+        // Menu 只有一个无障碍元素，状态读在 value 上。
+        XCTAssertTrue(
+            (app.buttons["sidebar.host"].value as? String ?? "").contains("未连接"),
+            "服务器选择器显示实时连接状态"
+        )
+        XCTAssertTrue(
+            cachedRow("fixture-session-\(host)").label.contains("本机缓存（只读）"),
+            "只读状态写在缓存行内，不再另起一段说明"
+        )
     }
 
     private func assertReadOnlyConversation(host: String, kind: String, absent: String) {
         XCTAssertFalse(app.buttons["切换服务器"].exists, "Conversation assertions require a closed drawer.")
-        let readOnly = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS %@", "离线只读 · 缓存可能已过期"))
-            .firstMatch
-        XCTAssertTrue(readOnly.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["离线：发送已禁用"].exists)
-        let input = app.textFields["给 Agent 的指令"]
+        // 会话域的离线文案不在本域断言范围内，按 identifier 定位状态条。
+        XCTAssertTrue(app.staticTexts["conversation.offlineNotice"].waitForExistence(timeout: 5))
+        let input = app.textFields["conversation.composer"]
         XCTAssertTrue(input.exists)
         XCTAssertFalse(input.isEnabled)
-        XCTAssertTrue(app.buttons["发送"].exists)
-        XCTAssertFalse(app.buttons["发送"].isEnabled)
+        XCTAssertTrue(app.buttons["conversation.send"].exists)
+        XCTAssertFalse(app.buttons["conversation.send"].isEnabled)
 
         for label in ["允许一次", "本会话允许", "拒绝"] {
             XCTAssertTrue(app.buttons[label].exists)

@@ -1,72 +1,82 @@
 import SwiftUI
 import UIKit
 
-/// 颜色 token —— 「石墨信号 / Graphite Signal」。
+/// 颜色 token —— 「静 / Quiet · 冷灰蓝」。契约见 `apps/ios/design/quiet-v2.md`。
 ///
-/// 设计口径：这是一台远程仪表，不是聊天玩具。页面底是暖石墨（浅色为暖纸），
-/// 面板分层靠明度而不是重投影；强调色只有一种琥珀信号色，其余语义色只表达状态。
-/// 浅色 / 深色各一套精确 hex，语义名保持不变，页面只引用 token。
+/// 所有页面只引用这里的语义色。浅色、深色与 Increase Contrast 均由
+/// UIKit dynamic provider 按传入 traits 解析；Soft 色不使用透明度合成。
 enum PIColor {
     // MARK: 底色与表面
 
-    /// 页面顶部底色（渐变起点）。
-    static let bgTop = dynamic(light: 0xF5F2EB, dark: 0x12161C)
-    /// 页面底部底色（渐变终点）。
-    static let bgBottom = dynamic(light: 0xEDE8DE, dark: 0x090C10)
-    /// 兼容旧调用：页面背景主色。
-    static let bg = bgTop
-    /// 列表、卡片、浮层。
-    static let surface = dynamic(light: 0xFFFFFF, dark: 0x171C23)
-    /// 次级表面：输入框、配置 chip、次级按钮。
-    static let surface2 = dynamic(light: 0xEDE9E0, dark: 0x20262F)
-    /// 三级表面：内嵌卡片、分段控件槽底。
-    static let surface3 = dynamic(light: 0xE4DED2, dark: 0x29303A)
-    /// 分隔线 / 描边。
-    static let separator = dynamic(light: 0xDCD6CA, dark: 0x2C333D)
-    /// 强描边：焦点、选中轮廓。
-    static let separatorStrong = dynamic(light: 0xC9C2B4, dark: 0x3A4350)
+    static let page = dynamic(light: 0xF4F6F9, dark: 0x0F141B)
+    /// 兼容旧调用：页面底。
+    static let bg = page
+    static let surface = dynamic(light: 0xFFFFFF, dark: 0x171E27)
+    static let surface2 = dynamic(light: 0xEDF1F5, dark: 0x202936)
+    /// 禁用图标底与少量内嵌控件，不承载普通文本。
+    static let surface3 = dynamic(light: 0xE3E9F0, dark: 0x2B3542)
+    /// 纯装饰发丝线；必要控件边界使用 separatorStrong。
+    static let separator = dynamic(
+        light: 0xD9E0E8, dark: 0x303B49,
+        lightHighContrast: 0xB4C0CE, darkHighContrast: 0x536377
+    )
+    static let separatorStrong = dynamic(
+        light: 0x748295, dark: 0x899AAF,
+        lightHighContrast: 0x5E6B7C, darkHighContrast: 0xA7B7CA
+    )
 
     // MARK: 文本
 
-    static let text = dynamic(light: 0x1A1D21, dark: 0xEDEFF2)
-    static let text2 = dynamic(light: 0x5F6670, dark: 0x9AA4B2)
-    static let text3 = dynamic(light: 0x8A8F98, dark: 0x6F7A88)
+    static let text = dynamic(light: 0x18202B, dark: 0xF0F3F7)
+    static let text2 = dynamic(
+        light: 0x4B5667, dark: 0xB4BECB,
+        lightHighContrast: 0x323C49, darkHighContrast: 0xD5DCE5
+    )
+    static let text3 = dynamic(
+        light: 0x5F6B7A, dark: 0x96A3B4,
+        lightHighContrast: 0x465160, darkHighContrast: 0xC0CAD6
+    )
 
-    // MARK: 信号色
+    // MARK: 可交互（唯一强调色）
 
-    /// 主操作、选中、可交互强调。
-    static let accent = dynamic(light: 0xA86500, dark: 0xF2A33C)
-    /// 强调色的更亮一档，用于深色下的文字/图标。
-    static let accentBright = dynamic(light: 0x8A5200, dark: 0xFFC46B)
-    /// 实心强调色按钮上的文字。
-    static let onAccent = dynamic(light: 0xFFFFFF, dark: 0x17120A)
-    /// 选中行、用户气泡的柔和强调底。
-    static let accentSoft = dynamic(light: 0xF5E6CE, dark: 0x342A19)
-    /// 强调色描边。
-    static let accentBorder = dynamic(light: 0xE2C595, dark: 0x5A4726)
+    /// 主按钮、可点文字、选中态。**不得用于装饰**。
+    static let accent = dynamic(light: 0x315FD5, dark: 0x9DB8FF)
+    static let onAccent = dynamic(light: 0xFFFFFF, dark: 0x101623)
+    static let accentSoft = dynamic(light: 0xE8EEFC, dark: 0x223454)
+    static let accentBorder = accent
+    static let accentBright = accent
 
-    static let danger = dynamic(light: 0xB83A3A, dark: 0xE5675E)
-    static let dangerSoft = dynamic(light: 0xF8E4E1, dark: 0x3A2323)
-    static let warning = dynamic(light: 0x8A6400, dark: 0xE0BC5C)
-    static let warningSoft = dynamic(light: 0xF7EFD8, dark: 0x342D18)
-    static let success = dynamic(light: 0x1F7A5C, dark: 0x48C7A3)
-    static let successSoft = dynamic(light: 0xE1F2EB, dark: 0x1B332B)
+    // MARK: 状态（只表达状态）
 
-    /// 遮罩（侧边栏 / 浮层背后的压暗层）。
-    static let scrim = Color.black.opacity(0.5)
-    /// 卡片轻投影：深色下几乎不可见，浅色下给表面一点离地感。
-    static let cardShadow = Color.black.opacity(0.06)
-    /// 浮层 / 输入条的投影。
-    static let floatingShadow = Color.black.opacity(0.16)
+    static let danger = dynamic(light: 0xA92835, dark: 0xFF918B)
+    static let warning = dynamic(light: 0x754500, dark: 0xE7B96A)
+    static let success = dynamic(light: 0x146344, dark: 0x72C9A5)
+    static let dangerSoft = dynamic(light: 0xFCECEF, dark: 0x3B2329)
+    static let warningSoft = dynamic(light: 0xFAF0DC, dark: 0x382E1E)
+    static let successSoft = dynamic(light: 0xE7F3ED, dark: 0x1D352D)
 
-    private static func dynamic(light: UInt32, dark: UInt32) -> Color {
-        Color(uiColor: dynamicUIColor(light: light, dark: dark))
-    }
+    // MARK: 浮层
 
-    fileprivate static func dynamicUIColor(light: UInt32, dark: UInt32) -> UIColor {
-        UIColor { traits in
-            traits.userInterfaceStyle == .dark ? UIColor(rgb: dark) : UIColor(rgb: light)
-        }
+    static let scrim = dynamic(light: 0x000000, dark: 0x000000, lightAlpha: 0.36, darkAlpha: 0.52)
+    static let cardShadow = dynamic(light: 0x000000, dark: 0x000000, lightAlpha: 0, darkAlpha: 0)
+    static let floatingShadow = dynamic(light: 0x101923, dark: 0x000000, lightAlpha: 0.10, darkAlpha: 0.28)
+
+    private static func dynamic(
+        light: UInt32,
+        dark: UInt32,
+        lightHighContrast: UInt32? = nil,
+        darkHighContrast: UInt32? = nil,
+        lightAlpha: CGFloat = 1,
+        darkAlpha: CGFloat = 1
+    ) -> Color {
+        Color(uiColor: UIColor { traits in
+            let isDark = traits.userInterfaceStyle == .dark
+            let isHighContrast = traits.accessibilityContrast == .high
+            let rgb = isDark
+                ? (isHighContrast ? darkHighContrast ?? dark : dark)
+                : (isHighContrast ? lightHighContrast ?? light : light)
+            return UIColor(rgb: rgb).withAlphaComponent(isDark ? darkAlpha : lightAlpha)
+        })
     }
 }
 
@@ -83,33 +93,37 @@ private extension UIColor {
 
 /// 字号层级 token。
 ///
-/// 取舍：标题更重、更紧，元信息更小、更克制；技术性内容（ID、路径、计数、端口）
-/// 统一切到等宽字体，让「机器数据」和「人话」在视觉上分层。
+/// 取舍：只有「机器数据」（路径、端口、指纹、模型 ID）用等宽，让它在视觉上退后一层；
+/// 不做字距、不做全大写——那两样是让界面显得「设计过」的噪音，不是信息。
 enum PIFont {
-    /// 根页大标题 30 / 36 · 700
-    static let rootTitle = Font.system(size: 30, weight: .bold)
-    /// 卡片主标题 / 浮层标题 24 / 30 · 700
-    static let display = Font.system(size: 24, weight: .bold)
-    /// 导航与详情标题 20 / 26 · 600
-    static let navTitle = Font.system(size: 20, weight: .semibold)
-    /// 列表主文本 15 / 21 · 600
-    static let listTitle = Font.system(size: 15, weight: .semibold)
-    /// 正文 15 / 25 · Regular
-    static let body = Font.system(size: 15, weight: .regular)
-    /// 主操作按钮文字 15 · 600
-    static let button = Font.system(size: 15, weight: .semibold)
-    static let caption = Font.system(size: 13, weight: .regular)
-    static let captionStrong = Font.system(size: 13, weight: .semibold)
-    /// 元信息 12 / 16 · Regular
-    static let meta = Font.system(size: 12, weight: .regular)
-    static let metaSmall = Font.system(size: 11, weight: .regular)
+    // 用**语义字号**而不是 Font.system(size:)：默认档位下像素完全一致，
+    // 但会随 Dynamic Type 缩放。固定 size 在「大号文字」下不放大，
+    // 等于把需要看清关键状态的人挡在门外。
+    /// 根页大标题 28
+    static let rootTitle = Font.title.weight(.bold)
+    /// 浮层标题 20
+    static let display = Font.title3.weight(.semibold)
+    /// 子页标题 17
+    static let navTitle = Font.headline
+    /// 列表行主文本 17
+    static let listTitle = Font.body
+    /// 正文 16
+    static let body = Font.callout
+    /// 按钮 16
+    static let button = Font.callout.weight(.semibold)
+    /// 次要数据 13
+    static let caption = Font.footnote
+    static let captionStrong = Font.footnote.weight(.semibold)
+    /// 状态、计数 12
+    static let meta = Font.caption
+    static let metaSmall = Font.caption2
     /// 等宽元信息：ID、路径、端口、模型标识。
-    static let metaMono = Font.system(size: 11, weight: .regular, design: .monospaced)
-    static let codeMono = Font.system(size: 12, weight: .regular, design: .monospaced)
-    /// 大号数字：计数、进度。
-    static let number = Font.system(size: 15, weight: .semibold).monospacedDigit()
-    /// 分组标题：中文正常大小写，加强字距形成仪器刻度感。
-    static let section = Font.system(size: 12, weight: .semibold)
+    static let metaMono = Font.system(.caption, design: .monospaced)
+    static let codeMono = Font.system(.footnote, design: .monospaced)
+    /// 计数、进度。
+    static let number = Font.callout.weight(.semibold).monospacedDigit()
+    /// 分组标题 13。
+    static let section = Font.footnote.weight(.semibold)
 }
 
 /// 间距阶梯 token：4 / 8 / 12 / 16 / 24 / 32。
@@ -122,12 +136,12 @@ enum PISpacing {
     static let s32: CGFloat = 32
 }
 
-/// 圆角 token：控件 10、分组 14、详情卡 18、底部浮层 24。
+/// 圆角 token：控件 8、分组 12、浮层 16。
 enum PIRadius {
-    static let control: CGFloat = 10
-    static let group: CGFloat = 14
-    static let card: CGFloat = 18
-    static let sheet: CGFloat = 24
+    static let control: CGFloat = 8
+    static let group: CGFloat = 12
+    static let card: CGFloat = 12
+    static let sheet: CGFloat = 16
 }
 
 /// 动效 token：只为表达状态变化，180–240ms。
@@ -139,45 +153,29 @@ enum PIMotion {
 
 /// 尺寸与安全区 token。
 enum PIMetrics {
-    /// --safe-bottom：浮层吸底动作区为 home indicator 预留的底部留白
+    /// 浮层吸底动作区为 home indicator 预留的底部留白。
     static let safeBottom: CGFloat = 22
-    /// 页面边距 18–22pt
-    static let pageMargin: CGFloat = 18
-    /// 卡片内边距 18pt
-    static let cardPadding: CGFloat = 18
-    /// 触达目标不小于 44×44
+    /// 页面边距 16pt。
+    static let pageMargin: CGFloat = 16
+    /// 卡片内边距 16pt。
+    static let cardPadding: CGFloat = 16
+    /// 触达目标不小于 44×44。
     static let minHitTarget: CGFloat = 44
-    /// 列表双行至少 62pt
-    static let listRowMinHeight: CGFloat = 62
-    /// 侧边栏会话行至少 56pt
-    static let sidebarRowMinHeight: CGFloat = 56
-    /// 侧边栏宽度（iPhone 16 Pro 402pt 画布下留出遮罩区）
+    /// 列表行最小高度 48pt。
+    static let listRowMinHeight: CGFloat = 48
+    /// 侧边栏会话行最小高度 48pt。
+    static let sidebarRowMinHeight: CGFloat = 48
+    /// 侧边栏宽度。
     static let sidebarWidth: CGFloat = 320
-    /// 输入条/正文使用的轻阴影
     static let hairline: CGFloat = 1
 }
 
 // MARK: - 页面容器
 
-/// 页面背景：石墨渐变压底 + 顶部琥珀微光。内容自绘卡片，不依赖 List 系统默认底色。
+/// 页面背景：纯色分组底，不画渐变、不画顶光。
 struct PIPageBackground: ViewModifier {
     func body(content: Content) -> some View {
-        content.background {
-            ZStack {
-                LinearGradient(
-                    colors: [PIColor.bgTop, PIColor.bgBottom],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                RadialGradient(
-                    colors: [PIColor.accent.opacity(0.07), .clear],
-                    center: .topTrailing,
-                    startRadius: 4,
-                    endRadius: 460
-                )
-            }
-            .ignoresSafeArea()
-        }
+        content.background(PIColor.page.ignoresSafeArea())
     }
 }
 
@@ -185,5 +183,4 @@ extension View {
     func piPageBackground() -> some View { modifier(PIPageBackground()) }
 }
 
-// 导航栏沿用系统外观：iOS 26 的玻璃工具按钮与大标题已经足够克制，
-// 自绘会和大标题布局冲突（实测会吞掉根页大标题），因此只统一内容层 token。
+// 导航栏沿用系统外观：大标题与玻璃工具栏已经足够克制，自绘会和大标题布局冲突。

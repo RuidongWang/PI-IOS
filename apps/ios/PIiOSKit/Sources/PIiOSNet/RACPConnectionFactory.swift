@@ -1,4 +1,5 @@
 import Foundation
+import NIOCore
 
 /// 一次建连所拥有的全部资源。direct 的 transport 恒为 nil；借入的 bootstrap SSH 不由它关闭。
 final class RACPConnection: @unchecked Sendable {
@@ -6,9 +7,8 @@ final class RACPConnection: @unchecked Sendable {
     let route: ConnectionRoute
     let transport: SSHTransport?
     private let ownsTransport: Bool
-    private let lock = NSLock()
-    private var socketClosed = false
-    private var transportClosed = false
+    private let socketCloseTask = NetworkCloseTask()
+    private let closeTask = NetworkCloseTask()
 
     init(
         socket: any RACPSocket,
@@ -23,25 +23,18 @@ final class RACPConnection: @unchecked Sendable {
     }
 
     func closeSocket() async {
-        let shouldClose = lock.withLock { () -> Bool in
-            guard !socketClosed else { return false }
-            socketClosed = true
-            return true
-        }
-        guard shouldClose else { return }
-        await socket.close()
+        await socketCloseTask.request { [self] in
+            await socket.close()
+        }.value
     }
 
     func close() async {
-        await closeSocket()
-        let shouldCloseTransport = lock.withLock { () -> Bool in
-            guard ownsTransport && !transportClosed else { return false }
-            transportClosed = true
-            return true
-        }
-        if shouldCloseTransport {
-            await transport?.close()
-        }
+        await closeTask.request { [self] in
+            await closeSocket()
+            if ownsTransport {
+                await transport?.close()
+            }
+        }.value
     }
 }
 
@@ -86,10 +79,13 @@ struct LiveRACPConnectionFactory: RACPConnectionFactory {
                 }
                 ssh = try await SSHTransport.connect(request, confirmer: confirmer)
             }
+            var openedChannel: Channel?
             do {
                 let channel = try await ssh.directTCPIP(port: hostPort)
+                openedChannel = channel
                 let socket = try await RACPWebSocket.connect(
                     on: channel,
+                    lifecycle: ssh.lifecycle,
                     bearerToken: configuration.deviceToken
                 )
                 return RACPConnection(
@@ -99,9 +95,24 @@ struct LiveRACPConnectionFactory: RACPConnectionFactory {
                     ownsTransport: ownsTransport
                 )
             } catch {
+                // A failed WebSocket handshake still owns this child channel. Close
+                // only the child; a supplied SSH parent/group belongs to its owner.
+                if let openedChannel {
+                    await Self.closeChildChannel(openedChannel, lifecycle: ssh.lifecycle)
+                }
                 if ownsTransport { await ssh.close() }
                 throw error
             }
         }
+    }
+
+    private static func closeChildChannel(
+        _ channel: Channel,
+        lifecycle: SSHConnectionLifecycle
+    ) async {
+        // Do not submit to a sealed/shut-down loop; the lifecycle owner is
+        // already closing the parent and its children.
+        guard lifecycle.executeCleanup({ channel.close(promise: nil) }) else { return }
+        try? await channel.closeFuture.get()
     }
 }

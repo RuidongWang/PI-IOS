@@ -482,7 +482,10 @@ public final class SessionViewModel {
     public func applySnapshot(_ snapshot: RACPSnapshot, replayComplete: Bool) -> SessionSnapshotOutcome {
         historySnapshotGeneration &+= 1
         let previousApprovalIds = Set(pendingApprovals.map(\.id))
-        let deduplicated = Self.deduplicatedByID(snapshot.items)
+        let deduplicated = Self.mergingActiveItems(
+            snapshot.activeItems,
+            into: Self.deduplicatedByID(snapshot.items)
+        )
 
         let snapshotEpoch = snapshot.cursor.epoch
         if let previousEpoch = cursor?.epoch, previousEpoch != snapshotEpoch {
@@ -548,6 +551,21 @@ public final class SessionViewModel {
     }
 
     // MARK: 历史分页
+
+    /// Hide the leading tail of a turn that began before the loaded window.
+    /// The window can still be shown from the first user task onwards; omitted
+    /// items stay reachable by explicit earlier-history loading. Returns the
+    /// number of hidden items, or 0 when no user anchor exists.
+    @discardableResult
+    public func trimIncompleteLeadingTurn() -> Int {
+        let count = ConversationTurnPolicy.incompleteLeadingPrefixCount(items)
+        guard count > 0 else { return 0 }
+        let removedIDs = Set(items.prefix(count).map(\.id))
+        items.removeFirst(count)
+        activeItems.removeAll { removedIDs.contains($0.id) }
+        itemIndexByID = Self.indexByID(items)
+        return count
+    }
 
     /// 只补入当前最早条目之前的历史，不覆盖已被实时事件更新的同 id 条目。
     /// 历史页不是快照：不触碰游标、revision、草稿、运行态或待审批状态。
@@ -881,6 +899,26 @@ public final class SessionViewModel {
         result.reserveCapacity(source.count)
         for item in source where seen.insert(item.id).inserted {
             result.append(item)
+        }
+        return result
+    }
+
+    /// History supplies ordering; active content replaces matching rows in place and
+    /// active-only rows append in their own order without creating duplicate ids.
+    private static func mergingActiveItems(
+        _ activeItems: [RACPItem],
+        into history: [RACPItem]
+    ) -> [RACPItem] {
+        let activeByID = Dictionary(
+            activeItems.map { ($0.id, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        let historyIDs = Set(history.map(\.id))
+        var result = history.map { activeByID[$0.id] ?? $0 }
+        var appendedIDs = Set<String>()
+        for item in activeItems where !historyIDs.contains(item.id) {
+            guard appendedIDs.insert(item.id).inserted else { continue }
+            result.append(activeByID[item.id] ?? item)
         }
         return result
     }

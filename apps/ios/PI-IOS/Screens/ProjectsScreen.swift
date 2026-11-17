@@ -157,82 +157,68 @@ struct ProjectsScreen: View {
     private var content: some View {
         if connection.state.isOnline {
             if !connection.hasLoadedCatalog, connection.catalogError == nil {
-                PIStatusBanner(kind: .info, text: "正在加载项目与会话", detail: "已连上服务器，正在读取列表。")
+                PIStatusBanner(kind: .info, text: "正在加载")
             } else if !connection.hasLoadedCatalog, let catalogError = connection.catalogError {
-                PIEmptyState(
-                    title: "项目列表未加载",
-                    message: catalogError,
-                    actionTitle: "重新加载",
+                PIStatusBanner(
+                    kind: .danger,
+                    text: "项目未加载",
+                    detail: catalogError,
+                    actionTitle: "重试",
                     action: { Task { await refresh() } }
                 )
             } else {
                 projectsSection
-                sessionsSection
+                if activeProjectId != nil {
+                    sessionsSection
+                }
             }
         } else {
+            // R5：空态只留状态 + 一个动作，不再解释隧道。
             PIEmptyState(
-                title: connection.state == .offline(reason: nil) ? "尚未连接服务器" : "连接未就绪",
-                message: emptyMessage,
+                title: connection.state.displayText,
                 actionTitle: "打开设置",
-                action: { model.switchRoot(.settings) }
+                action: { model.switchRoot(.settings) },
+                actionIdentifier: "projects.openSettings"
             )
         }
     }
 
-    private var emptyMessage: String {
-        if let detail = connection.state.detail {
-            return "\(connection.state.displayText)：\(detail)"
-        }
-        return "隧道未建立时无法列出服务器上的项目与会话；到设置里连接当前服务器。"
-    }
-
     private var serverCard: some View {
         PICard {
-            HStack(alignment: .center) {
-                Text("当前服务器")
-                    .font(PIFont.metaSmall)
-                    .tracking(1.1)
-                    .foregroundStyle(PIColor.text3)
-                Spacer(minLength: PISpacing.s8)
-                if model.currentHost != nil {
-                    HStack(spacing: PISpacing.s4) {
-                        Circle()
-                            .fill(connection.state.isOnline ? PIColor.success : PIColor.warning)
-                            .frame(width: 6, height: 6)
-                            .accessibilityHidden(true)
-                        Text(connection.state.displayText)
-                            .font(PIFont.metaSmall.weight(.semibold))
-                            .foregroundStyle(connection.state.isOnline ? PIColor.success : PIColor.warning)
-                    }
-                    .padding(.horizontal, PISpacing.s8)
-                    .padding(.vertical, 3)
-                    .background(
-                        (connection.state.isOnline ? PIColor.success : PIColor.warning).opacity(0.12),
-                        in: Capsule()
-                    )
-                }
-            }
             if let host = model.currentHost {
-                Text(host.name)
-                    .font(PIFont.display)
-                    .foregroundStyle(PIColor.text)
-                Text("\(host.address) · \(host.pairingText)")
-                    .font(PIFont.meta)
-                    .foregroundStyle(PIColor.text2)
+                VStack(alignment: .leading, spacing: PISpacing.s8) {
+                    HStack(alignment: .center, spacing: PISpacing.s12) {
+                        Image(systemName: "server.rack")
+                            .font(.system(size: 17, weight: .regular))
+                            .foregroundStyle(PIColor.text2)
+                            .frame(width: 24)
+                            .accessibilityHidden(true)
+                        Text(host.name)
+                            .font(PIFont.listTitle.weight(.semibold))
+                            .foregroundStyle(PIColor.text)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: PISpacing.s8)
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(connection.state.isOnline ? PIColor.success : PIColor.warning)
+                                .frame(width: 6, height: 6)
+                                .accessibilityHidden(true)
+                            Text(connection.state.displayText)
+                                .font(PIFont.caption)
+                                .foregroundStyle(PIColor.text2)
+                        }
+                        .layoutPriority(1)
+                    }
+                    Text("\(host.address) · \(host.pairingText)")
+                        .font(PIFont.metaMono)
+                        .foregroundStyle(PIColor.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 36)
+                }
             } else {
-                Text("未配置服务器")
-                    .font(PIFont.display)
-                    .foregroundStyle(PIColor.text)
-                Text("先在「设置 → 服务器」添加一台服务器。")
-                    .font(PIFont.caption)
+                Label("未配置服务器", systemImage: "server.rack")
+                    .font(PIFont.listTitle)
                     .foregroundStyle(PIColor.text2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let info = connection.info {
-                Text("PI-adaptor \(info.serverName) \(info.serverVersion) · 协议 \(info.protocolVersion)")
-                    .font(PIFont.metaMono)
-                    .foregroundStyle(PIColor.text3)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -243,13 +229,12 @@ struct ProjectsScreen: View {
         VStack(alignment: .leading, spacing: PISpacing.s8) {
             PISectionHeader(text: "项目")
             if activeProjects.isEmpty {
+                // R5：一句话 + 一个动作。加号与这里执行同一件事，只保留可见的那个。
                 PIEmptyState(
-                    title: "还没有项目",
-                    message: archivedProjects.isEmpty
-                        ? "选择一个服务器目录并命名，注册后即可在该目录下创建会话。"
-                        : "当前没有活跃项目；可从下方已归档项目恢复，或注册新目录。",
-                    actionTitle: "选择服务器目录",
-                    action: openProjectBrowser
+                    title: "没有项目",
+                    actionTitle: "添加项目",
+                    action: openProjectBrowser,
+                    actionIdentifier: "projects.addProject"
                 )
             } else {
                 PIGroup {
@@ -261,21 +246,12 @@ struct ProjectsScreen: View {
                             runningCount: statusCount(for: project.id, kind: .running),
                             pendingCount: statusCount(for: project.id, kind: .pending),
                             isCurrent: activeProjectId == project.id,
-                            showsDivider: index < activeProjects.count,
-                            onOpen: { openProjectOrDetail(project) },
-                            onDetails: { selectedProject = project }
+                            showsDivider: index < activeProjects.count - 1,
+                            action: { openProjectDetails(project) }
                         )
                     }
-                    PIListRow(
-                        title: "浏览服务器目录并注册",
-                        icon: "folder.badge.plus",
-                        iconTint: PIColor.accent,
-                        isEnabled: canOpenProjectBrowser,
-                        showsChevron: true,
-                        showsDivider: false,
-                        action: openProjectBrowser
-                    )
                 }
+
             }
             if !archivedProjects.isEmpty {
                 PISectionHeader(text: "已归档 · \(archivedProjects.count)")
@@ -284,11 +260,10 @@ struct ProjectsScreen: View {
                     ForEach(Array(archivedProjects.enumerated()), id: \.element.id) { index, project in
                         PIListRow(
                             title: projectDisplayName(project),
-                            subtitle: "本机归档",
                             value: "恢复",
                             icon: "archivebox",
                             iconTint: PIColor.text3,
-                            showsChevron: true,
+                            showsChevron: false,
                             showsDivider: index < archivedProjects.count - 1,
                             action: { restore(project) }
                         )
@@ -373,7 +348,7 @@ struct ProjectsScreen: View {
             PIGroup {
                 if visible.isEmpty {
                     PIListRow(
-                        title: connection.sessions.isEmpty ? "服务器上没有会话" : "这个项目下没有会话",
+                        title: "没有会话",
                         isEnabled: false,
                         showsDivider: true
                     )
@@ -382,13 +357,12 @@ struct ProjectsScreen: View {
                         PIListRow(
                             title: sessionDisplayTitle(session),
                             subtitle: sessionSubtitle(session),
-                            value: session.revision.map { "rev \($0)" },
                             icon: "bubble.left.and.bubble.right",
-                            iconTint: PIColor.text2,
                             showsChevron: true,
                             showsDivider: true,
                             action: { Task { await open(session) } }
                         )
+                        .accessibilityIdentifier("projects.session.\(session.id)")
                     }
                 }
                 newSessionRow
@@ -399,9 +373,6 @@ struct ProjectsScreen: View {
     private var newSessionRow: some View {
         PIListRow(
             title: "新建会话",
-            subtitle: activeProjectId == nil
-                ? "先选一个项目（会话需要项目作为工作区）"
-                : "在「\(activeProjectName ?? "所选项目")」下新建会话",
             icon: "plus.circle",
             iconTint: PIColor.accent,
             isEnabled: connection.state.isOnline && activeProjectId != nil,
@@ -409,6 +380,7 @@ struct ProjectsScreen: View {
             showsDivider: false,
             action: { Task { await createSession(title: nil) } }
         )
+        .accessibilityIdentifier("projects.newSession")
     }
 
     private var visibleSessions: [RACPSessionSummary] {
@@ -419,15 +391,15 @@ struct ProjectsScreen: View {
         }
     }
 
+    /// 副标题只放状态数据（R3）：状态 + 消息数。会话 ID 与 revision 属于机器数据，
+    /// 用户不需要核对，所以不显示。
     private func sessionSubtitle(_ session: RACPSessionSummary) -> String {
-        var parts: [String] = [session.id]
+        var parts: [String] = []
+        if let status = session.status { parts.append(Self.statusText(status)) }
         if let hostID = model.currentHost?.id,
            let count = model.sessionBinding(hostID: hostID, sessionID: session.id)?.messageCount {
             parts.append("\(count) 条")
         }
-        if let status = session.status { parts.append(Self.statusText(status)) }
-        if let mode = session.mode { parts.append(mode.title) }
-        if let permission = session.permissionMode { parts.append(permission.title) }
         return parts.joined(separator: " · ")
     }
 
@@ -481,28 +453,12 @@ struct ProjectsScreen: View {
             && connection.catalogError == nil
     }
 
-    private func openProjectOrDetail(_ project: RACPProjectSummary) {
+    /// 项目行只有一个去向：详情浮层。会话续接、改名、归档、删除都在浮层里，
+    /// 行上不再并列第二个入口（quiet-v2 R10）。
+    private func openProjectDetails(_ project: RACPProjectSummary) {
         currentProjectId = project.id
         model.rememberProject(project.id)
-        guard let hostID = model.currentHost?.id else {
-            selectedProject = project
-            return
-        }
-        let candidate = model.sessionBindings
-            .filter {
-                $0.hostID == hostID
-                    && $0.projectID == project.id
-                    && !$0.isArchived
-                    && !$0.isDeleted
-            }
-            .sorted { ($0.lastOpenedAt ?? .distantPast) > ($1.lastOpenedAt ?? .distantPast) }
-            .first
-        if let candidate,
-           let remote = connection.sessions.first(where: { $0.id == candidate.sessionID }) {
-            Task { await open(remote) }
-        } else {
-            selectedProject = project
-        }
+        selectedProject = project
     }
 
     private func restore(_ project: RACPProjectSummary) {
@@ -558,6 +514,10 @@ struct ProjectsScreen: View {
         }
 
         let normalizedPath = ProjectDirectoryRules.normalizedPath(path)
+        // Freeze the connection identity before awaiting: the user may switch
+        // servers while registerProject is in flight.
+        let connectionGeneration = connection.currentConnectionGeneration
+        let wasCurrentHost = { model.currentHost?.id == hostID }
         let previous = model.projectBinding(hostID: hostID, path: normalizedPath)
         let listedProjectIDs = Set(connection.projects.map(\.id))
         let registrationTargets = projectRegistrationTargets
@@ -586,19 +546,24 @@ struct ProjectsScreen: View {
                 name: recordedName
             )
             model.rememberProjectBrowserPath(hostID: hostID, path: normalizedPath)
+            guard wasCurrentHost(), connection.currentConnectionGeneration == connectionGeneration else {
+                // The project was registered on the original server, but the UI
+                // is now looking at another one. Do not write A's project id into
+                // B's current-project state.
+                model.showToast("项目已在原服务器注册；切回该服务器后可继续")
+                return
+            }
             currentProjectId = project.id
             model.rememberProject(project.id)
             await connection.refreshRemote()
             actionError = nil
             if recordedName != normalizedName {
-                model.showToast(
-                    "目录已注册；为避免重名，项目名称已调整为「\(recordedName)」"
-                )
+                model.showToast("名称重复，已改为「\(recordedName)」")
             } else if previous?.projectID == project.id || wasAlreadyListed {
                 if previous?.name != recordedName {
-                    model.showToast("已更新项目名称并切换为当前项目")
+                    model.showToast("已更新并切换为当前项目")
                 } else {
-                    model.showToast("该项目已存在，已切换为当前项目")
+                    model.showToast("已存在，已切换为当前项目")
                 }
             } else {
                 model.showToast("已注册项目「\(recordedName)」")
@@ -618,7 +583,16 @@ struct ProjectsScreen: View {
         isRefreshing = true
         defer { isRefreshing = false }
         do {
-            let created = try await connection.createSession(title: title, projectId: projectID)
+            // AC-08.2：新会话应直接进入可发送状态。把本机默认模型作为初始绑定
+            // 传给服务器；没有默认模型时保持原行为，不让创建失败。
+            let defaultModel = model.defaultModelSelectionForNewSession
+            let created = try await connection.createSession(
+                title: title,
+                projectId: projectID,
+                providerId: defaultModel?.providerId,
+                modelId: defaultModel?.modelId,
+                thinkingLevel: defaultModel?.thinkingLevel
+            )
             model.recordCreatedSession(
                 hostID: hostID,
                 sessionID: created.id,
@@ -698,12 +672,11 @@ private struct ProjectBrowserSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                if let gateMessage {
+                if !canUseServer {
                     Section {
                         PIStatusBanner(
                             kind: .warning,
                             text: lockTitle,
-                            detail: gateMessage,
                             actionTitle: gateActionTitle,
                             action: performGateAction
                         )
@@ -718,10 +691,11 @@ private struct ProjectBrowserSheet: View {
                             .foregroundStyle(PIColor.danger)
                             .fixedSize(horizontal: false, vertical: true)
                         if canUseServer, !isLoading {
-                            Button(path == nil ? "重试读取目录" : "重试当前目录") {
+                            Button("重试") {
                                 Task { await load(path, useInitialPath: false) }
                             }
                             .font(PIFont.captionStrong)
+                            .accessibilityIdentifier("projectBrowser.retry")
                         }
                     }
                 }
@@ -739,13 +713,7 @@ private struct ProjectBrowserSheet: View {
                         Text(nameIssue.message)
                             .font(PIFont.caption)
                             .foregroundStyle(PIColor.danger)
-                    } else {
-                        Text("默认取目录名，可改写；只影响本机显示。")
-                            .font(PIFont.caption)
-                            .foregroundStyle(PIColor.text3)
                     }
-                } header: {
-                    Text("项目名称")
                 }
 
                 Section {
@@ -772,7 +740,7 @@ private struct ProjectBrowserSheet: View {
                             HStack(spacing: PISpacing.s8) {
                                 Image(systemName: "arrow.up")
                                     .foregroundStyle(PIColor.accent)
-                                Text("返回上级目录")
+                                Text("上一级")
                                     .foregroundStyle(PIColor.text)
                                 Spacer()
                             }
@@ -809,11 +777,6 @@ private struct ProjectBrowserSheet: View {
                     }
                 } header: {
                     Text("当前目录")
-                } footer: {
-                    if canUseServer {
-                        Text("逐级进入目标目录，再用该目录注册项目。")
-                            .font(PIFont.caption)
-                    }
                 }
 
             }
@@ -849,28 +812,8 @@ private struct ProjectBrowserSheet: View {
 
     private var registrationFooter: some View {
         VStack(alignment: .leading, spacing: PISpacing.s8) {
-            HStack(alignment: .firstTextBaseline, spacing: PISpacing.s8) {
-                Text(projectName.piTrimmed.isEmpty ? "未命名项目" : projectName.piTrimmed)
-                    .font(PIFont.captionStrong)
-                    .foregroundStyle(PIColor.text)
-                    .lineLimit(1)
-                Spacer(minLength: PISpacing.s8)
-                Text(registrationHint)
-                    .font(PIFont.meta)
-                    .foregroundStyle(
-                        nameIssue == nil && canUseServer ? PIColor.text2 : PIColor.danger
-                    )
-                    .lineLimit(1)
-            }
-            if let path {
-                Text(path)
-                    .font(PIFont.meta)
-                    .foregroundStyle(PIColor.text3)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
             PIPrimaryButton(
-                title: isRegistering ? "正在注册…" : "用当前目录注册项目",
+                title: isRegistering ? "正在注册…" : "注册项目",
                 isEnabled: canRegister,
                 identifier: "projectBrowser.register"
             ) {
@@ -884,7 +827,7 @@ private struct ProjectBrowserSheet: View {
         .overlay(alignment: .top) {
             Rectangle()
                 .fill(PIColor.separator)
-                .frame(height: 1)
+                .frame(height: PIMetrics.hairline)
         }
     }
 
@@ -913,25 +856,6 @@ private struct ProjectBrowserSheet: View {
         } else {
             Task { await connection.refreshRemote() }
         }
-    }
-
-    private var gateMessage: String? {
-        if model.currentHost == nil {
-            return "先添加服务器并完成配对，才能浏览服务器目录。"
-        }
-        if !model.isCurrentHostPaired {
-            return "完成配对后才能注册项目。"
-        }
-        if !connection.state.isOnline {
-            return "恢复隧道连接后才能浏览目录并注册项目。"
-        }
-        if let catalogError = connection.catalogError {
-            return "项目与会话列表加载失败：\(catalogError)"
-        }
-        if !connection.hasLoadedCatalog {
-            return "正在读取项目与会话列表，完成后才能注册项目。"
-        }
-        return nil
     }
 
     private var nameIssue: ProjectRegistrationIssue? {
@@ -963,22 +887,6 @@ private struct ProjectBrowserSheet: View {
             && directoryError == nil
             && !isLoading
             && !isRegistering
-    }
-
-    private var registrationHint: String {
-        if !canUseServer { return lockTitle }
-        if isLoading { return "正在读取目录" }
-        if path == nil { return "先选择目录" }
-        if let nameIssue { return nameIssue.message }
-        if verifiedPath != path { return "目录尚未验证" }
-        if isRegistering { return "正在保存" }
-        if ProjectRegistrationRules.hasUnresolvedNameConflict(
-            name: projectName,
-            existing: existingProjects
-        ) {
-            return "提交后按服务器回执核验名称"
-        }
-        return "注册后切换为当前项目"
     }
 
     private func submit() async {

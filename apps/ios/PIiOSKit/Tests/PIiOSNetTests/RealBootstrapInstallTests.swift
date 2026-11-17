@@ -102,6 +102,6 @@ final class RealBootstrapInstallTests: XCTestCase {
 
 private struct AcceptBootstrapHostKey: HostKeyConfirming {
     func confirmHostKey(_ key: SSHHostKey, status: HostKeyTrustStatus) async -> HostKeyConfirmation {
-        .trust
+        TestHostKeyPolicy.confirm(key)
     }
 }

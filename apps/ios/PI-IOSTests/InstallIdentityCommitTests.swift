@@ -300,6 +300,20 @@ final class AppModelInstallCommitTests: XCTestCase {
         XCTAssertEqual(model.completeAdaptorInstallation(commit), .committed)
         XCTAssertEqual(model.hosts[0].connectionPreference, .sshOnly)
 
+        // Register cleanup before the first write; a partial failure must not
+        // leave a scoped Keychain entry behind.
+        defer {
+            _ = KeychainStore.deleteDirectTLSTrustPin(hostID: host.id)
+            _ = KeychainStore.deleteDeviceToken(
+                hostID: host.id,
+                legacyAccount: KeychainStore.account(
+                    username: host.username,
+                    host: host.host,
+                    port: host.port
+                ),
+                deleteLegacy: false
+            )
+        }
         let keychainReady = KeychainStore.savePairing(
             deviceId: "dev_install",
             deviceToken: "pdt2." + "test",
@@ -314,18 +328,6 @@ final class AppModelInstallCommitTests: XCTestCase {
         )
         guard keychainReady else {
             throw XCTSkip("模拟器 Keychain 不可写，跳过 direct 偏好提升用例")
-        }
-        defer {
-            _ = KeychainStore.deleteDirectTLSTrustPin(hostID: host.id)
-            _ = KeychainStore.deleteDeviceToken(
-                hostID: host.id,
-                legacyAccount: KeychainStore.account(
-                    username: host.username,
-                    host: host.host,
-                    port: host.port
-                ),
-                deleteLegacy: false
-            )
         }
 
         XCTAssertTrue(model.markDirectVerified(
@@ -391,7 +393,7 @@ final class AppModelInstallCommitTests: XCTestCase {
 
     private func makeHost() -> HostRecord {
         HostRecord(
-            id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+            id: UUID(),
             name: "Install",
             host: "pi.example",
             port: 22,

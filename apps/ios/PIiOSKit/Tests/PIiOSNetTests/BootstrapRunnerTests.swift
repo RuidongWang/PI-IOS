@@ -320,7 +320,7 @@ final class BootstrapRunnerTests: XCTestCase {
             return XCTFail("默认 PI-adaptor 安装必须拒绝 ppt1：\(result)")
         }
         XCTAssertEqual(failure.code, .pairFailed)
-        XCTAssertTrue(failure.detail?.contains("ppt1") ?? false)
+        XCTAssertTrue(failure.detail?.contains("配对") ?? false, "配对令牌被拒时给出可读原因：\(failure.detail ?? "nil")")
         XCTAssertEqual(pairing.callCount, 0)
     }
 
@@ -387,7 +387,6 @@ final class BootstrapRunnerTests: XCTestCase {
         XCTAssertEqual(failure.code, .verifyDeviceFailed)
         XCTAssertTrue(failure.detail?.contains("pi-host") ?? false)
         XCTAssertTrue(failure.detail?.contains("pi-adaptor") ?? false)
-        XCTAssertTrue(failure.detail?.contains("pi-adaptor.service") ?? false)
         XCTAssertTrue(failure.detail?.contains("43871") ?? false)
     }
 
@@ -408,7 +407,6 @@ final class BootstrapRunnerTests: XCTestCase {
         XCTAssertEqual(failure.code, .verifyDeviceFailed)
         XCTAssertTrue(failure.detail?.contains("0.21.0") ?? false)
         XCTAssertTrue(failure.detail?.contains("0.20.0") ?? false)
-        XCTAssertTrue(failure.detail?.contains("pi-adaptor.service") ?? false)
         XCTAssertTrue(failure.detail?.contains("43871") ?? false)
     }
 

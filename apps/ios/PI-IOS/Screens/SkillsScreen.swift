@@ -4,9 +4,11 @@ import PIiOSCore
 struct SkillsScreen: View {
     @EnvironmentObject private var connection: ConnectionModel
 
-    @State private var skills: [RACPV2Skill] = []
-    @State private var isLoading = false
-    @State private var error: String?
+    /// 列表的「五种现实」：idle / loading / loaded / failed(+旧数据)。
+    /// 只有 `.loaded([])` 才允许画空态；断线与失败保留上一次成功的数据。
+    @State private var skills: ContentState<[RACPV2Skill]> = .idle
+    /// 删除失败：用户动作的回执，按 §5.1 用 alert 确认。
+    @State private var deleteError: String?
     @State private var sourceType = "git"
     @State private var sourceValue = ""
     @State private var subdir = ""
@@ -19,11 +21,8 @@ struct SkillsScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: PISpacing.s16) {
-                // 安装已经成功、只有列表没刷新：这是部分成功，必须就地说明，
-                // 不能让用户以为要再装一次。
-                if case let .installedListStale(message) = install.phase {
-                    staleListNotice(message)
-                }
+                // quiet-v2：页面顶部不再放任何错误。列表状态画在列表里，
+                // 安装失败/部分成功画在「安装 Skill」按钮旁。
                 installedSection
                 sourceSection
             }
@@ -35,18 +34,20 @@ struct SkillsScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .task(id: connection.state.isOnline) {
             guard connection.state.isOnline else {
-                skills = []
-                error = nil
-                isLoading = false
+                // 断线：把已取到的列表降级为 stale，而不是清成「没有」。
+                skills.markStale(reason: "未连接")
                 // 离线不打断在途安装：让它自己收尾，避免把「正在安装」清成「没装过」。
                 if !install.phase.isSubmitting { install = SkillInstallMachine() }
                 return
             }
-            await reloadReportingFailure()
+            await reload()
         }
-        .refreshable { await reloadReportingFailure() }
+        .refreshable { await reload() }
+        // 删除失败是「需要被确认的一次结果」，用 alert；列表状态不走弹窗。
+        .piMessageAlert(title: "删除未完成", message: $deleteError)
         .confirmationDialog(
-            "删除 Skill？",
+            // 与另外两个破坏性确认框同口径：标题点名对象，message 说后果（R7）。
+            "删除「\(pendingDelete?.name ?? "")」？",
             isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
             titleVisibility: .visible
         ) {
@@ -55,74 +56,128 @@ struct SkillsScreen: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("只删除 PI-adaptor 的安装副本，不修改来源仓库或来源目录。")
+            // R7：只说后果，不写「来源仓库不受影响」这类安抚/保证句。
+            Text("PI-adaptor 上的安装副本会被删除。")
         }
-        .piMessageAlert(title: "Skill 操作失败", message: $error)
     }
 
     // MARK: - 已安装
 
     private var installedSection: some View {
-        PIGroup("已安装", footer: "Skill 复制到 PI-adaptor 全局目录；运行中的 turn 固定使用启动时版本。") {
-            if isLoading {
-                PIListRow(title: "正在读取…", isEnabled: false, showsDivider: false)
-            } else if skills.isEmpty {
+        PIGroup("已安装") {
+            switch skills.presentation() {
+            case let .loading(hasStale):
+                // 正在读：有旧数据就继续画，读不到不清空。
+                if hasStale, let cached = skills.value, !cached.isEmpty {
+                    installedRows(cached)
+                } else {
+                    PIListRow(title: "正在读取…", isEnabled: false, showsDivider: false)
+                }
+            case let .content(cached, _):
+                installedRows(cached)
+            case .empty:
+                // 只有「读成功且确实为空」才是空态。
                 PIListRow(
                     title: "还没有全局 Skill",
-                    subtitle: "在下方「安装来源」填写后安装",
                     isEnabled: false,
                     showsDivider: false
                 )
-            } else {
-                ForEach(Array(skills.enumerated()), id: \.element.id) { index, skill in
-                    PIListRow(
-                        title: skill.name,
-                        subtitle: "\(skill.description) · \(skill.status)",
-                        icon: "puzzlepiece.extension",
-                        iconTint: PIColor.accent,
-                        showsChevron: false,
-                        showsDivider: index < skills.count - 1
-                    ) {
-                        Button(role: .destructive) {
-                            pendingDelete = skill
-                        } label: {
-                            Text("删除")
-                                .font(PIFont.captionStrong)
-                                .foregroundStyle(PIColor.danger)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(PIColor.dangerSoft, in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
+            case let .failed(reason):
+                // 读失败且没有旧数据：说原因 + 给重试，不写「还没有」。
+                listFailureRow(reason)
             }
-            // 离线时列表内容是「未知」而不是「空的」：与真正的空态分开说，
-            // 避免把没读到写成没有。（离线禁用安装的文案由下方安装区承担。）
-            if !connection.state.isOnline, !isLoading {
-                PIInlineMessage(
-                    kind: .warning,
-                    text: "连接后才能读取已安装列表：现在显示的「还没有」不代表本机或服务器上确实没有。"
-                )
-                .padding(.horizontal, PISpacing.s16)
-                .padding(.bottom, PISpacing.s12)
-                .accessibilityIdentifier("skills.listUnknownOffline")
+            if case let .content(_, isStale) = skills.presentation(), isStale {
+                listStaleRow(skills.failureReason ?? "")
             }
         }
     }
 
+    /// 成功读到的行。
+    @ViewBuilder
+    private func installedRows(_ list: [RACPV2Skill]) -> some View {
+        ForEach(Array(list.enumerated()), id: \.element.id) { index, skill in
+            PIListRow(
+                title: skill.name,
+                subtitle: "\(skill.description) · \(skill.status)",
+                icon: "puzzlepiece.extension",
+                iconTint: PIColor.text2,
+                showsChevron: false,
+                showsDivider: index < list.count - 1
+            ) {
+                Button(role: .destructive) {
+                    pendingDelete = skill
+                } label: {
+                    Text("删除")
+                        .font(PIFont.captionStrong)
+                        .foregroundStyle(PIColor.danger)
+                        .frame(minHeight: PIMetrics.minHitTarget)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("skills.delete.\(skill.name)")
+            }
+        }
+    }
+
+    /// 读到过数据、但这次没读到：画旧数据 + 一行 stale 提示，不清空。
+    private func listStaleRow(_ reason: String) -> some View {
+        VStack(alignment: .leading, spacing: PISpacing.s4) {
+            HStack(spacing: PISpacing.s8) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 13))
+                    .foregroundStyle(PIColor.warning)
+                    .accessibilityHidden(true)
+                Text("上次读取的数据")
+                    .font(PIFont.captionStrong)
+                    .foregroundStyle(PIColor.text)
+            }
+            if !reason.isEmpty {
+                Text(reason)
+                    .font(PIFont.caption)
+                    .foregroundStyle(PIColor.text2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, PISpacing.s16)
+        .padding(.vertical, PISpacing.s12)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("skills.listState")
+    }
+
+    /// 读失败且没有旧数据：原因 + 重试入口。
+    private func listFailureRow(_ reason: String) -> some View {
+        VStack(alignment: .leading, spacing: PISpacing.s8) {
+            PIInlineMessage(kind: .danger, text: reason)
+                .accessibilityIdentifier("skills.listState")
+            Button {
+                Task { await reload() }
+            } label: {
+                Text("重新读取")
+                    .font(PIFont.captionStrong)
+                    .foregroundStyle(PIColor.accent)
+                    .frame(minHeight: PIMetrics.minHitTarget)
+            }
+            .buttonStyle(.plain)
+            .disabled(!connection.state.isOnline)
+            .accessibilityIdentifier("skills.listRetry")
+        }
+        .padding(.horizontal, PISpacing.s16)
+        .padding(.vertical, PISpacing.s12)
+    }
+
     /// 安装成功、列表刷新失败时的就地提示（部分成功）。
+    /// 归属「安装 Skill」按钮：是这次点按的回执，不是列表的加载失败。
     private func staleListNotice(_ message: String) -> some View {
         VStack(alignment: .leading, spacing: PISpacing.s8) {
             PIInlineMessage(
                 kind: .warning,
-                text: "已安装，但列表更新失败：\(message)。安装本身已成功，请不要重复安装。"
+                text: "已安装，但列表未刷新：\(message)。"
             )
-            Button(isLoading ? "正在刷新…" : "重新读取列表") {
+            Button(install.phase.isSubmitting ? "正在刷新…" : "重新读取列表") {
                 Task { await retryListRefresh() }
             }
             .font(PIFont.captionStrong)
-            .disabled(isLoading || !connection.state.isOnline)
+            .disabled(install.phase.isSubmitting || !connection.state.isOnline)
             .accessibilityIdentifier("skills.reloadStaleList")
         }
         .accessibilityIdentifier("skills.installStale")
@@ -140,6 +195,7 @@ struct SkillsScreen: View {
                 }
                 .pickerStyle(.segmented)
                 .disabled(locked)
+                .accessibilityIdentifier("skills.sourceType")
             }
             PIFormRow {
                 PIFormField(label: sourceType == "git" ? "Git URL" : "服务器目录") {
@@ -150,23 +206,26 @@ struct SkillsScreen: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .disabled(locked)
+                    .accessibilityIdentifier("skills.sourceValue")
                 }
             }
             PIFormRow {
-                PIFormField(label: "子目录（可选）") {
+                PIFormField(label: "子目录") {
                     TextField("skills/demo", text: $subdir)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .disabled(locked)
+                        .accessibilityIdentifier("skills.subdir")
                 }
             }
             if sourceType == "git" {
                 PIFormRow {
-                    PIFormField(label: "branch / tag / commit（可选）") {
+                    PIFormField(label: "分支或版本") {
                         TextField("main", text: $ref)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .disabled(locked)
+                            .accessibilityIdentifier("skills.ref")
                     }
                 }
             }
@@ -175,22 +234,36 @@ struct SkillsScreen: View {
                     .font(PIFont.body)
                     .tint(PIColor.accent)
                     .disabled(locked)
+                    .accessibilityIdentifier("skills.replace")
             }
             PIFormRow(showsDivider: false) {
-                // 注意：不要给这个按钮设 accessibilityIdentifier。既有 L3 用例 SKL-01
-                // 用 `app.buttons["安装 Skill"]` 按**标签**定位，显式 identifier 会改变
-                // 元素的可访问性标识，有把该用例打红的风险。
+                // 按钮标题随安装阶段变化（安装 Skill / 正在安装… / 重试安装），
+                // 所以 L3 只能按 identifier 定位，不能按标签。
                 PIPrimaryButton(
                     title: install.phase.buttonTitle,
-                    isEnabled: canInstall
+                    isEnabled: canInstall,
+                    identifier: "skills.install"
                 ) {
                     Task { await startInstall() }
                 }
             }
+            // §5.1：安装失败属于「安装 Skill」按钮，贴着按钮说原因，不放到页面顶部。
+            if case let .failed(message) = install.phase {
+                PIInlineMessage(kind: .danger, text: message)
+                    .padding(.horizontal, PISpacing.s16)
+                    .padding(.bottom, PISpacing.s12)
+                    .accessibilityIdentifier("skills.error")
+            }
+            // 安装已成功、只有列表没刷新：部分成功，也说在同一个按钮旁。
+            if case let .installedListStale(message) = install.phase {
+                staleListNotice(message)
+                    .padding(.horizontal, PISpacing.s16)
+                    .padding(.bottom, PISpacing.s12)
+            }
             if !connection.state.isOnline {
                 PIInlineMessage(
                     kind: .warning,
-                    text: "PI-adaptor 未连接，连接后可读取和管理全局 Skill。"
+                    text: "未连接：连接后可管理。"
                 )
                 .padding(.horizontal, PISpacing.s16)
                 .padding(.bottom, PISpacing.s12)
@@ -219,28 +292,34 @@ struct SkillsScreen: View {
 
     /// 读取已安装列表。返回失败文案（成功返回 `nil`）。
     ///
-    /// 是否把它弹成「操作失败」由调用方决定：安装成功后的刷新失败必须说成
-    /// 「已安装，列表更新失败」，不能被误报成安装失败。
-    private func reload() async -> String? {
-        guard connection.state.isOnline else {
-            isLoading = false
-            return nil
-        }
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            skills = try await connection.listAdaptorSkills()
-            error = nil
-            return nil
-        } catch {
-            return ConnectionErrorText.describe(error)
-        }
+    /// 列表本身的失败已经写进 `skills` 状态（就地画在列表区）；
+    /// 返回值只给「安装成功后的刷新失败」用——那属于安装按钮的部分成功回执，
+    /// 不能被说成安装失败。
+    /// 列表刷新结果必须区分「成功」「失败」「未执行（离线）」。之前离线也返回
+    /// nil，调用方把 nil 当成功，安装成功后断网会误清空来源并丢失“已安装未刷新”
+    /// 的部分成功提示。
+    private enum ReloadOutcome {
+        case success
+        case failed(String)
+        case notAttempted
     }
 
-    /// 与安装无关的列表刷新（首次进入、下拉、删除后）：失败直接就近报错。
-    private func reloadReportingFailure() async {
-        if let failure = await reload() {
-            error = failure
+    private func reload() async -> ReloadOutcome {
+        guard connection.state.isOnline else {
+            // 没读到：降级为 stale，保留上次列表。
+            skills.markStale(reason: "未连接")
+            return .notAttempted
+        }
+        // 正在读：保留上一次成功的数据，刷新瞬间不闪成空列表。
+        skills.beginLoading()
+        do {
+            skills.succeed(try await connection.listAdaptorSkills())
+            return .success
+        } catch {
+            let message = ConnectionErrorText.describe(error)
+            // 失败不清空：有旧数据就降级成 stale，没有就画原因 + 重试。
+            skills.markStale(reason: message)
+            return .failed(message)
         }
     }
 
@@ -248,35 +327,41 @@ struct SkillsScreen: View {
         // 冻结提交值：await 之后只用这份快照，表单此刻再怎么改都不影响本次安装。
         let request = installRequest
         guard connection.state.isOnline, install.begin(request) else { return }
-        error = nil
         do {
             _ = try await connection.installAdaptorSkill(
                 source: request.sourcePayload(),
                 replace: request.replace
             )
             install.installSucceeded()
-            if let failure = await reload() {
+            switch await reload() {
+            case .failed(let failure):
                 // 安装已成功，只有列表过期：保留来源，给出「重新读取列表」而不是再装一次。
                 install.listRefreshFailed(failure)
-            } else if install.listRefreshSucceeded() {
-                // 安装成功且列表刷新成功，才清空输入。
-                clearSourceFields()
+            case .notAttempted:
+                install.listRefreshFailed("安装成功，但当前未连接，列表未刷新")
+            case .success:
+                if install.listRefreshSucceeded() {
+                    // 安装成功且列表刷新成功，才清空输入。
+                    clearSourceFields()
+                }
             }
         } catch {
-            let message = ConnectionErrorText.describe(error)
-            install.installFailed(message)
-            self.error = message
+            // 失败原因随阶段一起就地显示在安装按钮旁（install.phase）。
+            install.installFailed(ConnectionErrorText.describe(error))
         }
     }
 
     /// 「已安装但列表没刷新」后的手动重试；成功后同样清空来源。
     private func retryListRefresh() async {
-        if let failure = await reload() {
-            error = failure
-            return
-        }
-        if install.listRefreshSucceeded() {
-            clearSourceFields()
+        switch await reload() {
+        case .failed(let failure):
+            install.listRefreshFailed(failure)
+        case .notAttempted:
+            install.listRefreshFailed("仍未连接，列表未刷新")
+        case .success:
+            if install.listRefreshSucceeded() {
+                clearSourceFields()
+            }
         }
     }
 
@@ -289,9 +374,9 @@ struct SkillsScreen: View {
     private func delete(_ skill: RACPV2Skill) async {
         do {
             try await connection.deleteAdaptorSkill(id: skill.id)
-            await reloadReportingFailure()
+            await reload()
         } catch {
-            self.error = ConnectionErrorText.describe(error)
+            deleteError = ConnectionErrorText.describe(error)
         }
     }
 }

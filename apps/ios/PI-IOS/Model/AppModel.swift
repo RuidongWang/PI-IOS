@@ -1,8 +1,21 @@
 import Foundation
 import Combine
 import SwiftUI
+import UIKit
 import PIiOSCore
 import PIiOSNet
+
+/// 本机「默认模型」：哪条服务的哪个模型，以及它声明的默认思考档位。
+///
+/// host 级单选，来源是本机 provider 记录（见 `ProviderDefaultModelRecorder`）。
+struct DefaultModelSelection: Equatable {
+    let providerId: String
+    let modelId: String
+    let displayName: String
+    let thinkingLevel: String?
+
+    var label: String { displayName }
+}
 
 /// 应用状态：三个根页的导航状态、本机服务器记录、本机偏好、提示。
 ///
@@ -29,6 +42,10 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var hosts: [HostRecord] = []
     @Published private(set) var offlineCacheLimit: Int = PersistedState.defaultOfflineCacheLimit
+    /// 运行日志配置（设置 → 日志）。读取自本机状态文件，改动立即生效并持久化。
+    @Published private(set) var logConfiguration: PILogConfiguration = .default
+    /// 运行日志内核。默认即全局单例；测试可注入临时目录，避免污染真实 App 容器。
+    let logStore: PILogger
     @Published private(set) var modelProviders: [StoredModelProvider] = []
     @Published private(set) var projectBindings: [StoredProjectBinding] = []
     @Published private(set) var sessionBindings: [StoredSessionBinding] = []
@@ -47,10 +64,15 @@ final class AppModel: ObservableObject {
     let usesUITestFixture: Bool
     private var tunnelObservation: AnyCancellable?
     private var remoteObservation: AnyCancellable?
+    private var connectionErrorObservation: AnyCancellable?
     private var hostSwitchGeneration = 0
     private var foregroundNotificationTransitionID: UUID?
     private var deferredStatePersistenceTask: Task<Void, Never>?
+    private var automaticStatePersistenceTask: Task<Void, Never>?
+    private var automaticStatePersistencePending = false
     private var canPersistLoadedState = true
+    private let stateFileURL: URL?
+    private var persistenceGeneration: UInt64 = 0
     private var pendingHostID: UUID?
     private var providerConnectionGeneration = 0
     private var providerIdentityGeneration = 0
@@ -61,6 +83,10 @@ final class AppModel: ObservableObject {
 #if DEBUG
     /// Test-only persistence override; never set outside PI-IOSTests.
     var persistenceOverrideForTesting: (() -> Bool)?
+    /// Test-only interleave point after the state-file barrier produced a result
+    /// but before the flush applies it. Lets tests make a newer accepted write
+    /// fail in that gap.
+    var afterPersistBarrierHookForTesting: (() -> Void)?
 #endif
     private var foregroundResumeTracker = ForegroundResumeTracker()
     @Published private(set) var resumedSessionUpdates = ForegroundSessionUpdateMarkers()
@@ -74,15 +100,25 @@ final class AppModel: ObservableObject {
 
     /// `seed` is a test-only injection of persisted state; the app always uses the
     /// default (load from the state file).
-    init(seed: PersistedState? = nil) {
+    init(
+        seed: PersistedState? = nil,
+        stateFileURL: URL? = nil,
+        connectionOverride: ConnectionModel? = nil,
+        logStore: PILogger = PILog.shared
+    ) {
+        self.stateFileURL = stateFileURL
+        self.logStore = logStore
+        let loadStartedAt = Date()
         let fixture = seed == nil ? UITestFixture.current : nil
         usesUITestFixture = fixture != nil
-        connection = ConnectionModel(fixture: fixture)
+        connection = connectionOverride ?? ConnectionModel(fixture: fixture)
         let outcome: StateFile.LoadOutcome
         if let seed {
             outcome = StateFile.LoadOutcome(state: seed, warning: nil)
         } else if let fixture {
             outcome = StateFile.LoadOutcome(state: fixture.state, warning: nil)
+        } else if let stateFileURL {
+            outcome = StateFile.load(from: stateFileURL)
         } else {
             outcome = StateFile.load()
         }
@@ -108,6 +144,12 @@ final class AppModel: ObservableObject {
         }
         loadWarning = outcome.warning
         canPersistLoadedState = outcome.canSave
+        logConfiguration = outcome.state.logConfiguration
+        applyLogConfiguration()
+        installProviderAPIKeyResolver()
+        if let warning = outcome.warning {
+            logStore.log(level: .warn, category: "StateFile", message: warning)
+        }
         if seed == nil, !usesUITestFixture {
             migrateLegacyDeviceTokens()
         }
@@ -130,6 +172,17 @@ final class AppModel: ObservableObject {
         }
         observeTunnelState()
         observeRemoteMetadata()
+        observeConnectionErrors()
+        if !usesUITestFixture {
+            let loadMilliseconds = Int((Date().timeIntervalSince(loadStartedAt) * 1000).rounded())
+            logStore.log(
+                level: .info,
+                category: "App",
+                message: "启动 \(Self.appVersionText) system=\(UIDevice.current.systemVersion) "
+                    + "device=\(UIDevice.current.model) 状态读取 \(loadMilliseconds)ms hosts=\(hosts.count) "
+                    + "日志=\(logConfiguration.isEnabled ? "on" : "off")/\(logConfiguration.level.label) binary=\(PIBuildIdentity.current)"
+            )
+        }
         if usesUITestFixture {
             // 夹具默认从会话页开始，便于会话类用例直接进入内容；
             // 空夹具（G-01）没有主机，仍按 LandingRule 落在设置页空态。
@@ -310,9 +363,9 @@ final class AppModel: ObservableObject {
         )
         if connection.session.attachedSessionId == nil,
            let sessionID = lastSessionByHost[hostID.uuidString] {
-            await connection.session.attach(sessionId: sessionID)
+            await connection.session.attach(sessionId: sessionID, source: "foreground")
         } else {
-            await connection.session.refreshView()
+            await connection.session.refreshView(source: "foreground")
         }
 
         guard !Task.isCancelled,
@@ -560,6 +613,10 @@ final class AppModel: ObservableObject {
         lastVisibleItemID: String?,
         isNearBottom: Bool
     ) {
+        // 已删除 tombstone 不允许被迟到的滚动位置写入复活。
+        if sessionBinding(hostID: hostID, sessionID: sessionID)?.isDeleted == true {
+            return
+        }
         let normalizedItemID = lastVisibleItemID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let next = ConversationReadingPosition(
@@ -577,15 +634,87 @@ final class AppModel: ObservableObject {
             } catch {
                 return
             }
-            self?.persist()
-            self?.deferredStatePersistenceTask = nil
+            guard !Task.isCancelled else { return }
+            guard let self else { return }
+            self.deferredStatePersistenceTask = nil
+            _ = await self.persistAsync()
         }
     }
 
-    func flushPersistentState() {
+    @discardableResult
+    func flushPersistentState() async -> Bool {
         deferredStatePersistenceTask?.cancel()
         deferredStatePersistenceTask = nil
-        persist()
+        automaticStatePersistenceTask?.cancel()
+        automaticStatePersistenceTask = nil
+        automaticStatePersistencePending = false
+
+#if DEBUG
+        if let persistenceOverrideForTesting {
+            return persistenceOverrideForTesting()
+        }
+#endif
+        guard !usesUITestFixture else { return true }
+        guard canPersistLoadedState else {
+            saveError = "本机状态读取失败且原文件仍在，已暂停保存；请重启应用重试。"
+            return false
+        }
+
+        // Persist the current snapshot, then inspect a real serial-queue barrier.
+        // This catches a newer accepted write that fails while the first flush is
+        // suspended instead of returning the first write's stale `true`.
+        let attempt = await persistAsyncTracked()
+        let result = await StateFile.waitForPendingWritesResult()
+#if DEBUG
+        afterPersistBarrierHookForTesting?()
+#endif
+        // A newer accepted write (or the cancelled background lease that owns
+        // this flush) may have changed saveError after our barrier. Only the
+        // generation that this flush enqueued may publish its result.
+        let mayPublish = !Task.isCancelled && attempt.generation == persistenceGeneration
+        switch result {
+        case .committed:
+            if mayPublish { saveError = nil }
+            return true
+        case .failed(let message):
+            if mayPublish { saveError = "保存本机记录失败：\(message)" }
+            return false
+        }
+    }
+
+    /// Shared by the scene background path and regression tests: a state failure
+    /// is observable but must never short-circuit the independent cache barrier.
+    func flushForBackground() async {
+        _ = await flushPersistentState()
+        await connection.flushPendingCacheWrites()
+    }
+
+    /// Coalesce automatic (remote/tunnel/discovery) state saves onto the same
+    /// 250 ms debounce used by reading positions. Only one task is retained; new
+    /// changes set a pending flag instead of growing the queue.
+    private func scheduleAutomaticPersist() {
+        guard !usesUITestFixture else { return }
+        automaticStatePersistencePending = true
+        guard automaticStatePersistenceTask == nil else { return }
+        automaticStatePersistenceTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                self?.automaticStatePersistenceTask = nil
+                return
+            }
+            guard let self else { return }
+            guard self.automaticStatePersistencePending else {
+                self.automaticStatePersistenceTask = nil
+                return
+            }
+            self.automaticStatePersistencePending = false
+            _ = await self.persistAsync()
+            self.automaticStatePersistenceTask = nil
+            if self.automaticStatePersistencePending {
+                self.scheduleAutomaticPersist()
+            }
+        }
     }
 
     func sessionDisplayTitle(
@@ -665,6 +794,42 @@ final class AppModel: ObservableObject {
             sessionBindings[index].pinOrder = nil
         }
         sessionBindings[index].updatedAt = Date()
+        persist()
+    }
+
+    /// Host 已明确删除目标后的本机收尾；不得把本方法当成另一个删除入口。
+    func deleteSessionLocally(hostID: UUID, sessionID: String) {
+        let hostKey = hostID.uuidString
+        if let index = sessionBindings.firstIndex(where: {
+            $0.hostID == hostID && $0.sessionID == sessionID
+        }) {
+            sessionBindings[index].isDeleted = true
+            sessionBindings[index].isArchived = true
+            sessionBindings[index].titleOverride = nil
+            sessionBindings[index].messageCount = nil
+            sessionBindings[index].lastOpenedAt = nil
+            sessionBindings[index].lastKnownRevision = nil
+            sessionBindings[index].lastActivityAt = .distantPast
+            sessionBindings[index].isUnread = false
+            sessionBindings[index].isPinned = false
+            sessionBindings[index].pinOrder = nil
+            sessionBindings[index].updatedAt = Date()
+        }
+        readingPositionsByHost[hostKey]?.removeValue(forKey: sessionID)
+        if readingPositionsByHost[hostKey]?.isEmpty == true {
+            readingPositionsByHost.removeValue(forKey: hostKey)
+        }
+        // 取消旧阅读位置的延迟持久化，并阻止后续通知继续指向已删除目标。
+        deferredStatePersistenceTask?.cancel()
+        deferredStatePersistenceTask = nil
+        resumedSessionUpdates.open(hostID: hostID, sessionID: sessionID)
+        foregroundResumeTracker.open(hostID: hostID, sessionID: sessionID)
+        if lastSessionByHost[hostKey] == sessionID {
+            lastSessionByHost.removeValue(forKey: hostKey)
+        }
+        if currentHost?.id == hostID, lastSessionId == sessionID {
+            lastSessionId = nil
+        }
         persist()
     }
 
@@ -795,12 +960,35 @@ final class AppModel: ObservableObject {
         currentModelGrouping.diagnostics
     }
 
+    /// 当前 Host 的默认模型（host 级单选）。新会话用它作为初始绑定，
+    /// 设置页「默认模型」一行也直接读它，避免两处各自推导出不同结论。
+    var defaultModelSelection: DefaultModelSelection? {
+        guard let hostID = currentHost?.id else { return nil }
+        // `hostV2Mirror == false` 是只存在旧 SSH 存储的记录：它不能驱动会话，
+        // 不能作为默认模型显示或绑定。`nil` 是旧记录，保守放行。
+        for provider in currentModelProviders
+        where provider.hostID == hostID && provider.hostV2Mirror != false {
+            guard let modelId = provider.defaultModelId,
+                  let binding = provider.models.first(where: { $0.id == modelId })
+            else { continue }
+            return DefaultModelSelection(
+                providerId: provider.providerId,
+                modelId: binding.id,
+                displayName: "\(provider.name) · \(binding.displayName)",
+                thinkingLevel: binding.defaultThinkingLevel
+            )
+        }
+        return nil
+    }
+
+    /// 新建会话用的默认绑定。`defaultModelSelection` 已经排除仅 legacy 的服务，
+    /// 这里保持单一口径：新建会话与设置页看到的是同一个默认模型。
+    var defaultModelSelectionForNewSession: DefaultModelSelection? {
+        defaultModelSelection
+    }
+
     var defaultModelLabel: String {
-        guard let provider = currentModelProviders.first(where: { $0.defaultModelId != nil }),
-              let modelId = provider.defaultModelId,
-              let model = provider.models.first(where: { $0.id == modelId })
-        else { return "未配置" }
-        return "\(provider.name) · \(model.displayName)"
+        defaultModelSelection?.label ?? "未配置"
     }
 
     // MARK: - 导航
@@ -816,6 +1004,23 @@ final class AppModel: ObservableObject {
 
     /// 抽屉里点「设置」并希望落在服务器列表时使用：切根并保持抽屉关闭。
     func showSettings() { switchRoot(.settings) }
+
+    /// 跨页面深链：切到设置根，并请求设置页把自己压栈到指定子页。
+    ///
+    /// 为什么放在这里：恢复路径（比如「模型不可用 → 去模型服务」）不该让每个页面
+    /// 自己拼路由，也不该只把用户丢到设置根页再让他找一次。
+    /// `SettingsScreen` 消费后立即清空，保持「一次性意图」的语义。
+    @Published private(set) var pendingSettingsRoute: SettingsRoute?
+
+    func showSettings(_ route: SettingsRoute) {
+        pendingSettingsRoute = route
+        switchRoot(.settings)
+    }
+
+    func consumePendingSettingsRoute() -> SettingsRoute? {
+        defer { pendingSettingsRoute = nil }
+        return pendingSettingsRoute
+    }
 
     // MARK: - 主机记录
 
@@ -997,6 +1202,7 @@ final class AppModel: ObservableObject {
         }
         if pendingHostID == id { pendingHostID = nil }
         persist()
+        await connection.flushPendingCacheWrites()
         return true
     }
 
@@ -1007,6 +1213,13 @@ final class AppModel: ObservableObject {
     private func clearHostDerivedData(_ id: UUID, detachSession: Bool) {
         let hostKey = id.uuidString
         let clearsCurrentContext = currentHost?.id == id
+        // Provider 密钥按 host UUID + providerId 存储，而 UUID 在改绑/删除后可能
+        // 指向另一台服务器。这里必须按前缀清掉全部历史 provider key（含 legacy
+        // 与已从本机投影移除的 ID），否则新端点复用同名 providerId 时会取到旧
+        // 服务器的密钥。失败时不能静默，留给用户可操作提示。
+        if !KeychainStore.deleteAllProviderKeys(hostID: id) {
+            showToast("部分旧服务的 API Key 未能从 Keychain 清除，请重启应用后重试")
+        }
         modelProviders.removeAll { $0.hostID == id }
         projectBindings.removeAll { $0.hostID == id }
         sessionBindings.removeAll { $0.hostID == id }
@@ -1171,7 +1384,7 @@ final class AppModel: ObservableObject {
               hosts[index].hostPort != port
         else { return }
         hosts[index].hostPort = port
-        persist()
+        scheduleAutomaticPersist()
     }
 
     func providerOperationContext(for host: HostRecord) -> ProviderOperationContext? {
@@ -1195,6 +1408,33 @@ final class AppModel: ObservableObject {
         modelProviders.first { $0.hostID == hostID && $0.providerId == providerId }
     }
 
+    /// 发送前按「当前 Host + 会话绑定的 provider id」取本机 Keychain 明文。
+    ///
+    /// 早期通过 SSH legacy 路径导入、后来镜像到 v2 的记录，本机密钥可能仍只挂在
+    /// `legacyProviderId` 上。这里按本机映射再回退一次，避免出现「provider 已同步
+    /// 到服务器、key 却没有同步」造成的 `PROVIDER_SECRET_MISSING`；未命中时返回
+    /// nil，由服务器按契约明确拒绝，不猜测、不复用其他服务的 key。
+    func providerKeyForTurn(providerId: String, hostID: UUID) -> String? {
+        if let key = KeychainStore.loadProviderKey(hostID: hostID, providerId: providerId) {
+            return key
+        }
+        guard let legacyProviderId = modelProviders.first(where: {
+            $0.hostID == hostID && $0.providerId == providerId
+        })?.legacyProviderId,
+        legacyProviderId != providerId
+        else { return nil }
+        return KeychainStore.loadProviderKey(hostID: hostID, providerId: legacyProviderId)
+    }
+
+    /// 会话发送路径的 key 解析器。ConnectionModel 在 init 里装了默认实现（只按
+    /// provider id 查）；AppModel 持有本机映射，能在默认实现之上补 legacy 回退。
+    private func installProviderAPIKeyResolver() {
+        connection.session.providerAPIKey = { [weak self] providerId in
+            guard let self, let hostID = self.currentHost?.id else { return nil }
+            return self.providerKeyForTurn(providerId: providerId, hostID: hostID)
+        }
+    }
+
     func canApplyProviderOperation(_ context: ProviderOperationContext) -> Bool {
         context.canApply(to: currentHost.flatMap { providerOperationContext(for: $0) })
     }
@@ -1210,14 +1450,23 @@ final class AppModel: ObservableObject {
     ) -> Bool {
         guard canApplyProviderOperation(context) else { return false }
         let hostID = context.hostID
-        let previousDefault = modelProviders.first {
+        let previousRecord = modelProviders.first {
             $0.hostID == hostID && $0.providerId == providerId
-        }?.defaultModelId
-        let defaultModelId = currentModelProviders.isEmpty && serverDefaultSet
-            ? input.defaultModelId
-            : ProviderUpdateComposer.resolvedDefaultModelID(
-                previous: previousDefault, models: input.models
-            )
+        }
+        let previousDefault = previousRecord?.defaultModelId
+        // 默认模型是 host 级单选：`input.defaultModelId` 代表「本次用户明确选择或
+        // 导入载荷声明的默认」，必须优先于本机旧值；旧实现把 previous 排在新选择
+        // 前面，导致「设为默认」在刷新本机记录时被还原成旧默认。
+        let isOnlyProviderOnHost = !modelProviders.contains {
+            $0.hostID == hostID && $0.providerId != providerId
+        }
+        let defaultModelId = ProviderDefaultModelRecorder.resolvedDefaultModelID(
+            explicit: input.defaultModelId,
+            previous: previousDefault,
+            models: input.models,
+            serverDefaultSet: serverDefaultSet,
+            isOnlyProviderOnHost: isOnlyProviderOnHost
+        )
         modelProviders.removeAll { $0.hostID == hostID && $0.providerId == providerId }
         modelProviders.append(
             StoredModelProvider(
@@ -1233,6 +1482,15 @@ final class AppModel: ObservableObject {
                 importedAt: Date()
             )
         )
+        if defaultModelId != nil {
+            // 只在新的默认项落到这台 Host 上时清掉其他 provider 的旧默认，
+            // 让设置页与模型面板始终只有一个「默认模型」。
+            for index in modelProviders.indices
+            where modelProviders[index].hostID == hostID
+                && modelProviders[index].providerId != providerId {
+                modelProviders[index].defaultModelId = nil
+            }
+        }
         persist()
         return true
     }
@@ -1247,14 +1505,25 @@ final class AppModel: ObservableObject {
 
     private func observeTunnelState() {
         tunnelObservation = connection.$state.sink { [weak self] state in
+            PILog.debug("Connection", "隧道状态=\(state.displayText)")
             self?.providerConnectionGeneration &+= 1
             guard state.isOnline else { return }
             Task { @MainActor in
                 guard let self, let index = self.hosts.firstIndex(where: { $0.isCurrent }) else { return }
                 self.hosts[index].tunnelUpAt = Date()
-                self.persist()
+                self.scheduleAutomaticPersist()
             }
         }
+    }
+
+    /// 连接错误按分类写日志：用于实机排查断线/重连失败，不记录任何凭证。
+    private func observeConnectionErrors() {
+        connectionErrorObservation = connection.$lastError
+            .removeDuplicates()
+            .sink { error in
+                guard let error else { return }
+                PILog.warn("Connection", "最近错误：\(ConnectionDiagnosticRedactor.redact(error))")
+            }
     }
 
     private func observeRemoteMetadata() {
@@ -1354,7 +1623,7 @@ final class AppModel: ObservableObject {
                 changed = true
             }
         }
-        if changed { persist() }
+        if changed { scheduleAutomaticPersist() }
     }
 
     private func connectCurrentHostIfPaired() async {
@@ -1371,6 +1640,7 @@ final class AppModel: ObservableObject {
         hostSwitchGeneration &+= 1
         let generation = hostSwitchGeneration
         pendingHostID = id
+        PILog.info("Connection", "切换服务器 host=\(id.uuidString.prefix(8))")
         // 先清空旧连接的目录与隧道，避免旧 PI-adaptor 的列表在新 PI-adaptor 标记生效后到达本机元数据合并。
         if let previousHostID {
             await connection.disconnect(ifHostID: previousHostID)
@@ -1395,11 +1665,12 @@ final class AppModel: ObservableObject {
             if await connection.waitUntilOnline(),
                let lastSession = lastSessionByHost[host.id.uuidString],
                hostSwitchGeneration == generation {
-                await connection.session.attach(sessionId: lastSession)
+                await connection.session.attach(sessionId: lastSession, source: "connectionRestore")
             }
         }
         if hostSwitchGeneration == generation {
             pendingHostID = nil
+            PILog.info("Connection", "切换服务器完成 online=\(connection.state.isOnline)")
         }
     }
 
@@ -1466,7 +1737,110 @@ final class AppModel: ObservableObject {
         guard clamped != offlineCacheLimit else { return }
         offlineCacheLimit = clamped
         connection.updateOfflineCacheLimit(clamped)
+        logStore.log(level: .info, category: "Settings", message: "离线缓存上限=\(clamped)")
         persist()
+    }
+
+    // MARK: - 日志（设置 → 日志）
+
+    /// 打开/关闭持久日志。关闭时先记录一条再落配置，保证「关闭」这件事本身可追溯。
+    func setLoggingEnabled(_ enabled: Bool) {
+        guard logConfiguration.isEnabled != enabled else { return }
+        if enabled {
+            logConfiguration.isEnabled = true
+            applyLogConfiguration()
+            logStore.log(level: logConfiguration.level, category: "Settings", message: "日志已开启")
+        } else {
+            // 用当前生效等级记录：level=warn 时 info 会被过滤，关闭动作就不可追溯了。
+            logStore.log(level: logConfiguration.level, category: "Settings", message: "日志已关闭")
+            logConfiguration.isEnabled = false
+            applyLogConfiguration()
+            logStore.flush()
+        }
+        persist()
+    }
+
+    func setLogLevel(_ level: PILogLevel) {
+        guard logConfiguration.level != level else { return }
+        logConfiguration.level = level
+        applyLogConfiguration()
+        logStore.log(level: level, category: "Settings", message: "日志等级=\(level.label)")
+        persist()
+    }
+
+    func setLogTimeFormat(_ format: PILogTimeFormat) {
+        guard logConfiguration.timeFormat != format else { return }
+        logConfiguration.timeFormat = format
+        applyLogConfiguration()
+        logStore.log(level: .info, category: "Settings", message: "日志时间格式=\(format.rawValue)")
+        persist()
+    }
+
+    /// 设置页日志记录（只读内存，不读盘）；默认全部，显式 limit 可用于局部投影。
+    func currentLogRecords(limit: Int? = nil) -> [PILogRecord] {
+        logStore.recentRecords(limit: limit)
+    }
+
+    /// 导出 txt 全文；读取轮转文件可能到 MB 级，固定放后台线程生成。
+    func exportLogText() async -> String {
+        let metadata = logExportMetadata
+        let store = logStore
+        return await Task.detached(priority: .utility) {
+            store.exportText(metadata: metadata)
+        }.value
+    }
+
+    /// 清空日志：`PILogger.clear()` 是同步磁盘 API（内部用信号量等后台队列），
+    /// 按「日志 IO 不在主线程」的约定放到后台任务执行；调用方 await 后再重置页面快照。
+    func clearLogs() async {
+        let store = logStore
+        await Task.detached(priority: .utility) {
+            store.clear()
+        }.value
+    }
+
+    /// 前后台切换时启停卡顿监测：后台不记录（避免误报切回时的长间隔）。
+    func updateLogSceneActive(_ active: Bool) {
+        MainThreadStallMonitor.shared.setSceneActive(active)
+    }
+
+    /// 退后台/退出前把待写批次落盘。由 `BackgroundFlushLease` 持有后台任务断言，
+    /// 避免系统立即挂起时丢掉最后 ~0.5s 的待写日志。
+    func flushLogsForBackground() async {
+        let store = logStore
+        await Task.detached(priority: .utility) {
+            store.flushSync()
+        }.value
+    }
+
+    /// 重启后日志页首屏快照：默认从磁盘读取全部记录，避免「导出有内容、页面却显示暂无日志」。
+    func loadStoredLogRecords(limit: Int? = nil) async -> [PILogRecord] {
+        let store = logStore
+        return await Task.detached(priority: .utility) {
+            store.storedRecords(limit: limit)
+        }.value
+    }
+
+    private func applyLogConfiguration() {
+        logStore.configure(logConfiguration)
+        MainThreadStallMonitor.shared.setEnabled(logConfiguration.isEnabled && !usesUITestFixture)
+    }
+
+    private var logExportMetadata: PILogExportMetadata {
+        PILogExportMetadata(
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+            buildNumber: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?",
+            systemVersion: UIDevice.current.systemVersion,
+            deviceModel: UIDevice.current.model,
+            configuration: logConfiguration,
+            buildIdentity: PIBuildIdentity.current
+        )
+    }
+
+    private static var appVersionText: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        return "\(version)(\(build))"
     }
 
     /// 缓存裁剪时必须传的上限（AC-15.1）：`CacheRetention.pruneItems(items, limit: cacheRetentionLimit)`。
@@ -1506,27 +1880,90 @@ final class AppModel: ObservableObject {
             lastProjectByHost: lastProjectByHost,
             collapsedProjectGroups: collapsedProjectGroups,
             projectBrowserPaths: projectBrowserPaths,
-            readingPositionsByHost: readingPositionsByHost
+            readingPositionsByHost: readingPositionsByHost,
+            logConfiguration: logConfiguration
         )
     }
 
     @discardableResult
     private func persist() -> Bool {
+        persistenceGeneration &+= 1
+        let generation = persistenceGeneration
 #if DEBUG
         if let persistenceOverrideForTesting { return persistenceOverrideForTesting() }
 #endif
         guard !usesUITestFixture else { return true }
         guard canPersistLoadedState else {
-            saveError = "本机状态读取失败且原文件仍在，已暂停保存；请重启应用重试。"
+            if generation == persistenceGeneration {
+                saveError = "本机状态读取失败且原文件仍在，已暂停保存；请重启应用重试。"
+            }
             return false
         }
         do {
-            try StateFile.save(snapshot)
-            saveError = nil
+            if let stateFileURL {
+                try StateFile.save(snapshot, to: stateFileURL)
+            } else {
+                try StateFile.save(snapshot)
+            }
+            if generation == persistenceGeneration {
+                saveError = nil
+            }
             return true
         } catch {
-            saveError = "保存本机记录失败：\(error.localizedDescription)"
+            PILog.warn("StateFile", "保存失败：\(error.localizedDescription)")
+            if generation == persistenceGeneration {
+                saveError = "保存本机记录失败：\(error.localizedDescription)"
+            }
             return false
+        }
+    }
+
+    private struct PersistAttempt {
+        let succeeded: Bool
+        let generation: UInt64
+    }
+
+    @discardableResult
+    private func persistAsync() async -> Bool {
+        let attempt = await persistAsyncTracked()
+        return attempt.succeeded
+    }
+
+    /// Async save that reports the generation it owns, so a barrier caller can
+    /// tell whether a newer accepted write superseded its result.
+    private func persistAsyncTracked() async -> PersistAttempt {
+        persistenceGeneration &+= 1
+        let generation = persistenceGeneration
+        func attempt(_ succeeded: Bool) -> PersistAttempt {
+            PersistAttempt(succeeded: succeeded, generation: generation)
+        }
+#if DEBUG
+        if let persistenceOverrideForTesting { return attempt(persistenceOverrideForTesting()) }
+#endif
+        guard !usesUITestFixture else { return attempt(true) }
+        guard canPersistLoadedState else {
+            if !Task.isCancelled, generation == persistenceGeneration {
+                saveError = "本机状态读取失败且原文件仍在，已暂停保存；请重启应用重试。"
+            }
+            return attempt(false)
+        }
+        let state = snapshot
+        do {
+            if let stateFileURL {
+                try await StateFile.saveAsync(state, to: stateFileURL)
+            } else {
+                try await StateFile.saveAsync(state)
+            }
+            if !Task.isCancelled, generation == persistenceGeneration {
+                saveError = nil
+            }
+            return attempt(true)
+        } catch {
+            PILog.warn("StateFile", "保存失败：\(error.localizedDescription)")
+            if !Task.isCancelled, generation == persistenceGeneration {
+                saveError = "保存本机记录失败：\(error.localizedDescription)"
+            }
+            return attempt(false)
         }
     }
 }

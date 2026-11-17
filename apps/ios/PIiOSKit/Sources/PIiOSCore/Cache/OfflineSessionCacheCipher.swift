@@ -18,10 +18,27 @@ public enum OfflineCacheCipher {
     private static let service = "com.pi-ios.offline-cache"
     private static let account = "content-key"
 
+    private static let degradeLock = NSLock()
+    private static var degraded = false
+    /// 是否发生过明文降级。加密是敏感内容的保障，降级不能完全无痕；调用方/
+    /// 诊断可以据此提示用户。
+    public static var isDegraded: Bool {
+        degradeLock.lock(); defer { degradeLock.unlock() }
+        return degraded
+    }
+
+    private static func markDegraded() {
+        degradeLock.lock(); degraded = true; degradeLock.unlock()
+    }
+
     /// 密封一段文本；无法加密时原样返回（见类型注释的降级说明）。
     public static func seal(_ plaintext: String) -> String {
-        guard let key = loadKey(), let data = plaintext.data(using: .utf8) else { return plaintext }
+        guard let key = loadKey(), let data = plaintext.data(using: .utf8) else {
+            markDegraded()
+            return plaintext
+        }
         guard let sealed = try? AES.GCM.seal(data, using: key), let combined = sealed.combined else {
+            markDegraded()
             return plaintext
         }
         return prefix + combined.base64EncodedString()

@@ -111,6 +111,33 @@ final class RACPHostSubscriptionTests: XCTestCase {
         XCTAssertNil(tracker.observe(created), "重放的重叠事件不能重复刷新")
     }
 
+    func testHostTrackerRefreshesCatalogForSessionDeleted() throws {
+        var tracker = RACPHostSubscriptionTracker()
+        tracker.install(
+            subscriptionID: "sub_host_1",
+            starting: RACPCursor(epoch: "ep_host", sequence: 20)
+        )
+        // 先消费一条 durable 事件把水位推到 20。
+        _ = tracker.observe(event(
+            sequence: 20,
+            scope: "host",
+            kind: "session.changed",
+            sessionId: "ses_1"
+        ))
+
+        let deleted = try XCTUnwrap(tracker.observe(event(
+            sequence: 21,
+            scope: "host",
+            kind: "session.deleted",
+            sessionId: "ses_1"
+        )))
+        XCTAssertEqual(deleted.change.reason, .catalogChanged)
+        XCTAssertTrue(
+            deleted.requiresCatalogRefresh,
+            "另一台设备删除会话后，本机必须重新拉取 catalog，否则已删除会话会继续留在侧栏"
+        )
+    }
+
     func testHostTrackerTreatsNonContiguousGlobalSequenceAsNormalEpochAndResync() throws {
         var tracker = RACPHostSubscriptionTracker()
         tracker.install(

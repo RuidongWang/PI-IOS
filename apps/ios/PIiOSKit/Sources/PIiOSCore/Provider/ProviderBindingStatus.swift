@@ -57,6 +57,9 @@ public enum ProviderBindingStatusParser {
               !sessionId.isEmpty,
               let pinned = root["pinned"] as? [String: Any],
               Set(pinned.keys) == Set(["providerId", "modelId", "thinkingLevel"]),
+              isNullableString(pinned["providerId"]),
+              isNullableString(pinned["modelId"]),
+              isNullableString(pinned["thinkingLevel"]),
               root["available"] is NSNull || root["available"] is Bool,
               root["unavailableReason"] is NSNull || root["unavailableReason"] is String,
               let unknownInputs = root["unknownInputs"] as? [String],
@@ -90,9 +93,14 @@ public enum ProviderBindingStatusParser {
                   "providerKnown", "providerEnabled", "modelsEmpty", "modelPresent",
                   "secretPresent", "oauth", "pluginOwned", "secretMismatch",
               ]),
+              // Each check is a tri-state (true/false/null); a number/string/array
+              // used to be silently treated as nil and the receipt still accepted.
+              checks.values.allSatisfy({ $0 is NSNull || $0 is Bool }),
               let consistency = root["consistency"] as? [String: Any],
               Set(consistency.keys) == Set(["reads", "snapshotStable"]),
-              consistency["snapshotStable"] is Bool
+              consistency["snapshotStable"] is Bool,
+              let reads = consistency["reads"] as? NSNumber,
+              CFGetTypeID(reads) != CFBooleanGetTypeID()
         else { throw ProviderRemoveParseError.invalidShape }
 
         return ProviderBindingStatus(
@@ -107,6 +115,11 @@ public enum ProviderBindingStatusParser {
             unknownInputs: unknownInputs,
             observedAt: observedAt
         )
+    }
+
+    /// True only for JSON null or a string; other types are a malformed receipt.
+    private static func isNullableString(_ value: Any?) -> Bool {
+        value is NSNull || value is String
     }
 
     private static func nullableBool(_ value: Any?) -> Bool? {

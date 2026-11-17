@@ -113,12 +113,13 @@ public enum MarkdownParser {
     // MARK: 代码块
 
     private static func fenceOpening(_ trimmed: String) -> (marker: String, language: String?)? {
-        for marker in ["```", "~~~"] where trimmed.hasPrefix(marker) {
-            let info = trimmed.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
-            let language = info.split(whereSeparator: \.isWhitespace).first.map(String.init)
-            return (marker, language?.isEmpty == false ? language : nil)
-        }
-        return nil
+        guard let first = trimmed.first, first == "`" || first == "~" else { return nil }
+        let run = trimmed.prefix(while: { $0 == first })
+        guard run.count >= 3 else { return nil }
+        let info = trimmed.dropFirst(run.count).trimmingCharacters(in: .whitespaces)
+        let language = info.split(whereSeparator: \.isWhitespace).first.map(String.init)
+        // Keep the full run so a 3-backtick line cannot close a 4-backtick block.
+        return (String(run), language?.isEmpty == false ? language : nil)
     }
 
     private static func codeBlock(
@@ -130,8 +131,12 @@ public enum MarkdownParser {
         var cursor = index + 1
         while cursor < lines.count {
             let trimmed = lines[cursor].trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix(marker),
-               trimmed.dropFirst(marker.count).allSatisfy({ $0 == "`" || $0 == "~" || $0.isWhitespace }) {
+            // Closing fence must use the same character and be at least as long
+            // as the opening fence (CommonMark).
+            if let first = marker.first, trimmed.first == first,
+               trimmed.prefix(while: { $0 == first }).count >= marker.count,
+               trimmed.dropFirst(trimmed.prefix(while: { $0 == first }).count)
+                   .allSatisfy({ $0.isWhitespace }) {
                 cursor += 1
                 break
             }
@@ -152,9 +157,19 @@ public enum MarkdownParser {
         let rest = trimmed.dropFirst(hashes.count)
         guard rest.isEmpty || rest.first?.isWhitespace == true else { return nil }
         var text = rest.trimmingCharacters(in: .whitespaces)
-        // 去掉可选的收尾 #（`## 标题 ##`）。
-        while text.hasSuffix("#") {
-            text.removeLast()
+        // 去掉可选的收尾 #，但只在其前有空白时（`## 标题 ##`）。`# C#` 的末尾
+        // 井号是标题内容，不能删除。
+        let closing = text.reversed().prefix(while: { $0 == "#" }).count
+        if closing > 0 {
+            let contentEnd = text.index(text.endIndex, offsetBy: -closing)
+            if contentEnd > text.startIndex {
+                let before = text[text.index(before: contentEnd)]
+                if before.isWhitespace {
+                    text = String(text[..<contentEnd]).trimmingCharacters(in: .whitespaces)
+                }
+            } else {
+                text = ""
+            }
         }
         return (hashes.count, text.trimmingCharacters(in: .whitespaces))
     }

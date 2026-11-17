@@ -3,8 +3,18 @@ import Foundation
 
 // StateFile only needs Codable state; keep this executable independent of UIKit.
 struct PersistedState: Codable, Equatable {
-    let marker: String
+    var version: Int = 1
+    var marker: String
+    static let supportedVersion = 1
     static let empty = PersistedState(marker: "empty")
+
+    init(marker: String) { self.marker = marker }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        marker = try container.decode(String.self, forKey: .marker)
+    }
 }
 
 @main

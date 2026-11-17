@@ -1,4 +1,5 @@
 import Foundation
+import PIiOSCore
 import PIiOSNet
 
 /// 认证方式：密码或 OpenSSH 私钥（spec E6）。
@@ -112,15 +113,19 @@ struct ConversationReadingPosition: Codable, Equatable {
 
 /// 落盘的本机状态（`Application Support/PIiOS/state-v1.json`）。
 struct PersistedState: Codable, Equatable {
-    /// 单会话离线缓存上限的默认值（AC-15.1 / spec §9.1）。
+    /// 当前版本能安全读写的 schema 版本。读取到更高版本时必须拒绝覆盖，
+    /// 否则旧版 App 会把新版本字段静默丢弃。
+    static let supportedVersion = 1
+    /// 单会话离线缓存完整轮次数的默认值；持久字段名保持不变（AC-15.1 / spec §9.1）。
     static let defaultOfflineCacheLimit = 200
-    /// 允许选择的上限（spec §9.1「设置中可调」）。
+    /// 允许选择的完整轮次上限（spec §9.1「设置中可调」）。
     static let offlineCacheLimitOptions = [100, 200, 500, 1000]
     /// 单设备最多缓存的会话数（spec §9.1）。
     static let maxCachedConversations = 20
 
     var version: Int
     var hosts: [HostRecord]
+    /// 每会话保留的完整轮次数；字段名仅为旧状态文件兼容，不表示 item 条数。
     var offlineCacheLimit: Int
     /// Non-secret local records used to build the model picker. API keys remain
     /// on the pi-host after import.
@@ -139,6 +144,8 @@ struct PersistedState: Codable, Equatable {
     var projectBrowserPaths: [String: String]
     /// 会话阅读位置：第一层是 host UUID，第二层是 session id。
     var readingPositionsByHost: [String: [String: ConversationReadingPosition]]
+    /// 运行日志配置（设置 → 日志）。旧状态文件缺该字段时用 `.default`。
+    var logConfiguration: PILogConfiguration
 
     static let empty = PersistedState()
 
@@ -155,7 +162,8 @@ struct PersistedState: Codable, Equatable {
         lastProjectByHost: [String: String] = [:],
         collapsedProjectGroups: [String] = [],
         projectBrowserPaths: [String: String] = [:],
-        readingPositionsByHost: [String: [String: ConversationReadingPosition]] = [:]
+        readingPositionsByHost: [String: [String: ConversationReadingPosition]] = [:],
+        logConfiguration: PILogConfiguration = .default
     ) {
         self.version = version
         self.hosts = hosts
@@ -170,6 +178,7 @@ struct PersistedState: Codable, Equatable {
         self.collapsedProjectGroups = collapsedProjectGroups
         self.projectBrowserPaths = projectBrowserPaths
         self.readingPositionsByHost = readingPositionsByHost
+        self.logConfiguration = logConfiguration
     }
 
     enum CodingKeys: String, CodingKey {
@@ -186,6 +195,7 @@ struct PersistedState: Codable, Equatable {
         case collapsedProjectGroups
         case projectBrowserPaths
         case readingPositionsByHost
+        case logConfiguration
     }
 
     /// 容错解码：缺字段时使用默认值，避免旧文件或手改文件导致整体读取失败。
@@ -227,6 +237,12 @@ struct PersistedState: Codable, Equatable {
             [String: [String: ConversationReadingPosition]].self,
             forKey: .readingPositionsByHost
         ) ?? [:]
+        // 顶层形状也可能被手改成非对象（"on"/1/[]）；此时只回落默认值，
+        // 不能让整个状态文件解码失败而丢 hosts/providers。
+        logConfiguration = (try? container.decodeIfPresent(
+            PILogConfiguration.self,
+            forKey: .logConfiguration
+        )) ?? .default
     }
 
     static func clampOfflineCacheLimit(_ value: Int) -> Int {

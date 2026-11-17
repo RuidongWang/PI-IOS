@@ -46,6 +46,8 @@ public enum SSHTransportError: Error, Equatable, CustomStringConvertible {
     case tunnelRefused(phase: String, detail: String)
     /// 其它网络层失败（不可达、地址无效等），保留原始描述用于排查。
     case networkFailure(phase: String, detail: String)
+    /// 远端命令输出超过本机允许的字节上限。
+    case outputLimitExceeded(stream: String, limit: Int)
 
 
     public var description: String {
@@ -79,6 +81,8 @@ public enum SSHTransportError: Error, Equatable, CustomStringConvertible {
                 + "PI-adaptor 用 `--port 0` 启动时端口是随机的，需要用固定端口（如 `--port 33381`）重启后才能长期连接。"
         case .networkFailure(let phase, let detail):
             return "「\(phase)」网络失败：\(detail)。检查地址与端口、手机网络/VPN，以及服务器防火墙是否放行该端口。"
+        case .outputLimitExceeded(let stream, let limit):
+            return "远端命令的 \(stream) 输出超过 \(limit) 字节上限，已中止"
         }
     }
 }
@@ -127,20 +131,32 @@ public struct SSHExecResult: Sendable, Equatable {
 public final class SSHTransport {
     private let channel: Channel
     private let group: MultiThreadedEventLoopGroup
-    private let handler: NIOSSHHandler
+    private let handler: NIOSSHHandler?
+    let lifecycle: SSHConnectionLifecycle
     public private(set) var presentedHostKey: SSHHostKey?
 
     private init(
         channel: Channel,
         group: MultiThreadedEventLoopGroup,
-        handler: NIOSSHHandler,
+        handler: NIOSSHHandler?,
         presentedHostKey: SSHHostKey?
     ) {
         self.channel = channel
         self.group = group
         self.handler = handler
+        self.lifecycle = SSHConnectionLifecycle(parent: channel) {
+            try? await group.shutdownGracefully()
+        }
         self.presentedHostKey = presentedHostKey
     }
+
+#if DEBUG
+    /// Uses the production lifecycle owner with a real local NIO channel; tests
+    /// need no remote SSH credentials to exercise shutdown/submission ordering.
+    static func testing(channel: Channel, group: MultiThreadedEventLoopGroup) -> SSHTransport {
+        SSHTransport(channel: channel, group: group, handler: nil, presentedHostKey: nil)
+    }
+#endif
 
     /// 建立 SSH 连接并完成握手 + 认证。
     ///
@@ -268,13 +284,18 @@ public final class SSHTransport {
         }
         return error
     }
-    /// 关闭连接（幂等）。
+    /// One owner closes children, joins their readers, then shuts down the group.
+    /// Concurrent external callers join the same completion, including while closing.
     public func close() async {
-        try? await channel.close().get()
-        try? await group.shutdownGracefully()
+        let completion = lifecycle.requestClose()
+        if RACPInboundContext.socketID == nil { await completion.value }
     }
 
     // MARK: exec
+
+    /// stdout/stderr 合计输出上限。远端进程可能异常或被篡改后无限输出，
+    /// 超时只能限制时长、不能限制瞬间内存，因此必须在收集器里按字节截断。
+    private static let maximumExecOutputBytes = 8 * 1024 * 1024
 
     /// 打开 `exec` 通道执行命令，返回 stdout / stderr / 退出码。
     public func exec(
@@ -285,7 +306,7 @@ public final class SSHTransport {
         var openChildChannel: Channel?
         do {
             return try await withTimeout(seconds: timeout, phase: "执行远端命令") {
-                let collector = ExecCollector()
+                let collector = ExecCollector(maximumOutputBytes: Self.maximumExecOutputBytes)
                 let childChannel = try await self.createChannel(channelType: .session) { channel in
                     channel.eventLoop.makeCompletedFuture {
                         try channel.pipeline.syncOperations.addHandler(collector)
@@ -359,13 +380,17 @@ public final class SSHTransport {
         channelType: SSHChannelType,
         initializer: @escaping (Channel) -> EventLoopFuture<Void>
     ) async throws -> Channel {
-        let promise = channel.eventLoop.makePromise(of: Channel.self)
-        channel.eventLoop.execute {
-            self.handler.createChannel(promise, channelType: channelType) { childChannel, _ in
-                initializer(childChannel)
+        guard let handler else { throw SSHTransportError.channelClosed }
+        return try await withCheckedThrowingContinuation { continuation in
+            let accepted = lifecycle.execute {
+                let promise = self.channel.eventLoop.makePromise(of: Channel.self)
+                promise.futureResult.whenComplete { continuation.resume(with: $0) }
+                handler.createChannel(promise, channelType: channelType) { childChannel, _ in
+                    initializer(childChannel)
+                }
             }
+            if !accepted { continuation.resume(throwing: SSHTransportError.channelClosed) }
         }
-        return try await promise.futureResult.get()
     }
 
     /// 确认「握手 + 认证」已完成（开一个空 session 通道再关掉）。
@@ -588,6 +613,12 @@ private final class ExecCollector: ChannelDuplexHandler, @unchecked Sendable {
     private var status: Int?
     private var waiters: [CheckedContinuation<Int, Error>] = []
     private var failure: Error?
+    private let maximumOutputBytes: Int
+    private var totalBytes = 0
+
+    init(maximumOutputBytes: Int) {
+        self.maximumOutputBytes = maximumOutputBytes
+    }
 
     func exitStatus() async throws -> Int {
         try await withCheckedThrowingContinuation { continuation in
@@ -638,10 +669,25 @@ private final class ExecCollector: ChannelDuplexHandler, @unchecked Sendable {
         guard case let .byteBuffer(buffer) = frame.data else { return }
         let bytes = Data(buffer.readableBytesView)
         lock.lock()
+        let streamName: String
         switch frame.type {
-        case .channel: stdout.append(bytes)
-        case .stdErr: stderr.append(bytes)
-        default: break
+        case .channel: streamName = "stdout"
+        case .stdErr: streamName = "stderr"
+        default: streamName = "unknown"
+        }
+        if streamName != "unknown" {
+            totalBytes += bytes.count
+            if totalBytes > maximumOutputBytes {
+                let error = SSHTransportError.outputLimitExceeded(stream: streamName, limit: maximumOutputBytes)
+                failure = error
+                let pending = waiters
+                waiters.removeAll()
+                lock.unlock()
+                for waiter in pending { waiter.resume(throwing: error) }
+                context.close(promise: nil)
+                return
+            }
+            if streamName == "stdout" { stdout.append(bytes) } else { stderr.append(bytes) }
         }
         lock.unlock()
     }

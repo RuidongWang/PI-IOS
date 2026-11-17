@@ -36,15 +36,11 @@ final class PersistedStateMigrationTests: XCTestCase {
           "readingPositionsByHost": {}
         }
         """
-        let originalURL = try StateFile.fileURL()
-        let originalData = try? Data(contentsOf: originalURL)
-        defer {
-            if let originalData {
-                try? originalData.write(to: originalURL, options: [.atomic, .completeFileProtection])
-            } else {
-                try? FileManager.default.removeItem(at: originalURL)
-            }
-        }
+        // Never touch the app's real state file: use an isolated temp URL for
+        // both read and write so a crash cannot destroy existing user data.
+        let originalURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("state-test-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: originalURL) }
         let legacyURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("legacy-state-\(UUID().uuidString).json")
         try Data(legacy.utf8).write(to: legacyURL)
@@ -61,8 +57,8 @@ final class PersistedStateMigrationTests: XCTestCase {
         XCTAssertEqual(decoded.state.lastSessionByHost[hostID.uuidString], "session_legacy")
         XCTAssertEqual(decoded.state.lastProjectByHost[hostID.uuidString], "project_legacy")
 
-        try StateFile.save(decoded.state)
-        let reloaded = StateFile.load()
+        try StateFile.save(decoded.state, to: originalURL)
+        let reloaded = StateFile.load(from: originalURL)
         XCTAssertNil(reloaded.warning)
         XCTAssertEqual(reloaded.state, decoded.state)
         let saved = try Data(contentsOf: originalURL)

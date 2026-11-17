@@ -8,6 +8,22 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd -P)
 # 不在这里写死版本号：写死就会出现「App 期望新版本、脚本仍产出旧包」这类漂移。
 RELEASE_MANIFEST="$REPO_ROOT/apps/pi-adaptor/host-release.json"
 [ -f "$RELEASE_MANIFEST" ] || { echo "missing $RELEASE_MANIFEST" >&2; exit 1; }
+# This script belongs to the archived pi-host 0.21.0 release line. It must be
+# pointed at a legacy manifest; the current pi-adaptor schema v2 intentionally
+# has no upstream* fields. Fail with a clear message instead of a KeyError.
+python3 - "$RELEASE_MANIFEST" <<'PYSCHEMA' || exit 1
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+required = ("upstreamVersion", "upstreamCommit", "upstreamAssets")
+missing = [key for key in required if key not in manifest]
+if missing:
+    sys.exit(
+        f"{sys.argv[1]} (schemaVersion={manifest.get('schemaVersion')}) is a pi-adaptor manifest; "
+        f"the archived pi-host assembler needs legacy fields {missing}. "
+        "Point RELEASE_MANIFEST at a historical pi-host manifest or retire this script."
+    )
+PYSCHEMA
+
 manifest_field() {
   python3 -c 'import json,sys
 m = json.load(open(sys.argv[1]))
@@ -25,6 +41,9 @@ X64_SHA256=$(manifest_field upstreamAssets.linux-x64.sha256)
 ARM64_SHA256=$(manifest_field upstreamAssets.linux-arm64.sha256)
 PATCH_FILE="$REPO_ROOT/server/patches/pi-host-provider-remove.patch"
 OUT_DIR="$REPO_ROOT/server/dist"
+# Build into a staging directory and publish only after all validation passes,
+# so a failed run cannot leave apparently-valid archives behind.
+STAGE_DIR="$WORK/out"
 CACHE_DIR="${TMPDIR:-/tmp}/pi-host-v$VERSION-release-assets"
 PI_HOST_JS=
 X64_ARCHIVE=
@@ -240,7 +259,8 @@ prepare_bundle() {
       -cf - "$tar_base" \
       | gzip -9n > "$tar_tmp"
   )
-  artifact="$OUT_DIR/$tar_base.tar.gz"
+  mkdir -p "$STAGE_DIR"
+  artifact="$STAGE_DIR/$tar_base.tar.gz"
   mv "$tar_tmp" "$artifact"
   artifact_sha=$(sha256_file "$artifact")
   printf '%s  %s\n' "$artifact_sha" "$(basename -- "$artifact")" \
@@ -333,7 +353,8 @@ else
   X64_PROBE=skipped-no-native-or-qemu
 fi
 
-MANIFEST="$OUT_DIR/pi-host-$BUNDLE_VERSION-manifest.json"
+mkdir -p "$STAGE_DIR"
+MANIFEST="$STAGE_DIR/pi-host-$BUNDLE_VERSION-manifest.json"
 export MANIFEST
 export BUNDLE_VERSION
 export VERSION
@@ -430,6 +451,7 @@ manifest = {
 with open(os.environ["MANIFEST"], "w", encoding="utf-8") as handle:
     json.dump(manifest, handle, ensure_ascii=True, indent=2, sort_keys=True)
     handle.write("\n")
+PY
 
 # 产物摘要必须与 host-release.json 一致：否则「发了包、App 仍按旧摘要下载旧字节」。
 # 版本升级时先改 host-release.json 的 version，再跑一次本脚本；摘要用
@@ -470,11 +492,21 @@ if problems:
 PYV
 }
 verify_release_manifest
-PY
 
 manifest_sha=$(sha256_file "$MANIFEST")
 printf '%s  %s\n' "$manifest_sha" "$(basename -- "$MANIFEST")" \
   > "$MANIFEST.sha256"
+
+# Publish atomically: all staging artifacts and the manifest move together only
+# after the manifest has been validated.
+mkdir -p "$OUT_DIR"
+for staged in "$STAGE_DIR"/*; do
+  [ -e "$staged" ] || continue
+  mv -f "$staged" "$OUT_DIR/"
+done
+X64_ARTIFACT="$OUT_DIR/$(basename -- "$X64_ARTIFACT")"
+ARM64_ARTIFACT="$OUT_DIR/$(basename -- "$ARM64_ARTIFACT")"
+MANIFEST="$OUT_DIR/$(basename -- "$MANIFEST")"
 
 printf 'X64_ARTIFACT=%s\n' "$X64_ARTIFACT"
 printf 'X64_SHA256=%s\n' "$X64_ARTIFACT_SHA"

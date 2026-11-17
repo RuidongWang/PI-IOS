@@ -285,7 +285,6 @@ public struct BootstrapFailureDetails: Equatable, Sendable {
         if let expectedVersion, let actualVersion {
             lines.append("运行版本：期望 \(expectedVersion)，实际 \(actualVersion)")
         }
-        if let installDirectory { lines.append("激活目录：\(installDirectory)") }
         if let unitName { lines.append("服务：\(unitName)") }
         if let port { lines.append("端口：\(port)") }
         if let rollbackStep { lines.append("回滚失败于：\(rollbackStep)") }
@@ -468,57 +467,57 @@ public enum BootstrapFailureCode: Equatable, Hashable, Sendable {
         return false
     }
 
-    /// 中文说明，直接展示在失败页。措辞依据契约 §5.2 与 spec AC-01.2 / 01.3 / 01.9 / 01.10 / 01.11。
+    /// 失败页文案：只写「发生了什么 + 下一步」，不写路径、协议名、内部函数名与验收编号。
     public var displayMessage: String {
         switch self {
         case .noHome:
-            return "找不到目标用户的主目录（$HOME），无法写入 .pi-adaptor"
+            return "找不到用户主目录。请确认登录用户有可写的主目录后重试。"
         case .missingTar:
-            return "缺少安装包 tarball"
+            return "安装包缺失。重试安装。"
         case .missingSha256Tool:
-            return "服务器上没有可用的 sha256 校验工具（sha256sum / shasum）"
+            return "服务器缺少 sha256 校验工具。请安装 sha256sum 或 shasum 后重试。"
         case .bootstrapPermissions:
-            return "bootstrap 目录或文件权限不正确（要求目录 0700、状态文件 0600）"
+            return "安装目录权限不正确。检查该用户主目录权限后重试。"
         case .stageFailed:
-            return "创建暂存目录失败，未写入任何文件"
+            return "无法在服务器上创建安装目录。检查磁盘空间与权限后重试。"
         case .downloadFailed:
-            return "下载失败：未写入任何文件，current 未改动；已下载分片可校验复用，可重试下载（AC-01.10）"
+            return "下载失败。可以重试，已下载的部分会复用。"
         case .checksumMismatch:
-            return "sha256 校验不匹配：不切换 current，磁盘上不留半安装状态（AC-01.2），可重试下载"
+            return "安装包校验不匹配。重试下载；持续失败请检查是否有代理缓存。"
         case .extractFailed:
-            return "解包失败"
+            return "解包失败。重试安装。"
         case .unexpectedArchiveLayout:
-            return "压缩包目录结构与预期不符"
+            return "安装包结构不正确。重试安装。"
         case .installFailed:
-            return "安装 PI-adaptor release 失败"
+            return "安装失败。重试安装。"
         case .installedVerificationFailed:
-            return "安装后自检失败"
+            return "安装后自检未通过。重试安装。"
         case .missingNode:
-            return "bundle 内缺少 Node 运行时"
+            return "安装包缺少 Node 运行时。请换完整安装包重试。"
         case .nodeTooOld:
-            return "Node 版本过低（要求 22.19.0 及以上）"
+            return "服务器 Node 版本过低（需要 22.19.0 及以上）。升级后重试。"
         case .hostStopTimeout:
-            return "停止旧 PI-adaptor 或 PI-adaptor 服务超时"
+            return "停止旧服务超时。检查是否有手动启动的服务后重试。"
         case .hostStartFailed:
-            return "启动 PI-adaptor 失败"
+            return "启动服务失败。重试安装。"
         case .hostExited:
-            return "PI-adaptor 进程已退出"
+            return "服务启动后退出。查看日志后重试。"
         case .readyTimeout:
-            return "等待 PI-adaptor 就绪超时"
+            return "等待服务就绪超时。查看日志后重试。"
         case .receiptFailed:
-            return "写入安装回执失败"
+            return "保存安装记录失败。重试安装。"
         case .artifactPermissions:
-            return "安装产物权限不正确"
+            return "安装文件权限不正确。重新安装。"
         case .platformUnsupported:
-            return "当前仅支持 Linux x86_64 / arm64，未下载任何文件（AC-01.3 / AC-01.6）"
+            return "当前仅支持 Linux x86_64 / arm64，未下载任何文件。"
         case .pairFailed:
-            return "配对失败：配对令牌可能已过期，请重启 PI-adaptor 取新令牌再配对，不复用旧令牌（AC-01.9）"
+            return "配对失败：配对令牌可能已过期。重试安装以重新配对。"
         case .unitFailed:
-            return "pi-adaptor.service 启动失败或旧服务仍占用端口；安装器会回滚 current 与服务状态"
+            return "服务启动失败，端口可能被旧进程占用。可以重新授权后重试。"
         case .verifyDeviceFailed:
-            return "运行身份、完整版本或 ping 校验失败；不会把旧 PI-adaptor 当作安装成功"
+            return "运行版本验证不匹配。重试安装。"
         case let .unknown(raw):
-            return raw.isEmpty ? "PI-adaptor 报告失败但没有给出失败码，请查看 PI-adaptor 日志" : "未识别的失败码：\(raw)"
+            return raw.isEmpty ? "安装失败但没有给出失败码。请查看安装日志。" : "未识别的失败码：\(raw)"
         }
     }
 }
@@ -537,11 +536,11 @@ public enum BootstrapTransitionIssue: Equatable, Sendable {
     public var message: String {
         switch self {
         case let .stepRegression(from, to):
-            return "步骤从「\(from.rawValue)」回退到「\(to.rawValue)」，违反严格顺序"
+            return "安装步骤回退：\(from.rawValue) → \(to.rawValue)"
         case let .attemptIdUnchanged(attemptId):
-            return "重新安装时 attemptId 未变化：\(attemptId)"
+            return "重新安装时任务标识未变化：\(attemptId)"
         case let .unknownStep(raw):
-            return "出现了未定义的步骤名「\(raw)」，已原样保留"
+            return "出现了未定义的步骤名「\(raw)」"
         }
     }
 }
@@ -614,7 +613,7 @@ public struct BootstrapStallDetector: Sendable {
         }
         return .stalled(
             unchangedSince: baseline.observedAt,
-            message: "连续 \(Int(threshold / 60)) 分钟没有任何进展（步骤与已下载字节数都没变），这是一个可恢复点：可以重试，已下载分片会复用"
+            message: "连续 \(Int(threshold / 60)) 分钟没有进展。可以重试，已下载的部分会复用。"
         )
     }
 
@@ -625,6 +624,6 @@ public struct BootstrapStallDetector: Sendable {
         threshold: TimeInterval = BootstrapStallDetector.defaultThreshold
     ) -> String? {
         guard now.timeIntervalSince(unchangedSince) >= threshold else { return nil }
-        return "连续 \(Int(threshold / 60)) 分钟没有任何进展（步骤与已下载字节数都没变），这是一个可恢复点：可以重试，已下载分片会复用"
+        return "连续 \(Int(threshold / 60)) 分钟没有进展。可以重试，已下载的部分会复用。"
     }
 }

@@ -1,5 +1,11 @@
 import Foundation
 
+/// Google-style ids may be prefixed with `models/`; only the leading prefix is
+/// removed. A mid-path `models/` is part of the real model id and must survive.
+private func stripLeadingModelsPrefix(_ value: String) -> String {
+    value.hasPrefix("models/") ? String(value.dropFirst("models/".count)) : value
+}
+
 private let modelThinkingLevelOrder = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 private func normalizedThinkingLevel(_ raw: String?) -> String? {
@@ -188,7 +194,7 @@ public enum ModelListParser {
         for row in rows {
             guard let item = row as? [String: Any] else { continue }
             let rawId = string(item["id"]) ?? string(item["slug"]) ?? string(item["name"])
-            let modelId = (rawId ?? "").replacingOccurrences(of: "models/", with: "")
+            let modelId = stripLeadingModelsPrefix(rawId ?? "")
             guard !modelId.isEmpty else { continue }
             let displayName =
                 string(item["display_name"])
@@ -517,9 +523,7 @@ public struct ModelsDevCatalog: Sendable {
     }
 
     private func normalizedModelId(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-            .replacingOccurrences(of: "models/", with: "")
+        stripLeadingModelsPrefix(value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
     }
 
     private func modelKeys(_ value: String) -> Set<String> {

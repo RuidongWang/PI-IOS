@@ -84,30 +84,24 @@ final class NotificationPromptPolicyTests: XCTestCase {
         }
     }
 
-    func testStatusTextAndSubtitleCoverEveryStatus() {
+    func testStatusTextCoversEveryStatus() {
         XCTAssertEqual(NotificationPromptPolicy.statusText(.notDetermined), "未询问")
         XCTAssertEqual(NotificationPromptPolicy.statusText(.denied), "已拒绝")
         XCTAssertEqual(NotificationPromptPolicy.statusText(.authorized), "已允许")
         XCTAssertEqual(NotificationPromptPolicy.statusText(.provisional), "临时允许")
         XCTAssertEqual(NotificationPromptPolicy.statusText(.ephemeral), "仅本次允许")
-
-        XCTAssertTrue(
-            NotificationPromptPolicy.settingsSubtitle(.denied).contains("系统设置")
-        )
-        XCTAssertTrue(
-            NotificationPromptPolicy.settingsSubtitle(.authorized).contains("回到 App")
-        )
     }
 
     // MARK: - 文案真实性
 
-    func testExplanationDoesNotPromiseBackgroundPush() {
-        XCTAssertTrue(NotificationPromptPolicy.explanationBody.contains("回到 App"))
-        XCTAssertTrue(NotificationPromptPolicy.explanationDetail.contains("回到 App"))
-        XCTAssertTrue(
-            NotificationPromptPolicy.explanationDetail.contains("不会在后台实时推送"),
-            "必须明确说明不是后台实时推送，不能把本地回前台提示说成推送"
-        )
+    /// quiet-v2：解释卡只剩一行标题。断言它说清「要不要开」、不承诺后台推送、
+    /// 不把产品解释搬进 UI。
+    func testExplanationIsOneLineWithoutBackgroundPushPromise() {
+        let title = NotificationPromptPolicy.explanationTitle
+        XCTAssertFalse(title.isEmpty)
+        XCTAssertLessThanOrEqual(title.count, 20, "一行标题不超过 20 字")
+        XCTAssertFalse(title.contains("\n"), "解释卡只有一行")
+        XCTAssertFalse(title.contains("推送"), "不能把本地回前台提示说成推送")
     }
 
     func testDefaultsKeysAreStable() {

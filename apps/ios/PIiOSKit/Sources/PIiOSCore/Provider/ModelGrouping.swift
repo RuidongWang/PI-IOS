@@ -275,11 +275,13 @@ private func resolvedDisplayNames(for buckets: [Bucket]) -> [String] {
 private func sortedGroups(_ groups: [ProviderModelGroup]) -> [ProviderModelGroup] {
     groups.enumerated()
         .sorted { lhs, rhs in
-            if lhs.element.isDefaultGroup != rhs.element.isDefaultGroup {
-                return lhs.element.isDefaultGroup
-            }
+            // Confirmed groups must always sort before the unconfirmed group,
+            // even when the unconfirmed one contains the default model.
             if lhs.element.isUnconfirmed != rhs.element.isUnconfirmed {
                 return !lhs.element.isUnconfirmed
+            }
+            if lhs.element.isDefaultGroup != rhs.element.isDefaultGroup {
+                return lhs.element.isDefaultGroup
             }
             let comparison = zhCompare(lhs.element.name, rhs.element.name)
             if comparison != .orderedSame {

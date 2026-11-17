@@ -68,6 +68,7 @@ final class RealProviderRemoveTests: XCTestCase {
             providerId: providerID
         )
         guard case .success(let summary) = first else {
+            _ = try? await RemoteProviderOperations.removeProvider(client: client, providerId: providerID)
             return XCTFail("删除失败：\(first)")
         }
         XCTAssertEqual(summary.effect, .deleted)
@@ -78,6 +79,7 @@ final class RealProviderRemoveTests: XCTestCase {
             providerId: providerID
         )
         guard case .success(let absent) = second else {
+            _ = try? await RemoteProviderOperations.removeProvider(client: client, providerId: providerID)
             return XCTFail("重复删除应返回 absent：\(second)")
         }
         XCTAssertEqual(absent.effect, .absent)
@@ -97,6 +99,6 @@ private struct AcceptRemoveTestHostKey: HostKeyConfirming {
         _ key: SSHHostKey,
         status: HostKeyTrustStatus
     ) async -> HostKeyConfirmation {
-        .trust
+        TestHostKeyPolicy.confirm(key)
     }
 }

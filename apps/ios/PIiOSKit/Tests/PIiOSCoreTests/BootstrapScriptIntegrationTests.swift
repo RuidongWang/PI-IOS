@@ -901,11 +901,24 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
     }
 
     private func persistedOutputs(_ environment: Environment) throws -> [String] {
-        let stdout = (try? String(contentsOf: environment.stdoutURL, encoding: .utf8)) ?? ""
-        let stderr = (try? String(contentsOf: environment.stderrURL, encoding: .utf8)) ?? ""
+        // Required logs must be readable; only a genuinely absent optional file
+        // may be treated as empty. A blanket `try?` would let an I/O error skip
+        // the "token must not leak" negative assertions.
+        func readRequired(_ url: URL) throws -> String {
+            do {
+                return try String(contentsOf: url, encoding: .utf8)
+            } catch CocoaError.fileReadNoSuchFile {
+                return ""
+            }
+        }
         let pairErrorURL = environment.workDirectory.appendingPathComponent("pair.err")
-        let pairError = (try? String(contentsOf: pairErrorURL, encoding: .utf8)) ?? ""
-        return [stdout, stderr, pairError]
+        var pairError = ""
+        do {
+            pairError = try String(contentsOf: pairErrorURL, encoding: .utf8)
+        } catch CocoaError.fileReadNoSuchFile {
+            pairError = ""
+        }
+        return [try readRequired(environment.stdoutURL), try readRequired(environment.stderrURL), pairError]
     }
 
     private func capturedFailure(_ environment: Environment) throws -> String {

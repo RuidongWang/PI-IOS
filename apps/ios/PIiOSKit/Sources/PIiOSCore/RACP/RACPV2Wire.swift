@@ -46,6 +46,8 @@ public enum RACPV2Method: String, CaseIterable, Sendable {
     case skillInstall = "skill/install"
     case skillUpdate = "skill/update"
     case skillDelete = "skill/delete"
+    case extensionList = "extension/list"
+    case sessionExtensions = "session/extensions"
     case attachmentCreate = "attachment/create"
     case attachmentChunk = "attachment/chunk"
     case attachmentComplete = "attachment/complete"
@@ -80,6 +82,12 @@ public struct RACPV2SuggestTitleResult: Codable, Equatable, Sendable {
 /// `session/rename` 等会话变更方法的回执。
 public struct RACPV2SessionResult: Codable, Equatable, Sendable {
     public var session: RACPSessionSummary
+}
+
+/// `session/delete` 的回执。删除成功不返回 session summary。
+public struct RACPV2SessionDeleteResult: Codable, Equatable, Sendable {
+    public var deleted: Bool
+    public var sessionId: String
 }
 
 public struct RACPV2ProviderModel: Codable, Equatable, Sendable {

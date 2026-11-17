@@ -17,14 +17,6 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
         }
     }
 
-    var detail: String {
-        switch self {
-        case .system: return "随系统的浅色 / 深色设置变化"
-        case .light: return "始终使用浅色"
-        case .dark: return "始终使用深色"
-        }
-    }
-
     /// 交给 `.preferredColorScheme`；跟随系统时为 nil。
     var colorScheme: ColorScheme? {
         switch self {

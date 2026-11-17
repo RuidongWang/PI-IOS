@@ -256,7 +256,7 @@ final class BootstrapTests: XCTestCase {
             return XCTFail("连续 5 分钟无变化应判定为停滞")
         }
         XCTAssertEqual(unchangedSince, start)
-        XCTAssertTrue(message.contains("可恢复点"), "提示文案需给出可恢复点：\(message)")
+        XCTAssertTrue(message.contains("可以重试"), "提示文案需给出下一步：\(message)")
     }
 
     func testAC01_1_stallResetsWhenProgressResumes() {

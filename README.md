@@ -208,6 +208,28 @@ pnpm start -- --pair        # 打印一次性配对令牌
 - PI-adaptor：Node ≥ 22.19.0、`pnpm`。
 - 服务器：可 SSH 的 Linux（x86_64 / arm64），能访问模型 API；启用直连时还需放行配置的 TLS 端口。
 
+## 使用 Demo
+
+以下截图来自当前 App 的视觉验收夹具，页面中的服务器、项目、模型和会话均为演示数据。
+
+### 连接与安装
+
+| 添加服务器 | 安装 PI-adaptor |
+|---|---|
+| <img src="assets/demo/server-setup.png" alt="添加服务器" width="360"> | <img src="assets/demo/host-install.png" alt="安装 PI-adaptor" width="360"> |
+
+### 项目与模型
+
+| 项目与会话 | 模型服务 |
+|---|---|
+| <img src="assets/demo/projects.png" alt="项目与会话" width="360"> | <img src="assets/demo/model-services.png" alt="模型服务" width="360"> |
+
+### 多 Host 与工具审批
+
+| 切换 Host | 审批工具调用 |
+|---|---|
+| <img src="assets/demo/host-switcher.png" alt="切换 Host" width="360"> | <img src="assets/demo/tool-approval.png" alt="审批工具调用" width="360"> |
+
 ## 鸣谢
 
 - <https://github.com/vastsa/PI-Desktop>

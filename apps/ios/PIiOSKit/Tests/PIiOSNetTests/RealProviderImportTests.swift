@@ -77,6 +77,13 @@ final class RealProviderImportTests: XCTestCase {
         XCTAssertTrue(success.defaultSet)
         XCTAssertEqual(success.imported.count, 1)
         XCTAssertFalse(success.imported[0].providerId.isEmpty)
+        // Clean up every provider this opt-in test created on the real host.
+        for imported in success.imported {
+            _ = try? await RemoteProviderOperations.removeProvider(
+                client: client,
+                providerId: imported.providerId
+            )
+        }
     }
 
     private func startAndWaitForOnline(_ client: RACPClient) async {
@@ -93,6 +100,6 @@ private struct AcceptImportHostKey: HostKeyConfirming {
         _ key: SSHHostKey,
         status: HostKeyTrustStatus
     ) async -> HostKeyConfirmation {
-        .trust
+        TestHostKeyPolicy.confirm(key)
     }
 }

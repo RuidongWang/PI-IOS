@@ -14,18 +14,20 @@ final class InstallRecoveryUITests: XCTestCase {
         openInstallFailure("download-twice")
         XCTAssertTrue(app.staticTexts["installHost.proxyHint"].waitForExistence(timeout: 5))
         XCTAssertTrue(
-            app.staticTexts["安装失败详情见下方「故障分类」。"]
+            app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label CONTAINS %@", "安装未完成"))
+                .firstMatch
                 .waitForExistence(timeout: 5),
             "关闭弹框后就近保留失败入口"
         )
-        XCTAssertTrue(anyElement("download-failed").exists, "下载失败分类")
+        XCTAssertEqual(anyElement("installHost.failureCode").label, "download-failed", "下载失败分类")
         XCTAssertTrue(
             app.staticTexts["UI fixture：下载在 42% 中断。"].waitForExistence(timeout: 5),
             "关闭弹框不得清除页面上的故障详情"
         )
         XCTAssertTrue(
             app.descendants(matching: .any)
-                .matching(NSPredicate(format: "label CONTAINS %@", "已连续失败 2 次"))
+                .matching(NSPredicate(format: "label CONTAINS %@", "连续失败 2 次"))
                 .firstMatch
                 .exists,
             "连续失败提示"
@@ -42,10 +44,13 @@ final class InstallRecoveryUITests: XCTestCase {
 
     func testPairFailureOffersPairOnlyRecoveryCopy() {
         openInstallFailure("pair-expired")
-        XCTAssertTrue(anyElement("pair-failed").exists, "配对失败分类")
+        XCTAssertEqual(anyElement("installHost.failureCode").label, "pair-failed", "配对失败分类")
         XCTAssertTrue(
-            app.staticTexts["配对失败后服务器已恢复原状态；重试会重新启动配对。"]
-                .waitForExistence(timeout: 5)
+            app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label CONTAINS %@", "配对失败：配对令牌可能已过期"))
+                .firstMatch
+                .waitForExistence(timeout: 5),
+            "配对失败给出原因与下一步"
         )
         XCTAssertEqual(app.buttons["installHost.start"].label, "重新配对")
         XCTAssertTrue(app.buttons["installHost.back"].exists)
@@ -53,7 +58,7 @@ final class InstallRecoveryUITests: XCTestCase {
 
     func testSudoFailureOffersInlineReauthorization() {
         openInstallFailure("sudo-failure")
-        XCTAssertTrue(anyElement("unit-failed").exists, "unit 失败分类")
+        XCTAssertEqual(anyElement("installHost.failureCode").label, "unit-failed", "unit 失败分类")
         XCTAssertTrue(app.secureTextFields["installHost.sudoCredential"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["installHost.retrySudo"].exists)
         XCTAssertFalse(app.buttons["installHost.retrySudo"].isEnabled, "空密码禁用重新授权")

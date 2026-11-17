@@ -114,7 +114,10 @@ final class RealLongHistoryConnectionTests: XCTestCase {
             guard !initial.items.isEmpty, credentials.expectedCount > 100 else {
                 throw LongHistoryProbeError.longHistoryMissing
             }
-            XCTAssertLessThanOrEqual(initial.items.count, 100)
+            XCTAssertTrue(
+                ConversationTurnPolicy.hasTaskBoundary(initial.items),
+                "初始发布可以跨多页补齐，但最早轮次必须包含任务起点"
+            )
             XCTAssertTrue(initial.hasMoreHistory, "真实长会话必须产生分页快照")
             let initialCursor = initial.cursor
             print("LONG-HISTORY attached items=\(initial.items.count) hasMore=\(initial.hasMoreHistory)")
@@ -148,12 +151,14 @@ final class RealLongHistoryConnectionTests: XCTestCase {
             }
 
             // Reattach the same long session, as the App does after restoring its selection.
-            // This must replace the view with a bounded snapshot rather than retain old pages.
+            // This must replace old pages with a fresh snapshot whose earliest turn is
+            // structurally complete; the client may fetch additional pages to close it.
             _ = try await client.attach(sessionId: credentials.sessionId)
             let reattached = await client.sessionView()
-            XCTAssertLessThanOrEqual(reattached.items.count, 100)
+            XCTAssertTrue(ConversationTurnPolicy.hasTaskBoundary(reattached.items))
             XCTAssertTrue(reattached.hasMoreHistory)
-            guard !reattached.items.isEmpty, reattached.items.count <= 100,
+            guard !reattached.items.isEmpty,
+                  ConversationTurnPolicy.hasTaskBoundary(reattached.items),
                   reattached.hasMoreHistory else {
                 throw LongHistoryProbeError.snapshotMissing
             }
@@ -199,7 +204,9 @@ final class RealLongHistoryConnectionTests: XCTestCase {
             _ = try await client.attach(sessionId: credentials.sessionId)
             let before = await client.sessionView()
             guard let oldCursor = before.cursor,
-                  !before.items.isEmpty, before.items.count <= 100, before.hasMoreHistory else {
+                  !before.items.isEmpty,
+                  ConversationTurnPolicy.hasTaskBoundary(before.items),
+                  before.hasMoreHistory else {
                 throw LongHistoryProbeError.snapshotMissing
             }
             let started = ContinuousClock.now
@@ -223,7 +230,8 @@ final class RealLongHistoryConnectionTests: XCTestCase {
             let recovered = await client.sessionView()
             guard recovered.sessionId == credentials.sessionId,
                   let cursor = recovered.cursor, cursor.epoch != oldCursor.epoch,
-                  !recovered.items.isEmpty, recovered.items.count <= 100,
+                  !recovered.items.isEmpty,
+                  ConversationTurnPolicy.hasTaskBoundary(recovered.items),
                   recovered.hasMoreHistory else {
                 throw LongHistoryProbeError.snapshotMissing
             }
@@ -294,7 +302,8 @@ final class RealLongHistoryConnectionTests: XCTestCase {
             _ = try await client.attach(sessionId: credentials.sessionId)
             let before = await client.sessionView()
             guard let cursor = before.cursor, !before.items.isEmpty,
-                  before.items.count <= 100, before.hasMoreHistory else {
+                  ConversationTurnPolicy.hasTaskBoundary(before.items),
+                  before.hasMoreHistory else {
                 throw LongHistoryProbeError.snapshotMissing
             }
             let started = ContinuousClock.now
@@ -469,6 +478,9 @@ private final class LongHistoryTraceSocket: RACPSocket, @unchecked Sendable {
         try await base.send(text: text)
     }
     func close() async { await base.close() }
+    func abort(_ termination: RACPSocketTermination) async {
+        await base.abort(termination)
+    }
     func waitUntilClosed() async { await base.waitUntilClosed() }
 
     private static func trace(direction: String, data: Data, tag: String) {
@@ -484,6 +496,6 @@ private final class LongHistoryTraceSocket: RACPSocket, @unchecked Sendable {
 
 private struct LongHistoryHostKeyConfirmer: HostKeyConfirming {
     func confirmHostKey(_ key: SSHHostKey, status: HostKeyTrustStatus) async -> HostKeyConfirmation {
-        .trust
+        TestHostKeyPolicy.confirm(key)
     }
 }

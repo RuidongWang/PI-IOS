@@ -2,8 +2,28 @@ import SwiftUI
 import UIKit
 import QuartzCore
 import PhotosUI
+import CoreTransferable
+import ImageIO
 import PIiOSCore
 import PIiOSNet
+#if DEBUG
+import CryptoKit
+
+/// Only IDs enter this probe: no message text, tool output or image bytes.
+enum ConversationStabilityIdentity {
+    static func digest(orderedItemIDs: [String]) -> String {
+        SHA256.hash(data: Data(orderedItemIDs.joined(separator: "\n").utf8))
+            .prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+}
+#endif
+
+/// Latest frame geometry for synchronous restore confirmation. Kept as an
+/// unobserved reference so scrolling does not schedule another SwiftUI render.
+private final class ConversationFrameSnapshot {
+    var contextKey: String?
+    var frames: [String: CGRect] = [:]
+}
 
 /// S-02 会话（根）。
 ///
@@ -20,10 +40,16 @@ struct ConversationScreen: View {
     @State private var renameDraft = ""
     @State private var isNearBottom = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var hasNewBelow = false
     @State private var scrollToBottomRequest = 0
-    @State private var isCheckingModelAvailability = false
     @State private var modelAvailabilityGeneration = 0
+    @State private var submissionID: UUID?
+    private var isSubmitting: Bool { submissionID != nil }
+    @State private var automaticFollowTask: Task<Void, Never>?
+    @State private var automaticFollowID: UUID?
+    @State private var isDraggingThread = false
+    @State private var previewWindowLimit = 80
     /// Provider ids that exist only in the legacy store (never mirrored into the
     /// v2 PI-adaptor store). Empty until a successful v2 probe confirms we are talking
     /// to a v2 PI-adaptor, so a v1 PI-adaptor never gets its models wrongly marked.
@@ -41,9 +67,35 @@ struct ConversationScreen: View {
     @State private var restoreBaselineLastItemID: String?
     @State private var readingRestoreGeneration = 0
     @State private var historyPagingID: UUID?
+    @State private var historyPagingCancelled = false
     @State private var historyPositionRestoreID: UUID?
     @State private var historyReadingAnchorID: String?
     @State private var viewportMeasurement = ConversationViewportMeasurement()
+    @State private var frameSnapshot = ConversationFrameSnapshot()
+    @State private var rowIndex: ConversationRowIndex
+    /// Programmatic scroll target. `ScrollViewReader.scrollTo` cannot reach a
+    /// `LazyVStack` row that has never been laid out, so restore/paging pin the
+    /// anchor through `scrollPosition` first; the UIKit anchor then corrects the
+    /// exact pixel offset once that row exists.
+    @State private var scrollPositionID: String?
+#if DEBUG
+    @State private var activeAnchorCount = 0
+    @State private var measuredTopY: CGFloat = 0
+    @State private var debugItemIdentity = ""
+    @State private var debugLastRowFrame = "unmeasured"
+    @State private var debugBottomDistance: CGFloat = 0
+#endif
+    @State private var readingRestoreFailed = false
+    @State private var readingRestoreRetryAvailable = false
+    @State private var readingRestoreRetryNonce = 0
+    /// A prepend that could not be pixel-compensated keeps this logical anchor
+    /// authoritative until the user scrolls or a later correction applies.
+    @State private var readingPositionHoldAnchorID: String?
+    @State private var approvalFullInput: ApprovalFullInput?
+    /// 选图批次的读取/上传仍在进行时禁止发送，避免用户看不到尚未完成的图片。
+    @State private var isReadingPhotos = false
+    @State private var photoReadCompletedCount = 0
+    @State private var photoReadTotalCount = 0
     @State private var selectedPhotos: [PhotosPickerItem] = []
     @State private var photoSelectionID = UUID()
     /// U16：最近一次选图的读取失败数 / 成功读取数 / 部分失败是否已确认发送子集。
@@ -53,6 +105,10 @@ struct ConversationScreen: View {
 
     init(session: SessionController) {
         self.session = session
+        _rowIndex = State(initialValue: ConversationRowIndex(items: session.view.items))
+#if DEBUG
+        _debugItemIdentity = State(initialValue: ConversationStabilityIdentity.digest(orderedItemIDs: session.view.items.map(\.id)))
+#endif
     }
 
     private var currentHost: HostRecord? { model.currentHost }
@@ -61,12 +117,19 @@ struct ConversationScreen: View {
         NavigationStack {
             VStack(spacing: 0) {
                 header
-                Divider()
+                // 页头或状态条只保留一条底部分隔，避免相邻 Divider 与自定义描边叠成双线。
+                if statusLines.isEmpty { Divider() }
+                // 常驻状态条：运行中 / 排队 / 最近一次操作结果。
+                // 这些状态不能只活在被自动滚动带走的线程里——用户从别处回来，
+                // 第一眼要看到「现在什么状态、要不要我动手」。
+                sessionStatusStrip
+                readingRestoreRetryStrip
                 // 待审批卡片固定在滚动区之上，不随会话滚动：它是「工具正在等你的决定」的
                 // 唯一入口，放进滚动内容时会被自动滚到底部的逻辑顶出视口（长历史下差上千点），
                 // 用户看不到卡片就只能中止，表现为「工具一直在执行中」。
                 if connection.state.isOnline,
                    session.attachedSessionId != nil,
+                   session.openingSessionID == nil,
                    !session.pendingApprovals.isEmpty {
                     ScrollView {
                         approvalSection
@@ -75,24 +138,32 @@ struct ConversationScreen: View {
                     }
                     .frame(maxHeight: 260)
                     .scrollBounceBehavior(.basedOnSize)
+                    .accessibilityElement(children: .contain)
+                    .piOptionalIdentifier(
+                        session.pendingApprovals.count > 1 ? "conversation.pendingApprovalsNotice" : nil
+                    )
                     Divider()
                 }
                 GeometryReader { viewport in
                     ScrollViewReader { proxy in
                         ScrollView {
                             VStack(alignment: .leading, spacing: PISpacing.s16) {
-                                statusArea
-                                if connection.state.isOnline, session.attachedSessionId != nil {
-                                    inputSection
-                                    queueSection
-                                    threadSection
-                                } else if !connection.state.isOnline, let sessionId = cachedSessionId {
-                                    offlineThread(sessionId: sessionId)
+                                if let target = session.openingSessionID {
+                                    openingThread(sessionID: target, proxy: proxy)
+                                } else {
+                                    statusArea
+                                    if connection.state.isOnline, session.attachedSessionId != nil {
+                                        inputSection
+                                        queueSection
+                                        threadSection(proxy: proxy)
+                                    } else if !connection.state.isOnline, let sessionId = cachedSessionId {
+                                        offlineThread(sessionId: sessionId)
+                                    }
                                 }
+                                Color.clear.frame(height: 1).id("thread-bottom")
                             }
                             .padding(.horizontal, PIMetrics.pageMargin)
                             .padding(.vertical, PISpacing.s16)
-                            .id("thread-bottom")
                             .background {
                                 GeometryReader { content in
                                     Color.clear.preference(
@@ -103,6 +174,7 @@ struct ConversationScreen: View {
                             }
                         }
                         .coordinateSpace(name: "conversation-scroll")
+                        .scrollPosition(id: trackedScrollPosition, anchor: .top)
                         .scrollDismissesKeyboard(.immediately)
                         // 点消息区任意空白处收起键盘；输入框在滚动区之外，不受影响。
                         .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
@@ -115,15 +187,18 @@ struct ConversationScreen: View {
                         }
                         .simultaneousGesture(
                             DragGesture(minimumDistance: 2).onChanged { _ in
-                                cancelHistoryPositionRestore()
-                                guard isRestoringReadingPosition else { return }
-                                readingRestoreTargetItemID = nil
-                                isRestoringReadingPosition = false
-                                hasNewBelow = newMessagesDuringRestore
-                            }
+                                isDraggingThread = true
+                                automaticFollowTask?.cancel()
+                                automaticFollowTask = nil
+                                cancelHistoryPaging()
+                                cancelReadingPositionRestore()
+                            }.onEnded { _ in isDraggingThread = false }
                         )
                         .onPreferenceChange(ConversationContentBottomKey.self) { contentBottom in
                             let distance = contentBottom - viewport.size.height
+#if DEBUG
+                            debugBottomDistance = distance
+#endif
                             let near = distance <= 96
                             let changed = isNearBottom != near
                             if near {
@@ -135,34 +210,32 @@ struct ConversationScreen: View {
                             }
                         }
                         .onPreferenceChange(ConversationItemFrameKey.self) { frames in
+                            frameSnapshot.contextKey = readingContextKey
+                            frameSnapshot.frames = frames
                             let viewportBottom = viewport.size.height
-                            let visibleItemID = frames
-                                .filter { frame in
-                                    frame.value.maxY > 0 && frame.value.minY < viewportBottom
-                                }
-                                .min { lhs, rhs in
-                                    lhs.value.minY < rhs.value.minY
-                                }?
-                                .key
+                            let visibleItemID = ConversationViewportGeometry.firstVisibleItemID(
+                                frames: frames, viewportBottom: viewportBottom
+                            )
                             lastMeasuredTopItemID = visibleItemID
+#if DEBUG
+                            measuredTopY = visibleItemID.flatMap { frames[$0]?.minY } ?? 0
+                            activeAnchorCount = viewportMeasurement.activeAnchorCount
+                            if let lastID = session.view.items.last?.id {
+                                let anchor = rowIndex.anchorItemID(for: lastID)
+                                let frame = frames[anchor].map { "minY=\($0.minY),maxY=\($0.maxY)" } ?? "missing"
+                                debugLastRowFrame = "last=\(lastID),anchor=\(anchor),frame=\(frame)"
+                            } else {
+                                debugLastRowFrame = "empty"
+                            }
+#endif
 
                             if isRestoringReadingPosition {
-                                let rows = threadRows
-                                guard let target = readingRestoreTargetItemID,
-                                      let frame = frames[ToolCallGroupingPolicy.anchorItemID(for: target, in: rows)],
-                                      abs(frame.minY) <= 2
-                                else { return }
-                                readingRestoreTargetItemID = nil
-                                topVisibleItemID = target
-                                isNearBottom = false
-                                hasNewBelow = newMessagesDuringRestore
-                                isRestoringReadingPosition = false
-                                recordReadingPosition()
+                                confirmReadingRestoreIfAligned(in: frames)
                                 return
                             }
 
                             if let lastItemID = session.view.items.last?.id {
-                                let lastAnchor = ToolCallGroupingPolicy.anchorItemID(for: lastItemID, in: threadRows)
+                                let lastAnchor = rowIndex.anchorItemID(for: lastItemID)
                                 let lastFrame = frames[lastAnchor]
                                 let near = lastFrame.map {
                                     $0.maxY > 0 && $0.minY <= viewportBottom + 96
@@ -180,6 +253,10 @@ struct ConversationScreen: View {
                             recordReadingPosition()
                         }
                         .onChange(of: session.view.items) { oldItems, newItems in
+                            rowIndex = ConversationRowIndex(items: newItems)
+#if DEBUG
+                            debugItemIdentity = ConversationStabilityIdentity.digest(orderedItemIDs: newItems.map(\.id))
+#endif
                             recordVisibleMessageCount()
                             // 前置旧历史不是新消息，不应把读者拉回底部或显示“新消息”。
                             if historyPagingID != nil {
@@ -194,34 +271,24 @@ struct ConversationScreen: View {
                                 }
                                 return
                             }
-                            if isNearBottom {
-                                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
-                                    proxy.scrollTo("thread-bottom", anchor: .bottom)
-                                }
+                            if isNearBottom && !isDraggingThread {
+                                scheduleAutomaticFollow(proxy: proxy)
                             } else {
                                 hasNewBelow = true
                             }
                         }
                         .onChange(of: session.view.runningTurnId) { _, _ in
-                            guard !isRestoringReadingPosition, historyPagingID == nil, isNearBottom else { return }
-                            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
-                                proxy.scrollTo("thread-bottom", anchor: .bottom)
-                            }
+                            scheduleAutomaticFollow(proxy: proxy)
                         }
                         .onChange(of: session.view.activeItems) { _, _ in
-                            guard !isRestoringReadingPosition, historyPagingID == nil, isNearBottom else { return }
-                            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
-                                proxy.scrollTo("thread-bottom", anchor: .bottom)
-                            }
+                            scheduleAutomaticFollow(proxy: proxy)
                         }
                         .onChange(of: session.view.queuedTurns) { _, _ in
-                            guard !isRestoringReadingPosition, historyPagingID == nil, isNearBottom else { return }
-                            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
-                                proxy.scrollTo("thread-bottom", anchor: .bottom)
-                            }
+                            scheduleAutomaticFollow(proxy: proxy)
                         }
                         .onChange(of: scrollToBottomRequest) { _, _ in
-                            cancelHistoryPositionRestore()
+                            cancelHistoryPaging()
+                            cancelReadingPositionRestore()
                             isNearBottom = true
                             hasNewBelow = false
                             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
@@ -232,10 +299,17 @@ struct ConversationScreen: View {
                         .task(id: readingRestoreTaskKey) {
                             await restoreReadingPosition(proxy: proxy)
                         }
+                        .onChange(of: readingRestoreRetryNonce) { _, nonce in
+                            guard nonce > 0 else { return }
+                            Task { await restoreReadingPosition(proxy: proxy) }
+                        }
                         .overlay(alignment: .bottomTrailing) {
-                            if !isNearBottom {
+                            if !isNearBottom, session.openingSessionID == nil {
                                 Button {
-                                    cancelHistoryPositionRestore()
+                                    automaticFollowTask?.cancel()
+                                    automaticFollowTask = nil
+                                    cancelHistoryPaging()
+                                    cancelReadingPositionRestore()
                                     withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
                                         proxy.scrollTo("thread-bottom", anchor: .bottom)
                                     }
@@ -252,12 +326,13 @@ struct ConversationScreen: View {
                                 }
                                 .buttonStyle(.plain)
                                 .padding(PISpacing.s12)
+                                .accessibilityIdentifier("conversation.scrollToLatest")
                                 .accessibilityLabel(hasNewBelow ? "有新消息，回到最新" : "回到最新")
                             }
                         }
                     }
                 }
-                composer
+                if session.openingSessionID == nil { composer }
             }
             .piPageBackground()
             .overlay(alignment: .topLeading) {
@@ -269,12 +344,21 @@ struct ConversationScreen: View {
                     .clipped()
                     .accessibilityIdentifier("conversation.debugTopVisibleItem")
                     .allowsHitTesting(false)
-                Text("target=\(readingRestoreTargetItemID ?? "none"),measured=\(lastMeasuredTopItemID ?? "none")")
+                Text("target=\(readingRestoreTargetItemID ?? "none"),measured=\(lastMeasuredTopItemID ?? "none"),y=\(measuredTopY),active=\(activeAnchorCount),items=\(rowIndex.indexedItemCount)")
                     .font(.system(size: 1))
                     .foregroundStyle(PIColor.text)
                     .frame(width: 1, height: 1)
                     .clipped()
                     .accessibilityIdentifier("conversation.debugRestorationState")
+                    .allowsHitTesting(false)
+                Text(debugItemIdentity)
+                    .font(.system(size: 1))
+                    .frame(width: 1, height: 1).clipped()
+                    .accessibilityIdentifier("conversation.debugItemIdentity")
+                    .allowsHitTesting(false)
+                Text(verbatim: "near=\(isNearBottom),items=\(session.view.items.count),indexed=\(rowIndex.indexedItemCount),distance=\(debugBottomDistance),restoring=\(isRestoringReadingPosition),\(debugLastRowFrame)")
+                    .font(.system(size: 1)).frame(width: 1, height: 1).clipped()
+                    .accessibilityIdentifier("conversation.debugBottomFollowState")
                     .allowsHitTesting(false)
 #endif
             }
@@ -282,8 +366,14 @@ struct ConversationScreen: View {
             // 下拉进出，压在状态区上（标题被同步下拉）。
             .piRootNavBar(sessionTitle, displayMode: .inline, onMenu: model.openSidebar) {
                 Menu {
+#if DEBUG
+                    if UITestFixture.stabilityControlsEnabled {
+                        Button("追加测试消息") { session.appendStabilityFixtureMessage() }
+                            .accessibilityIdentifier("conversation.fixture.appendMessage")
+                    }
+#endif
                     Button("会话配置") { showingConfig = true }
-                        .disabled(!connection.state.isOnline || session.attachedSessionId == nil)
+                        .disabled(extensionSessionId == nil)
                     Button("重命名会话") {
                         renameDraft = sessionTitle
                         showingRename = true
@@ -298,6 +388,7 @@ struct ConversationScreen: View {
                         .font(.system(size: 17, weight: .semibold))
                         .frame(width: PIMetrics.minHitTarget, height: PIMetrics.minHitTarget)
                 }
+                .disabled(session.openingSessionID != nil)
                 .accessibilityLabel("会话操作")
             }
             .sheet(isPresented: $showingConfig) {
@@ -305,32 +396,53 @@ struct ConversationScreen: View {
                     session: session,
                     groups: model.currentModelGroups,
                     diagnostics: model.currentModelDiagnostics,
-                    unavailableProviderIDs: legacyOnlyProviderIDs
+                    unavailableProviderIDs: legacyOnlyProviderIDs,
+                    extensionSessionID: extensionSessionId
                 )
             }
             .alert("重命名会话", isPresented: $showingRename) {
                 TextField("会话标题", text: $renameDraft)
                 Button("取消", role: .cancel) {}
                 Button("保存") { renameCurrentSession() }
-            } message: {
-                Text("标题只保存在本机，不会改写服务器上的会话内容。")
             }
-            .piMessageAlert(title: "操作未完成", message: Binding(
-                get: { showingConfig ? nil : session.lastError },
-                set: { if $0 == nil { session.clearError() } }
-            ))
-            .piMessageAlert(title: "会话更新", message: Binding(
-                get: { session.notice },
-                set: { if $0 == nil { session.clearNotice() } }
-            ))
-            .task(id: session.attachedSessionId) {
+            // 操作失败与完成都不再弹窗：结论放在常驻状态条里（见 `sessionStatusStrip`），
+            // 用户在处理审批 / 工具卡时不会因为一个模态框丢掉当前上下文。
+            // 换会话 / 首次挂上会话：attach 刚把状态置为 `.checking`，这一条必须无条件查。
+            .task(id: modelAvailabilityContextKey) {
+                guard session.openingSessionID == nil, !session.hasRecentModelAvailability() else { return }
                 await refreshModelAvailability()
             }
-            .onDisappear {
-                recordReadingPosition()
+            // A frame snapshot only describes the session that produced it. Do
+            // not let a previous visit's geometry confirm a restore in a newly
+            // attached session.
+            .onChange(of: readingContextKey) { _, _ in
+                submissionID = nil
+                automaticFollowTask?.cancel()
+                automaticFollowTask = nil
+                frameSnapshot.contextKey = nil
+                frameSnapshot.frames = [:]
             }
-            .onChange(of: session.selectedBindingKey) { _, _ in
-                Task { await refreshModelAvailability() }
+            // 回到会话页（首次出现也算）：只在「没有可信结论」时补查一次，不轮询。
+            .task {
+                recheckModelAvailabilityIfNeeded()
+            }
+            .onDisappear {
+                submissionID = nil
+                recordReadingPosition()
+                automaticFollowTask?.cancel()
+                automaticFollowTask = nil
+            }
+            .onChange(of: session.openingSessionID) { _, _ in
+                previewWindowLimit = 80
+                submissionID = nil
+                automaticFollowTask?.cancel()
+                automaticFollowTask = nil
+            }
+            // 会话配置浮层关闭：用户可能去改了模型，也可能什么都没改就退出。
+            // 只在明确不可用 / 未知时补一次，其余交给绑定变化与页面出现。
+            .onChange(of: showingConfig) { _, isPresented in
+                guard !isPresented else { return }
+                recheckModelAvailabilityIfNeeded()
             }
             .onChange(of: session.pendingAttachments.count) { _, count in
                 // 附件清空（发送成功或手动移除）后，上次部分读取失败的提示不再适用。
@@ -343,119 +455,264 @@ struct ConversationScreen: View {
     }
 
     private var sessionTitle: String {
-        guard let sessionID = session.attachedSessionId,
+        guard let sessionID = session.openingSessionID ?? session.attachedSessionId,
               let hostID = model.currentHost?.id
         else { return "会话" }
-        let fallback = session.attachedSummary?.title ?? "会话 \(sessionID)"
+        let fallback = connection.sessions.first(where: { $0.id == sessionID })?.title
+            ?? (session.attachedSummary?.id == sessionID ? session.attachedSummary?.title : nil)
+            ?? "会话 \(sessionID)"
         return model.sessionDisplayTitle(hostID: hostID, sessionID: sessionID, fallback: fallback)
     }
 
     // MARK: - 头部（常驻，AC-08.12）
 
-    /// 服务器与模型独占第二行，避免连接状态和运行操作把模型名称挤出视口。
-    private var secondaryLine: String {
-        let hostPart = currentHost.map { "\($0.name) · \($0.address)" }
-        let modelPart = selectedModelLabel
-        switch (hostPart, modelPart.isEmpty) {
-        case let (host?, false): return "\(host) · \(modelPart)"
-        case let (host?, true): return host
-        case (nil, false): return modelPart
-        case (nil, true): return ""
-        }
+    /// 一行说清「连的是谁、现在什么状态」。
+    ///
+    /// quiet-v2：原来这里是「服务器名 · 地址 · 模型」三段挤一行，12pt 下必然中间截断，
+    /// 而且「模型」和输入栏上方的模型 chip 是同一事实的两次展示（R9）。
+    /// 现在只留状态 + 服务器名；地址在服务器页，模型状态在它自己的 chip 上。
+    private var statusLine: String {
+        guard let host = currentHost else { return connection.state.displayText }
+        // 离线详情由下方唯一状态行表达，页头这里只保留 Host 身份，避免同义复述。
+        return connection.state.isOnline ? "\(connection.state.displayText) · \(host.name)" : host.name
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: PISpacing.s4) {
             HStack(spacing: PISpacing.s8) {
-                // 权限模式与会话模式只在「会话配置」里展示；页头保持一条
-                // 连接状态，避免同一信息在输入框上方重复出现。
-                Spacer(minLength: PISpacing.s4)
-                // 运行状态与中止入口不再占用页头：输入框右侧的发送按钮在
-                // 输入为空且 turn 运行中会切换成中止按钮。
-                Circle()
-                    .fill(connection.state.isOnline ? PIColor.success : PIColor.warning)
-                    .frame(width: 7, height: 7)
-                    .accessibilityHidden(true)
-                Text(connection.state.displayText)
+                if connection.state.isOnline {
+                    Circle()
+                        .fill(PIColor.success)
+                        .frame(width: 7, height: 7)
+                        .accessibilityHidden(true)
+                }
+                Text(statusLine)
                     .font(PIFont.captionStrong)
-                    .foregroundStyle(connection.state.isOnline ? PIColor.success : PIColor.warning)
-                    .lineLimit(1)
+                    .foregroundStyle(PIColor.text)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
             }
-            if !secondaryLine.isEmpty {
-                Text(secondaryLine)
-                    .font(PIFont.metaSmall)
-                    .foregroundStyle(PIColor.text2)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            if !connection.state.isOnline {
+                HStack(alignment: .firstTextBaseline, spacing: PISpacing.s8) {
+                    Circle()
+                        .fill(PIColor.warning)
+                        .frame(width: 6, height: 6)
+                        .accessibilityHidden(true)
+                    Text(offlineStatusText)
+                        .font(PIFont.meta)
+                        .foregroundStyle(PIColor.text2)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .padding(.horizontal, PIMetrics.pageMargin)
-        .padding(.vertical, 8)
+        .padding(.vertical, PISpacing.s8)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(PIColor.surface)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(PIColor.separator)
-                .frame(height: PIMetrics.hairline)
-        }
+        .accessibilityElement(children: .combine)
+        .piOptionalIdentifier(connection.state.isOnline ? nil : "conversation.offlineNotice")
         .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
+    }
+
+    // MARK: - 常驻状态
+
+    /// 状态条的一行：一条事实 + 可选关闭动作。id 同时用作 accessibilityIdentifier。
+    private struct StatusLine: Identifiable {
+        let id: String
+        let text: String
+        let tint: Color
+        var dismiss: (() -> Void)?
+    }
+
+    /// 只放「现在什么状态」。日常可用时整条不出现，不占一行空白。
+    private var statusLines: [StatusLine] {
+        var lines: [StatusLine] = []
+        guard session.openingSessionID == nil else { return lines }
+        if isSubmitting {
+            lines.append(StatusLine(id: "conversation.submitting", text: "正在提交…", tint: PIColor.text2))
+        }
+        if session.isTurnRunning {
+            lines.append(StatusLine(
+                id: "conversation.streamingCount",
+                text: streamingStatusText,
+                tint: PIColor.text2
+            ))
+        }
+        if !session.queuedTurns.isEmpty {
+            lines.append(StatusLine(
+                id: "conversation.queuedNotice",
+                text: "排队 \(session.queuedTurns.count)",
+                tint: PIColor.text2
+            ))
+        }
+        if let error = session.lastError, !duplicatesModelAvailabilityWarning(error) {
+            lines.append(StatusLine(
+                id: "conversation.errorNotice",
+                text: error,
+                tint: PIColor.danger,
+                dismiss: { session.clearError() }
+            ))
+        } else if let notice = session.notice {
+            // 完成提示是中性事实（「已中止」不是成功），用状态色只在失败时出现。
+            lines.append(StatusLine(
+                id: "conversation.notice",
+                text: notice,
+                tint: PIColor.text2,
+                dismiss: { session.clearNotice() }
+            ))
+        }
+        return lines
+    }
+
+    /// 发送前的模型准入失败会同时写入 lastError；同一原因已由模型警告表达时不再画第二条。
+    /// 其他独立的连接、审批或工具错误仍原样保留。
+    private func duplicatesModelAvailabilityWarning(_ error: String) -> Bool {
+        switch session.modelAvailability {
+        case .unavailable, .unknown:
+            return error == session.modelAvailability.displayText
+                || error == "当前模型不可用，请重新选择模型"
+        case .available, .checking:
+            return false
+        }
+    }
+
+    private var offlineStatusText: String {
+        if let detail = connection.state.detail, !detail.isEmpty {
+            return "离线 · \(detail)"
+        }
+        // 缓存只读与可能过期由离线线程说明；顶部只保留连接事实，避免同义复述。
+        return "离线"
+    }
+
+    /// 与旧线程内的「正在生成…」同义：纯工具长任务期间 activeItems 为空，
+    /// 只看 activeItems 会缺这段时间的状态。
+    private var streamingStatusText: String {
+        session.activeItems.isEmpty ? "运行中" : "运行中 · \(session.activeItems.count) 条"
+    }
+
+    @ViewBuilder
+    private var sessionStatusStrip: some View {
+        let lines = statusLines
+        if !lines.isEmpty {
+            VStack(alignment: .leading, spacing: PISpacing.s4) {
+                ForEach(lines) { line in
+                    HStack(alignment: .firstTextBaseline, spacing: PISpacing.s8) {
+                        Circle()
+                            .fill(line.tint)
+                            .frame(width: 6, height: 6)
+                            .accessibilityHidden(true)
+                        Text(line.text)
+                            .font(PIFont.meta.weight(.semibold))
+                            .foregroundStyle(PIColor.text)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier(line.id)
+                        Spacer(minLength: PISpacing.s4)
+                        if let dismiss = line.dismiss {
+                            Button(action: dismiss) {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(PIColor.text3)
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("关闭提示")
+                            .accessibilityIdentifier("\(line.id).dismiss")
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, PIMetrics.pageMargin)
+            .padding(.vertical, PISpacing.s8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(PIColor.surface)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(PIColor.separator)
+                    .frame(height: PIMetrics.hairline)
+            }
+            // `.contain`：容器有 identifier 时不能合并子元素，否则每条状态自己的
+            // identifier（离线 / 运行中 / 排队）会被吞掉。
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("conversation.statusStrip")
+        }
+    }
+
+    @ViewBuilder
+    private var readingRestoreRetryStrip: some View {
+        if readingRestoreRetryAvailable {
+            HStack(spacing: PISpacing.s8) {
+                Text("阅读位置尚未恢复")
+                    .font(PIFont.meta.weight(.semibold))
+                    .foregroundStyle(PIColor.text)
+                Spacer(minLength: PISpacing.s4)
+                Button("重试定位") {
+                    readingRestoreRetryAvailable = false
+                    readingRestoreRetryNonce &+= 1
+                }
+                .font(PIFont.meta.weight(.semibold))
+                .accessibilityIdentifier("conversation.retryReadingPosition")
+            }
+            .padding(.horizontal, PIMetrics.pageMargin)
+            .padding(.vertical, PISpacing.s8)
+            .background(PIColor.surface)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(PIColor.separator)
+                    .frame(height: PIMetrics.hairline)
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("conversation.readingRestoreNotice")
+        }
     }
 
     // MARK: - 状态区
 
     @ViewBuilder
     private var statusArea: some View {
-        if !connection.state.isOnline {
-            PIInlineMessage(
-                kind: .warning,
-                text: connection.state.detail.map {
-                    "离线，内容可能不是最新：\(connection.state.displayText)：\($0)"
-                } ?? "隧道未建立时只能读到本机缓存；发送与审批已禁用。"
-            )
-        } else if session.attachedSessionId == nil {
+        if connection.state.isOnline, session.attachedSessionId == nil {
             PIEmptyState(
                 title: "还没有打开会话",
-                message: "到项目页选择或新建一个会话。",
                 actionTitle: "去项目页",
                 action: { model.switchRoot(.projects) },
+                actionIdentifier: "conversation.openProjects",
                 icon: "bubble.left.and.text.bubble.right"
             )
-        } else {
+        } else if connection.state.isOnline {
             switch session.modelAvailability {
             case .available:
                 EmptyView()
             case .checking:
                 PIStatusBanner(
                     kind: .info,
-                    text: "正在检查模型可用性",
-                    detail: "发送会在服务器确认 provider、模型与密钥都可用后放行。"
+                    text: "正在检查模型可用性"
                 )
             case .unavailable(let reason), .unknown(let reason):
+                // 一条横幅只承担一件事：告诉你不可用，并给唯一出口。
+                // 这个出口是闭环：直达「模型服务」子页去修模型，回到会话页时按当前状态
+                // 自动重查一次（见 `recheckModelAfterReappearing`）。
                 PIStatusBanner(
                     kind: .warning,
                     text: "模型暂不可用",
                     detail: reason,
-                    actionTitle: isCheckingModelAvailability ? "正在检查…" : "重新检查",
-                    action: {
-                        Task { await refreshModelAvailability() }
-                    }
+                    actionTitle: "选择其他模型",
+                    action: { openModelServices() }
                 )
-                PIGhostChipButton(title: "选择其他模型", systemImage: "slider.horizontal.3") {
-                    showingConfig = true
-                }
-                .padding(.horizontal, PISpacing.s4)
             }
         }
     }
 
     // MARK: - 线程
 
-    private var threadSection: some View {
+    private func threadSection(proxy: ScrollViewProxy) -> some View {
         VStack(alignment: .leading, spacing: PISpacing.s8) {
             if session.view.hasMoreHistory || session.historyError != nil {
                 VStack(alignment: .leading, spacing: PISpacing.s8) {
                     Button {
-                        Task { await loadEarlierHistoryPreservingPosition() }
+                        Task { await loadEarlierHistoryPreservingPosition(proxy: proxy) }
                     } label: {
                         HStack(spacing: PISpacing.s8) {
                             if session.isLoadingEarlierHistory { ProgressView().controlSize(.small) }
@@ -482,34 +739,28 @@ struct ConversationScreen: View {
             if session.view.items.isEmpty {
                 PIEmptyState(
                     title: "这个会话还没有消息",
-                    message: "在下方输入框发出第一条指令",
                     icon: "bubble.left.and.text.bubble.right"
                 )
             } else {
-                let rows = threadRows
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                let rows = rowIndex.rows
+                let restoreAnchor = readingRestoreTargetItemID.map { rowIndex.anchorItemID(for: $0) }
+                let pagingAnchor = historyReadingAnchorID.map { rowIndex.anchorItemID(for: $0) }
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(rows.enumerated()), id: \.element.anchorItemID) { index, row in
                         conversationRowView(row)
                             .padding(.top, rowSpacing(at: index, rows: rows))
-                            .id(scrollID(for: row.anchorItemID))
                             .background {
                                 ReadingRestoreAnchor(
                                     itemID: row.anchorItemID,
-                                    targetID: readingRestoreTargetItemID.map {
-                                        ToolCallGroupingPolicy.anchorItemID(for: $0, in: rows)
-                                    },
+                                    targetID: restoreAnchor,
                                     requestID: readingRestoreRequestID,
-                                    historyAnchorID: historyReadingAnchorID.map {
-                                        ToolCallGroupingPolicy.anchorItemID(for: $0, in: rows)
-                                    },
+                                    historyAnchorID: pagingAnchor,
+                                    historyTopSpacing: rowSpacing(at: index, rows: rows),
                                     historyRequestID: historyPositionRestoreID,
                                     viewportMeasurement: viewportMeasurement,
                                     onUserInteraction: {
-                                        cancelHistoryPositionRestore()
-                                        guard isRestoringReadingPosition else { return }
-                                        readingRestoreTargetItemID = nil
-                                        isRestoringReadingPosition = false
-                                        hasNewBelow = newMessagesDuringRestore
+                                        cancelHistoryPaging()
+                                        cancelReadingPositionRestore()
                                     }
                                 )
                             }
@@ -525,23 +776,10 @@ struct ConversationScreen: View {
                             }
                     }
                 }
+                .scrollTargetLayout()
             }
-            // DEF-R4-005：纯工具长任务（如 sleep）运行期间 activeItems 为空，
-            // 只按 activeItems 判断会缺「正在生成…」状态条；改与头部同一判据 isTurnRunning。
-            if session.isTurnRunning {
-                Text(session.activeItems.isEmpty
-                     ? "正在生成内容…"
-                     : "正在生成 \(session.activeItems.count) 条内容…")
-                    .font(PIFont.caption)
-                    .foregroundStyle(PIColor.text2)
-                    .accessibilityIdentifier("conversation.streamingCount")
-            }
+            // 运行状态已经常驻在 `sessionStatusStrip`，线程末尾不再重复一条同样的文案。
         }
-    }
-
-    /// 线程行：连续工具调用按策略合并为可折叠分组，其余条目保持原样。
-    private var threadRows: [ConversationRow] {
-        ToolCallGroupingPolicy.rows(for: session.view.items)
     }
 
     /// 工具类行之间更紧凑；工具行与正文之间留出正常段落间距。
@@ -569,7 +807,8 @@ struct ConversationScreen: View {
         if item.isToolItem {
             ToolItemCard(item: item)
         } else if item.role == "user" {
-            // 用户消息：右侧淡蓝气泡、无角色标签（design-system.md §7 / spec AC-1）。
+            // 用户消息：右对齐、accentSoft 底、无头像无角色标签；不画描边、不画阴影。
+            // quiet-v2 §2：accent 只表达「可交互」，所以气泡只用选中底，不用 accent 描边。
             HStack(alignment: .top, spacing: 0) {
                 Spacer(minLength: 0)
                 VStack(alignment: .leading, spacing: PISpacing.s8) {
@@ -584,38 +823,25 @@ struct ConversationScreen: View {
                         .font(PIFont.body)
                         .foregroundStyle(PIColor.text)
                         .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("conversation.userMessage.\(item.id)")
                     if let status = item.status {
                         Text(status)
                             .font(PIFont.meta)
-                            .foregroundStyle(PIColor.text2)
+                            .foregroundStyle(PIColor.text3)
                     }
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
+                .padding(.horizontal, PISpacing.s16)
+                .padding(.vertical, PISpacing.s12)
                 .frame(maxWidth: 320, alignment: .leading)
                 .background(
                     PIColor.accentSoft,
-                    in: UnevenRoundedRectangle(
-                        topLeadingRadius: PIRadius.card,
-                        bottomLeadingRadius: PIRadius.card,
-                        bottomTrailingRadius: 6,
-                        topTrailingRadius: PIRadius.card,
-                        style: .continuous
-                    )
+                    in: RoundedRectangle(cornerRadius: PIRadius.card, style: .continuous)
                 )
-                .overlay(
-                    UnevenRoundedRectangle(
-                        topLeadingRadius: PIRadius.card,
-                        bottomLeadingRadius: PIRadius.card,
-                        bottomTrailingRadius: 6,
-                        topTrailingRadius: PIRadius.card,
-                        style: .continuous
-                    )
-                    .strokeBorder(PIColor.accentBorder, lineWidth: PIMetrics.hairline)
-                )
+                copyMessageButton(item)
             }
         } else {
-            // Agent / 系统消息：左对齐、无气泡、无头像、无角色标签（design-system.md §7 / spec AC-2）。
+            // Agent / 系统消息：直接排在页面上，无气泡、无头像、无角色标签。
             HStack(alignment: .top, spacing: 0) {
                 VStack(alignment: .leading, spacing: PISpacing.s8) {
                     if !item.attachments.isEmpty {
@@ -628,7 +854,10 @@ struct ConversationScreen: View {
                     // Agent 输出几乎都是 Markdown（表格、围栏代码块、粗体、列表），
                     // 纯 Text 会把标记原样画出来；用户气泡保持纯文本，避免把用户输入的
                     // `*`、`_` 当成语法解释。
-                    PIMarkdownView(text: item.text ?? item.kind ?? "条目")
+                    PIMarkdownView(
+                        text: item.text ?? item.kind ?? "条目",
+                        identifier: "conversation.agentMessage.\(item.id)"
+                    )
                     if let status = item.status {
                         Text(status)
                             .font(PIFont.meta)
@@ -636,13 +865,36 @@ struct ConversationScreen: View {
                     }
                 }
                 Spacer(minLength: 0)
+                copyMessageButton(item)
             }
+        }
+    }
+
+    /// Coalesce message, status and queue updates without restarting animations.
+    private func scheduleAutomaticFollow(proxy: ScrollViewProxy) {
+        guard automaticFollowTask == nil, !isDraggingThread, isNearBottom,
+              !isRestoringReadingPosition, historyPagingID == nil,
+              session.openingSessionID == nil else { return }
+        let context = readingContextKey
+        let requestID = UUID()
+        automaticFollowID = requestID
+        automaticFollowTask = Task { @MainActor in
+            defer {
+                if automaticFollowID == requestID { automaticFollowTask = nil }
+            }
+            do { try await Task.sleep(for: .milliseconds(32)) } catch { return }
+            guard !Task.isCancelled, context == readingContextKey,
+                  !isDraggingThread, isNearBottom, !isRestoringReadingPosition,
+                  historyPagingID == nil, session.openingSessionID == nil else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { proxy.scrollTo("thread-bottom", anchor: .bottom) }
         }
     }
 
     private var readingContextKey: String? {
         guard let hostID = model.currentHost?.id,
-              let sessionID = session.attachedSessionId
+              session.openingSessionID == nil, let sessionID = session.attachedSessionId
         else { return nil }
         return "\(hostID.uuidString):\(sessionID)"
     }
@@ -653,63 +905,177 @@ struct ConversationScreen: View {
         return "\(context):\(session.view.sessionId ?? "pending")"
     }
 
-    private func scrollID(for itemID: String) -> String {
-        "conversation-item:\(itemID)"
+    /// `scrollPosition` also writes the row that happens to be on top while the
+    /// user scrolls. Feeding that back would fight the restore/paging offset, so
+    /// only the screen writes this state; layout feedback is ignored.
+    private var trackedScrollPosition: Binding<String?> {
+        Binding(get: { scrollPositionID }, set: { _ in })
+    }
+
+    private func cancelReadingPositionRestore() {
+        readingRestoreGeneration &+= 1
+        readingRestoreRequestID &+= 1
+        readingRestoreTargetItemID = nil
+        scrollPositionID = nil
+        readingRestoreFailed = false
+        readingRestoreRetryAvailable = false
+        readingPositionHoldAnchorID = nil
+        if isRestoringReadingPosition { hasNewBelow = newMessagesDuringRestore }
+        isRestoringReadingPosition = false
     }
 
     private func cancelHistoryPositionRestore() {
         historyPositionRestoreID = nil
         historyReadingAnchorID = nil
         viewportMeasurement.cancel()
+        scrollPositionID = nil
+    }
+
+    private func cancelHistoryPaging() {
+        historyPagingCancelled = true
+        readingPositionHoldAnchorID = nil
+        cancelHistoryPositionRestore()
     }
 
     /// 只在用户点按钮后读取一页。UIKit 锚点保留原可见条目的像素位置，
     /// 不借用回到最新的 scrollTo，也不在历史页到达时触发消息追随。
     @MainActor
-    private func loadEarlierHistoryPreservingPosition() async {
+    private func loadEarlierHistoryPreservingPosition(proxy: ScrollViewProxy) async {
         guard historyPagingID == nil, !session.isLoadingEarlierHistory,
               !isRestoringReadingPosition, let contextKey = readingContextKey else { return }
         let requestID = UUID()
         historyPagingID = requestID
+        historyPagingCancelled = false
+        readingPositionHoldAnchorID = nil
+        readingRestoreFailed = false
+        readingRestoreRetryAvailable = false
         let anchorID = lastMeasuredTopItemID ?? topVisibleItemID ?? session.view.items.first?.id
         historyReadingAnchorID = anchorID
-        let rowAnchorID = anchorID.map { ToolCallGroupingPolicy.anchorItemID(for: $0, in: threadRows) }
-        viewportMeasurement.begin(requestID: requestID, itemID: rowAnchorID)
+        let rowAnchorID = anchorID.map { rowIndex.anchorItemID(for: $0) }
+        let rowTopSpacing = rowAnchorID.flatMap { anchorID in
+            rowIndex.rows.firstIndex(where: { $0.anchorItemID == anchorID }).map {
+                rowSpacing(at: $0, rows: rowIndex.rows)
+            }
+        } ?? 0
+        viewportMeasurement.begin(
+            requestID: requestID,
+            itemID: rowAnchorID,
+            topSpacing: rowTopSpacing
+        )
         let previousNearBottom = isNearBottom
         isNearBottom = false
+        var outcome: ConversationPagingPositionOutcome = .unapplied
         defer {
             if historyPagingID == requestID {
+                if !historyPagingCancelled,
+                   !outcome.recordsVisiblePosition,
+                   let anchorID {
+                    readingPositionHoldAnchorID = anchorID
+                }
                 historyPagingID = nil
+                historyPagingCancelled = false
                 cancelHistoryPositionRestore()
             }
         }
+        // 日志：分页请求/历史加载的开始（耗时基准与条数），只记 debug，不记录消息内容。
+        let logStartedAt = Date()
+        let logItemsBefore = session.view.items.count
+        PILog.debug(
+            "UI",
+            "history page start items=\(logItemsBefore) anchor=\(anchorID.map { String($0.prefix(8)) } ?? "-")"
+        )
         let inserted = await session.loadEarlierHistory()
+        // 日志：分页请求/历史加载的耗时与条数，只记 debug，不记录消息内容。
+        defer {
+            PILog.debug(
+                "UI",
+                "history page end inserted=\(inserted) items=\(session.view.items.count) before=\(logItemsBefore) applied=\(outcome == .applied) elapsedMs=\(Int(Date().timeIntervalSince(logStartedAt) * 1000))"
+            )
+        }
+        outcome = inserted ? .unapplied : .notInserted
         guard !Task.isCancelled, readingContextKey == contextKey,
-              historyPagingID == requestID else { return }
+              historyPagingID == requestID,
+              !historyPagingCancelled else { return }
         // 分页跨过工具分组边界时行身份可能变化，像素基准存放在共享测量器中。
         // 只在响应归约后启动补偿；等待期间用户拖动/点回到最新会取消它。
-        if inserted, viewportMeasurement.requestID == requestID {
+        if inserted, viewportMeasurement.requestID == requestID, let anchorID {
+            rowIndex = ConversationRowIndex(items: session.view.items)
+            // A prepend may merge the old row into a new tool group outside the
+            // lazy window. Materialize that new row before applying its old Y.
+            let target = rowIndex.anchorItemID(for: anchorID)
+            if viewportMeasurement.itemID != target {
+                scrollPositionID = target
+            }
+            proxy.scrollTo(target, anchor: .top)
+            await Task.yield()
+            guard viewportMeasurement.requestID == requestID,
+                  !historyPagingCancelled else { return }
             historyPositionRestoreID = requestID
-            try? await Task.sleep(for: .milliseconds(250))
+            for _ in 0..<30 {
+                guard !Task.isCancelled, readingContextKey == contextKey,
+                      viewportMeasurement.requestID == requestID,
+                      !historyPagingCancelled else { return }
+                if viewportMeasurement.appliedRequestID == requestID {
+                    // The pixel baseline is back; stop pinning the row to the top.
+                    outcome = .applied
+                    scrollPositionID = nil
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            guard outcome == .applied else {
+                // The old reading position is still the only verified one. Keep
+                // its logical anchor instead of recording the transient pre-page
+                // viewport; a later restore/paging action may retry.
+                topVisibleItemID = anchorID
+                lastMeasuredTopItemID = anchorID
+                isNearBottom = previousNearBottom
+                return
+            }
+            topVisibleItemID = anchorID
         }
         guard !Task.isCancelled, readingContextKey == contextKey,
-              historyPagingID == requestID else { return }
+              historyPagingID == requestID,
+              !historyPagingCancelled else { return }
         if !inserted, viewportMeasurement.requestID == requestID {
             isNearBottom = previousNearBottom
         }
+        guard outcome.recordsVisiblePosition, anchorID != nil else { return }
+        readingPositionHoldAnchorID = nil
+        historyPagingID = nil
+        cancelHistoryPositionRestore()
         recordReadingPosition()
     }
 
     @MainActor
     private func restoreReadingPosition(proxy: ScrollViewProxy) async {
         historyPagingID = nil
+        historyPagingCancelled = false
+        readingPositionHoldAnchorID = nil
         cancelHistoryPositionRestore()
+        readingRestoreFailed = false
+        readingRestoreRetryAvailable = false
         readingRestoreGeneration &+= 1
         let generation = readingRestoreGeneration
         defer {
             if readingRestoreGeneration == generation {
                 isRestoringReadingPosition = false
+                scrollPositionID = nil
             }
+        }
+        // 日志：阅读位置恢复的开始/结束（耗时、条数），只记 debug，不记录消息内容。
+        let logStartedAt = Date()
+        let logItemsAtStart = session.view.items.count
+        PILog.debug("UI", "reading restore start items=\(logItemsAtStart)")
+        defer {
+            PILog.debug(
+                "UI",
+                "reading restore end items=\(session.view.items.count) startItems=\(logItemsAtStart) restoring=\(isRestoringReadingPosition) failed=\(readingRestoreFailed) elapsedMs=\(Int(Date().timeIntervalSince(logStartedAt) * 1000))"
+            )
+        }
+        if !connection.state.isOnline {
+            await connection.waitForOfflineCacheReady()
+            guard !Task.isCancelled, readingRestoreGeneration == generation else { return }
         }
         guard let hostID = model.currentHost?.id,
               let sessionID = session.attachedSessionId,
@@ -735,11 +1101,12 @@ struct ConversationScreen: View {
 
         // `attachedSessionId` 会早于 sessionView 完成更新；等这一代会话的视图落位后再恢复。
         for _ in 0..<60 {
-            guard !Task.isCancelled, readingContextKey == contextKey else { return }
+            guard !Task.isCancelled, readingContextKey == contextKey,
+                  readingRestoreGeneration == generation else { return }
             if session.view.sessionId == sessionID { break }
             try? await Task.sleep(for: .milliseconds(50))
         }
-        guard !Task.isCancelled,
+        guard !Task.isCancelled, readingRestoreGeneration == generation,
               readingContextKey == contextKey,
               session.view.sessionId == sessionID
         else { return }
@@ -750,33 +1117,73 @@ struct ConversationScreen: View {
         // Large restored snapshots need multiple layout passes before the target's
         // UIKit anchor can drive the scroll view and its frame can be confirmed.
         try? await Task.sleep(for: .milliseconds(300))
-        guard !Task.isCancelled, readingContextKey == contextKey else { return }
+        guard !Task.isCancelled, readingContextKey == contextKey,
+              readingRestoreGeneration == generation else { return }
+        rowIndex = ConversationRowIndex(items: session.view.items)
 
         let saved = model.readingPosition(hostID: hostID, sessionID: sessionID)
         if let saved,
            !saved.isNearBottom,
            let itemID = saved.lastVisibleItemID,
            session.view.items.contains(where: { $0.id == itemID }) {
-            readingRestoreTargetItemID = itemID
             isNearBottom = false
             hasNewBelow = newMessagesDuringRestore
+            let anchorID = rowIndex.anchorItemID(for: itemID)
+            // LazyVStack does not register off-screen rows with ScrollViewReader,
+            // so scrollTo alone can silently do nothing and leave the restored
+            // view at the content top. Pinning the anchor through scrollPosition
+            // makes SwiftUI instantiate that row before the pixel correction.
+            //
+            // Arm the target before the scroll. If the scroll settles in the
+            // same run loop, assigning the target afterwards produces no new
+            // frame preference and the restore times out even though the row is
+            // already at the viewport top.
+            readingRestoreTargetItemID = itemID
             readingRestoreRequestID &+= 1
-            for _ in 0..<10 where isRestoringReadingPosition {
-                try? await Task.sleep(for: .milliseconds(150))
-                guard !Task.isCancelled,
-                      readingContextKey == contextKey,
-                      readingRestoreTargetItemID == itemID
-                else { return }
-                readingRestoreRequestID &+= 1
-            }
-            if isRestoringReadingPosition,
-               readingRestoreTargetItemID == itemID {
-                readingRestoreTargetItemID = nil
-                topVisibleItemID = itemID
-                isRestoringReadingPosition = false
-                isNearBottom = false
-                hasNewBelow = newMessagesDuringRestore
-                return
+            // A restarted restore can start with the view already at the saved
+            // row. Arming the target then produces no new frame preference, so
+            // confirm against the last geometry before waiting for one.
+            let confirmed = frameSnapshot.contextKey == contextKey
+                && confirmReadingRestoreIfAligned(in: frameSnapshot.frames)
+            if !confirmed {
+                scrollPositionID = anchorID
+                proxy.scrollTo(anchorID, anchor: .top)
+                try? await Task.sleep(for: .milliseconds(50))
+                guard !Task.isCancelled, readingRestoreGeneration == generation,
+                      readingContextKey == contextKey else { return }
+                for _ in 0..<30 where isRestoringReadingPosition {
+                    try? await Task.sleep(for: .milliseconds(100))
+                    guard !Task.isCancelled, readingRestoreGeneration == generation,
+                          readingContextKey == contextKey else { return }
+                    if !isRestoringReadingPosition { break }
+                    guard readingRestoreTargetItemID == itemID else { return }
+                    // The lazy stack's content height grows as rows realize. Re-arm
+                    // the pinned target so scrollPosition resolves it again against
+                    // the new layout instead of keeping the first clamped offset.
+                    scrollPositionID = nil
+                    await Task.yield()
+                    guard !Task.isCancelled, readingRestoreGeneration == generation,
+                          readingContextKey == contextKey,
+                          isRestoringReadingPosition else { return }
+                    scrollPositionID = anchorID
+                    // The row may only have become real after the first scroll
+                    // request; retry now that scrollTo can resolve it.
+                    proxy.scrollTo(anchorID, anchor: .top)
+                    readingRestoreRequestID &+= 1
+                }
+                guard readingRestoreTargetItemID == nil else {
+                    // The bounded wait elapsed without a confirmed frame. Keep the
+                    // saved reading position and expose one explicit local retry;
+                    // never fake success from the requested item id or loop forever.
+                    let restoreOutcome = ConversationRestoreOutcome.timedOut
+                    readingRestoreTargetItemID = nil
+                    isRestoringReadingPosition = false
+                    readingRestoreFailed = restoreOutcome.preservesSavedPosition
+                    readingRestoreRetryAvailable = restoreOutcome.offersLocalRetry
+                    hasNewBelow = newMessagesDuringRestore
+                    topVisibleItemID = lastMeasuredTopItemID
+                    return
+                }
             }
             isNearBottom = false
             hasNewBelow = newMessagesDuringRestore
@@ -789,13 +1196,18 @@ struct ConversationScreen: View {
         }
 
         try? await Task.sleep(for: .milliseconds(250))
-        guard !Task.isCancelled, readingContextKey == contextKey else { return }
+        guard !Task.isCancelled, readingContextKey == contextKey,
+              readingRestoreGeneration == generation else { return }
         isRestoringReadingPosition = false
         recordReadingPosition()
     }
 
     private func recordReadingPosition() {
         guard !isRestoringReadingPosition,
+              session.openingSessionID == nil,
+              !readingRestoreFailed,
+              readingPositionHoldAnchorID == nil,
+              historyPagingID == nil,
               let hostID = activeReadingHostID,
               let sessionID = activeReadingSessionID,
               model.currentHost?.id == hostID,
@@ -807,6 +1219,29 @@ struct ConversationScreen: View {
             lastVisibleItemID: topVisibleItemID ?? session.view.items.last?.id,
             isNearBottom: isNearBottom
         )
+    }
+
+    /// Confirms the saved row only from measured geometry. The same predicate is
+    /// used by the live probe, so a successful restore cannot report the row above
+    /// the saved item as the first visible one.
+    @discardableResult
+    private func confirmReadingRestoreIfAligned(in frames: [String: CGRect]) -> Bool {
+        guard isRestoringReadingPosition,
+              let target = readingRestoreTargetItemID,
+              let frame = frames[rowIndex.anchorItemID(for: target)],
+              ConversationViewportGeometry.isAnchorAlignedAtViewportTop(
+                  measuredMinY: frame.minY
+              )
+        else { return false }
+        readingRestoreTargetItemID = nil
+        readingRestoreFailed = false
+        readingRestoreRetryAvailable = false
+        topVisibleItemID = target
+        isNearBottom = false
+        hasNewBelow = newMessagesDuringRestore
+        isRestoringReadingPosition = false
+        recordReadingPosition()
+        return true
     }
 
     private func recordVisibleMessageCount() {
@@ -854,7 +1289,7 @@ struct ConversationScreen: View {
         model.rememberSession(nil)
         if let next {
             Task {
-                await connection.session.attach(sessionId: next.id)
+                await connection.session.attach(sessionId: next.id, source: "nextSession")
                 model.rememberSession(next.id)
             }
         } else {
@@ -869,15 +1304,82 @@ struct ConversationScreen: View {
         return model.cachedSessionSelectionID(for: hostID)
     }
 
+    private var extensionSessionId: String? {
+        connection.state.isOnline ? session.attachedSessionId : (cachedSessionId ?? session.attachedSessionId)
+    }
+
+    private func openingThread(sessionID: String, proxy: ScrollViewProxy) -> some View {
+        let entries = connection.cachedSession(sessionId: sessionID)?.entries ?? []
+        let anchorID = model.currentHost.flatMap {
+            model.readingPosition(hostID: $0.id, sessionID: sessionID)?.lastVisibleItemID
+        }
+        let anchorIndex = anchorID.flatMap { id in entries.firstIndex { $0.id == id } }
+        let range = ConversationPreviewWindow.range(count: entries.count, anchorIndex: anchorIndex, limit: previewWindowLimit)
+        let rows = Array(entries[range].reversed())
+        let previewRows = ToolCallGroupingPolicy.rows(for: rows.map(\.conversationItem))
+        return LazyVStack(alignment: .leading, spacing: PISpacing.s12) {
+            if session.isAttaching {
+                ProgressView("正在同步会话…")
+                    .font(PIFont.meta)
+                    .accessibilityIdentifier("conversation.sessionOpening")
+            } else {
+                PIInlineMessage(kind: .danger, text: session.lastError ?? "会话尚未同步")
+                    .accessibilityIdentifier("conversation.sessionOpenError")
+                Button("重试同步") {
+                    Task { await session.attach(sessionId: sessionID, source: "previewRetry") }
+                }
+                .accessibilityIdentifier("conversation.retrySessionOpen")
+            }
+            if !rows.isEmpty {
+                Text("本机历史 · 同步完成后更新")
+                    .font(PIFont.meta).foregroundStyle(PIColor.text2)
+                if rows.count < entries.count {
+                    Button("加载更多本机历史") {
+                        let anchor = previewRows.first?.anchorItemID
+                        previewWindowLimit = min(entries.count, previewWindowLimit + 80)
+                        Task { @MainActor in
+                            await Task.yield()
+                            guard session.openingSessionID == sessionID, let anchor else { return }
+                            var transaction = Transaction()
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) { proxy.scrollTo("preview-\(anchor)", anchor: .top) }
+                        }
+                    }
+                    .font(PIFont.meta)
+                    .accessibilityIdentifier("conversation.loadMoreCachedPreview")
+                    .accessibilityValue("已显示 \(rows.count) 条，共 \(entries.count) 条")
+                }
+                ForEach(previewRows, id: \.id) { row in
+                    cachedConversationRow(row, namespace: "previewMessage")
+                        .id("preview-\(row.anchorItemID)")
+                }
+            } else if session.isAttaching {
+                ForEach(0..<3) { index in
+                    RoundedRectangle(cornerRadius: PIRadius.control)
+                        .fill(PIColor.surface2)
+                        .frame(maxWidth: index == 1 ? 220 : .infinity)
+                        .frame(height: 52)
+                        .accessibilityHidden(true)
+                }
+            }
+        }
+        .scrollTargetLayout()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            PILog.debug("UI", "cached preview mounted session=\(sessionID.prefix(8)) rows=\(rows.count) cached=\(entries.count)")
+        }
+    }
+
     @ViewBuilder
     private func offlineThread(sessionId: String) -> some View {
         let cached = connection.cachedSession(sessionId: sessionId)
-        let entries = cached?.entries ?? []
-        VStack(alignment: .leading, spacing: PISpacing.s8) {
+        // 缓存按新→旧读取；会话阅读与在线线程一致，按旧→新展示。
+        let entries = (cached?.entries ?? []).reversed().filter { !$0.conversationItem.isBlankNonToolItem }
+        LazyVStack(alignment: .leading, spacing: PISpacing.s8) {
             PISectionHeader(text: "缓存的历史（只读）")
             PIInlineMessage(
                 kind: .warning,
-                text: "离线只读 · 缓存可能已过期；审批卡只用于展示，恢复在线后会按服务器快照重建。"
+                text: "离线只读 · 缓存可能已过期"
             )
             if let approvals = cached?.approvals, !approvals.isEmpty {
                 PISectionHeader(text: "缓存的待审批（\(approvals.count)）")
@@ -896,41 +1398,68 @@ struct ConversationScreen: View {
                             .font(PIFont.body)
                             .foregroundStyle(PIColor.text)
                             .fixedSize(horizontal: false, vertical: true)
-                        Text("恢复在线后可继续编辑或发送。")
-                            .font(PIFont.meta)
-                            .foregroundStyle(PIColor.text3)
                     }
                 }
             }
-            if cached == nil {
+            if !connection.offlineCacheReady {
+                ProgressView("正在读取本机历史…")
+                    .accessibilityIdentifier("conversation.offlineCacheLoading")
+            } else if let error = connection.offlineCacheLoadError {
+                PIInlineMessage(kind: .danger, text: "本机历史读取失败：\(error)")
+                    .accessibilityIdentifier("conversation.offlineCacheError")
+            } else if cached == nil {
                 PIListRow(
                     title: "本机没有这个会话的缓存",
-                    subtitle: "只包含联网时缓存的内容（最多 \(PersistedState.maxCachedConversations) 个会话）",
+                    subtitle: "最多 \(PersistedState.maxCachedConversations) 个会话",
                     isEnabled: false,
                     showsDivider: false
                 )
             } else if entries.isEmpty {
                 PIListRow(
                     title: "缓存里没有文本消息",
-                    subtitle: "审批卡与草稿仍可在上方查看。",
                     isEnabled: false,
                     showsDivider: false
                 )
             } else {
                 ForEach(entries, id: \.id) { entry in
+                    let presentation = ToolResultPresentation(text: entry.displayText)
                     PICard {
-                        VStack(alignment: .leading, spacing: PISpacing.s4) {
-                            Text(entry.displayText)
-                                .font(PIFont.body)
-                                .foregroundStyle(PIColor.text)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Text(entry.createdAt.formatted(date: .abbreviated, time: .shortened))
-                                .font(PIFont.meta)
-                                .foregroundStyle(PIColor.text3)
+                        HStack(alignment: .top, spacing: PISpacing.s8) {
+                            VStack(alignment: .leading, spacing: PISpacing.s4) {
+                                Text(presentation.preview)
+                                    .font(PIFont.body)
+                                    .foregroundStyle(PIColor.text)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                                    .accessibilityIdentifier("conversation.offlineMessage.\(entry.id)")
+                                if let notice = presentation.truncationNotice {
+                                    Text(notice)
+                                        .font(PIFont.meta)
+                                        .foregroundStyle(PIColor.text2)
+                                }
+                                Text(entry.createdAt.formatted(date: .abbreviated, time: .shortened))
+                                    .font(PIFont.meta)
+                                    .foregroundStyle(PIColor.text2)
+                            }
+                            Spacer(minLength: 0)
+                            copyMessageButton(entry)
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Tool cards own their button identifiers; an outer identifier would replace
+    /// the collapsed header's toggle identity in SwiftUI's accessibility tree.
+    @ViewBuilder
+    private func cachedConversationRow(_ row: ConversationRow, namespace: String) -> some View {
+        if row.isToolLike {
+            conversationRowView(row)
+        } else {
+            conversationRowView(row)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("conversation.\(namespace).\(row.anchorItemID)")
         }
     }
 
@@ -939,7 +1468,7 @@ struct ConversationScreen: View {
         return PICard {
             VStack(alignment: .leading, spacing: PISpacing.s8) {
                 HStack {
-                    Text(contract ? "计划 / 目标契约" : "权限请求")
+                    Text(contract ? "计划契约" : "权限请求")
                         .font(PIFont.captionStrong)
                         .foregroundStyle(PIColor.text2)
                     Spacer()
@@ -952,20 +1481,32 @@ struct ConversationScreen: View {
                     .foregroundStyle(PIColor.text)
                     .fixedSize(horizontal: false, vertical: true)
                 if contract {
-                    HStack(spacing: PISpacing.s8) {
-                        PIApprovalPrimaryButton(title: "批准", isEnabled: false) {}
-                        PIDangerOutlineButton(title: "驳回", isEnabled: false) {}
+                    if dynamicTypeSize.isAccessibilitySize {
+                        VStack(spacing: PISpacing.s8) {
+                            PIApprovalPrimaryButton(title: "批准", isEnabled: false) {}
+                            PIDangerOutlineButton(title: "驳回", isEnabled: false) {}
+                        }
+                    } else {
+                        HStack(spacing: PISpacing.s8) {
+                            PIApprovalPrimaryButton(title: "批准", isEnabled: false) {}
+                            PIDangerOutlineButton(title: "驳回", isEnabled: false) {}
+                        }
                     }
                 } else {
-                    HStack(spacing: PISpacing.s8) {
-                        PIApprovalSecondaryButton(title: "允许一次", isEnabled: false) {}
-                        PIApprovalSecondaryButton(title: "本会话允许", isEnabled: false) {}
-                        PIDangerOutlineButton(title: "拒绝", isEnabled: false) {}
+                    if dynamicTypeSize.isAccessibilitySize {
+                        VStack(spacing: PISpacing.s8) {
+                            PIApprovalSecondaryButton(title: "允许一次", isEnabled: false) {}
+                            PIApprovalSecondaryButton(title: "本会话允许", isEnabled: false) {}
+                            PIDangerOutlineButton(title: "拒绝", isEnabled: false) {}
+                        }
+                    } else {
+                        HStack(spacing: PISpacing.s8) {
+                            PIApprovalSecondaryButton(title: "允许一次", isEnabled: false) {}
+                            PIApprovalSecondaryButton(title: "本会话允许", isEnabled: false) {}
+                            PIDangerOutlineButton(title: "拒绝", isEnabled: false) {}
+                        }
                     }
                 }
-                Text("离线时不可提交，恢复在线后再操作。")
-                    .font(PIFont.meta)
-                    .foregroundStyle(PIColor.text3)
             }
         }
     }
@@ -990,7 +1531,7 @@ struct ConversationScreen: View {
         if let text = approval.payload.value(at: ["detail"])?.stringValue {
             return text
         }
-        return "服务器当时没有给出可显示的摘要（id \(approval.id)）"
+        return "服务器没有给出摘要"
     }
 
     // MARK: - 审批（AC-10 / AC-12）
@@ -999,17 +1540,17 @@ struct ConversationScreen: View {
     private var approvalSection: some View {
         ForEach(orderedApprovals, id: \.id) { card in
             let availability = session.availability(for: card.id)
+            let isContract = SessionController.isContract(card)
+            let canDecide = !(session.isBusy || !connection.state.isOnline)
             PICard {
-                VStack(alignment: .leading, spacing: PISpacing.s8) {
-                    HStack(spacing: PISpacing.s4) {
-                        Circle()
-                            .fill(SessionController.isContract(card) ? PIColor.warning : PIColor.accent)
-                            .frame(width: 6, height: 6)
-                            .accessibilityHidden(true)
-                        Text(SessionController.isContract(card) ? "计划 / 目标契约" : "权限请求")
+                VStack(alignment: .leading, spacing: PISpacing.s12) {
+                    HStack(spacing: PISpacing.s8) {
+                        // 类型是名词标签，状态用语义色；装饰点删除（quiet-v2 §2）。
+                        Text(isContract ? "计划契约" : "权限请求")
                             .font(PIFont.captionStrong)
                             .foregroundStyle(PIColor.text2)
-                        Spacer()
+                            .accessibilityIdentifier("conversation.approval.\(card.id).kind")
+                        Spacer(minLength: PISpacing.s4)
                         if let status = availability.statusText {
                             Text(status)
                                 .font(PIFont.meta)
@@ -1020,39 +1561,86 @@ struct ConversationScreen: View {
                         .font(PIFont.body)
                         .foregroundStyle(PIColor.text)
                         .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                    if let full = ApprovalInputPreview.fullText(from: card.payload) {
+                        Button("查看完整参数") {
+                            approvalFullInput = ApprovalFullInput(
+                                id: card.id,
+                                title: card.toolName ?? "审批参数",
+                                text: full
+                            )
+                        }
+                        .font(PIFont.captionStrong)
+                        .accessibilityIdentifier("conversation.approval.\(card.id).showFullInput")
+                    }
                     if availability.isActionable {
-                        if SessionController.isContract(card) {
+                        if isContract {
                             HStack(spacing: PISpacing.s8) {
-                                PIApprovalPrimaryButton(title: "批准", isEnabled: !(session.isBusy || !connection.state.isOnline)) {
+                                PIApprovalPrimaryButton(title: "批准", isEnabled: canDecide) {
                                     Task { await session.decideContract(approvalId: card.id, decision: .approve) }
                                 }
-                                PIDangerOutlineButton(title: "驳回", isEnabled: !(session.isBusy || !connection.state.isOnline)) {
+                                .accessibilityIdentifier("conversation.approval.\(card.id).approve")
+                                PIDangerOutlineButton(title: "驳回", isEnabled: canDecide) {
                                     Task { await session.decideContract(approvalId: card.id, decision: .reject) }
                                 }
+                                .accessibilityIdentifier("conversation.approval.\(card.id).reject")
                             }
                         } else {
                             VStack(alignment: .leading, spacing: PISpacing.s8) {
-                                HStack(spacing: PISpacing.s8) {
-                                    PIApprovalPrimaryButton(title: "允许一次", isEnabled: !(session.isBusy || !connection.state.isOnline)) {
-                                        Task { await session.decide(approvalId: card.id, decision: .allowOnce) }
+                                if dynamicTypeSize.isAccessibilitySize {
+                                    VStack(spacing: PISpacing.s8) {
+                                        PIApprovalPrimaryButton(title: "允许一次", isEnabled: canDecide) {
+                                            Task { await session.decide(approvalId: card.id, decision: .allowOnce) }
+                                        }
+                                        .accessibilityIdentifier("conversation.approval.\(card.id).allowOnce")
+                                        PIApprovalSecondaryButton(title: "本会话允许", isEnabled: canDecide) {
+                                            Task { await session.decide(approvalId: card.id, decision: .allowSession) }
+                                        }
+                                        .accessibilityIdentifier("conversation.approval.\(card.id).allowSession")
                                     }
-                                    PIApprovalSecondaryButton(title: "本会话允许", isEnabled: !(session.isBusy || !connection.state.isOnline)) {
-                                        Task { await session.decide(approvalId: card.id, decision: .allowSession) }
+                                } else {
+                                    HStack(spacing: PISpacing.s8) {
+                                        PIApprovalPrimaryButton(title: "允许一次", isEnabled: canDecide) {
+                                            Task { await session.decide(approvalId: card.id, decision: .allowOnce) }
+                                        }
+                                        .accessibilityIdentifier("conversation.approval.\(card.id).allowOnce")
+                                        PIApprovalSecondaryButton(title: "本会话允许", isEnabled: canDecide) {
+                                            Task { await session.decide(approvalId: card.id, decision: .allowSession) }
+                                        }
+                                        .accessibilityIdentifier("conversation.approval.\(card.id).allowSession")
                                     }
                                 }
-                                // 危险决策与安全决策视觉不共位：独立一行 + 上方留白（design-system.md 原则 2）。
-                                HStack(spacing: PISpacing.s8) {
-                                    PIDangerOutlineButton(title: "拒绝", isEnabled: !(session.isBusy || !connection.state.isOnline)) {
-                                        Task { await session.decide(approvalId: card.id, decision: .deny) }
-                                    }
+                                Divider().padding(.top, PISpacing.s4)
+                                PIDangerOutlineButton(title: "拒绝", isEnabled: canDecide) {
+                                    Task { await session.decide(approvalId: card.id, decision: .deny) }
                                 }
-                                .padding(.top, PISpacing.s4)
+                                .accessibilityIdentifier("conversation.approval.\(card.id).deny")
                             }
                         }
                     } else {
-                        Text("卡片已失效，等待同步后重试。")
+                        Text("已失效，同步后重试")
                             .font(PIFont.caption)
-                            .foregroundStyle(PIColor.text3)
+                            .foregroundStyle(PIColor.text2)
+                    }
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("conversation.approval.\(card.id)")
+            .sheet(item: $approvalFullInput) { item in
+                NavigationStack {
+                    ScrollView {
+                        Text(item.text)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(PISpacing.s16)
+                            .accessibilityIdentifier("conversation.approval.fullInput")
+                    }
+                    .navigationTitle(item.title)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("完成") { approvalFullInput = nil }
+                        }
                     }
                 }
             }
@@ -1061,11 +1649,12 @@ struct ConversationScreen: View {
             if session.availability(for: expiredId) == .expired {
                 PICard {
                     HStack {
-                        Text("审批 \(expiredId) 已失效")
+                        Text("审批已失效")
                             .font(PIFont.caption)
-                            .foregroundStyle(PIColor.text3)
+                            .foregroundStyle(PIColor.text2)
                         Spacer()
                     }
+                    .accessibilityIdentifier("conversation.approval.\(expiredId).expired")
                 }
             }
         }
@@ -1095,7 +1684,7 @@ struct ConversationScreen: View {
         if !lines.isEmpty { return lines.joined(separator: "\n\n") }
         if let text = card.payload.value(at: ["summary"])?.stringValue { return text }
         if let text = card.payload.value(at: ["detail"])?.stringValue { return text }
-        return "服务器没有给出可显示的摘要（id \(card.id)）"
+        return "服务器没有给出摘要"
     }
 
     // MARK: - 提问（AC-11）
@@ -1106,26 +1695,23 @@ struct ConversationScreen: View {
             let questions = InputQuestionParser.questions(from: card)
             let draftKey = answerDraftKey(card.id)
             PICard {
-                VStack(alignment: .leading, spacing: PISpacing.s8) {
+                VStack(alignment: .leading, spacing: PISpacing.s12) {
                     Text("需要你回答")
                         .font(PIFont.captionStrong)
                         .foregroundStyle(PIColor.text2)
+                        .accessibilityIdentifier("conversation.input.\(card.id).title")
                     if questions.isEmpty {
-                        Text("无法解析该提问，只能跳过。")
+                        Text("没有选项，提交会跳过")
                             .font(PIFont.caption)
-                            .foregroundStyle(PIColor.text3)
+                            .foregroundStyle(PIColor.text2)
                     }
                     ForEach(questions) { question in
-                        VStack(alignment: .leading, spacing: PISpacing.s4) {
+                        VStack(alignment: .leading, spacing: PISpacing.s8) {
                             Text(question.prompt)
                                 .font(PIFont.body)
                                 .foregroundStyle(PIColor.text)
                                 .fixedSize(horizontal: false, vertical: true)
-                            if question.options.isEmpty {
-                                Text("没有选项，提交将跳过。")
-                                    .font(PIFont.meta)
-                                    .foregroundStyle(PIColor.text3)
-                            } else {
+                            if !question.options.isEmpty {
                                 VStack(alignment: .leading, spacing: PISpacing.s8) {
                                     ForEach(question.options, id: \.self) { option in
                                         PISelectableChip(
@@ -1168,6 +1754,7 @@ struct ConversationScreen: View {
                                 if outcome.clearsDraft { selections[draftKey] = nil }
                             }
                         }
+                        .accessibilityIdentifier("conversation.input.\(card.id).submit")
                         PIApprovalSecondaryButton(
                             title: "全部跳过",
                             isEnabled: !session.isBusy && connection.state.isOnline
@@ -1181,6 +1768,7 @@ struct ConversationScreen: View {
                                 if outcome.clearsDraft { selections[draftKey] = nil }
                             }
                         }
+                        .accessibilityIdentifier("conversation.input.\(card.id).skip")
                     }
                 }
             }
@@ -1219,40 +1807,39 @@ struct ConversationScreen: View {
     private var queueSection: some View {
         if !session.queuedTurns.isEmpty {
             VStack(alignment: .leading, spacing: PISpacing.s8) {
-                PISectionHeader(text: "排队中（\(session.queuedTurns.count)）")
+                // 总数由常驻状态条表达，这里只标识待发送内容，不重复计数。
+                PISectionHeader(text: "待发送")
                     .accessibilityIdentifier("conversation.queueHeader")
                 ForEach(session.queuedTurns) { turn in
                     PICard {
                         HStack(spacing: PISpacing.s8) {
-                            VStack(alignment: .leading, spacing: PISpacing.s4) {
-                                // 优先显示正文；服务端快照缺正文时显示附件数/排队提示，不显示裸 id。
-                                Text(turn.displayText)
-                                    .font(PIFont.body)
-                                    .foregroundStyle(PIColor.text)
-                                    .lineLimit(2)
-                                    .accessibilityIdentifier("conversation.queuedTurnText.\(turn.id)")
-                                Text("当前 turn 结束后自动开始")
-                                    .font(PIFont.meta)
-                                    .foregroundStyle(PIColor.text3)
-                            }
-                            Spacer()
+                            // 优先显示正文；服务端快照缺正文时显示附件数/排队提示，不显示裸 id。
+                            Text(turn.displayText)
+                                .font(PIFont.body)
+                                .foregroundStyle(PIColor.text)
+                                .lineLimit(2)
+                                .accessibilityIdentifier("conversation.queuedTurnText.\(turn.id)")
+                            Spacer(minLength: PISpacing.s8)
+                            // 取消是危险动作：danger 文字，不加装饰底色；热区补足 44pt。
                             Button(role: .destructive) {
                                 Task { await session.cancelQueued(turnId: turn.id) }
                             } label: {
                                 Text("取消")
                                     .font(PIFont.captionStrong)
-                                    .padding(.horizontal, PISpacing.s12)
-                                    .padding(.vertical, 6)
-                                    .background(PIColor.dangerSoft, in: Capsule())
+                                    .foregroundStyle(PIColor.danger)
+                                    .frame(minWidth: PIMetrics.minHitTarget, minHeight: PIMetrics.minHitTarget)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(PIPressableButtonStyle())
                             .disabled(session.isBusy || !connection.state.isOnline)
                             .accessibilityIdentifier("conversation.cancelQueued.\(turn.id)")
                         }
                     }
+                    .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("conversation.queuedTurn.\(turn.id)")
                 }
             }
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("conversation.queueSection")
         }
     }
@@ -1266,10 +1853,11 @@ struct ConversationScreen: View {
         let allowsAttachments = session.sendAdmission.isAllowed
         return VStack(alignment: .leading, spacing: PISpacing.s8) {
             composerConfigurationChips
-            if !session.isOnline {
-                Text("离线：发送已禁用")
+            if isReadingPhotos {
+                ProgressView("正在处理图片 \(photoReadCompletedCount)/\(photoReadTotalCount)",
+                             value: Double(photoReadCompletedCount), total: Double(max(1, photoReadTotalCount)))
                     .font(PIFont.meta)
-                    .foregroundStyle(PIColor.warning)
+                    .accessibilityIdentifier("composer.photoReadProgress")
             }
             if let notice = photoReadFailureNotice {
                 HStack(alignment: .top, spacing: PISpacing.s8) {
@@ -1316,6 +1904,8 @@ struct ConversationScreen: View {
                                     Image(systemName: "xmark.circle.fill")
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityLabel("移除附件")
+                                .accessibilityIdentifier("composer.removeAttachment.\(attachment.id)")
                             }
                             .font(PIFont.meta)
                             .padding(.horizontal, PISpacing.s8)
@@ -1336,6 +1926,7 @@ struct ConversationScreen: View {
                         .foregroundStyle(allowsAttachments ? PIColor.text : PIColor.text3)
                         .frame(width: 36, height: 36)
                         .background(PIColor.surface3, in: Circle())
+                        .frame(width: PIMetrics.minHitTarget, height: PIMetrics.minHitTarget)
                         .contentShape(Circle())
                 }
                 .disabled(!session.sendAdmission.isAllowed || session.attachedSessionId == nil)
@@ -1349,6 +1940,9 @@ struct ConversationScreen: View {
                     photoReadFailureCount = 0
                     photoReadSucceededCount = 0
                     photoReadAcknowledged = false
+                    isReadingPhotos = true
+                    photoReadCompletedCount = 0
+                    photoReadTotalCount = items.count
                     Task {
                         var failed = 0
                         var succeeded = 0
@@ -1356,6 +1950,9 @@ struct ConversationScreen: View {
                             guard session.attachmentSelectionGeneration == selection,
                                   photoSelectionID == photoSelection else { break }
                             // U16：读取失败不再静默跳过；计数后在输入栏上方明确呈现，
+                            defer {
+                                if photoSelectionID == photoSelection { photoReadCompletedCount += 1 }
+                            }
                             // 部分失败必须确认后才能发送已读取的子集。
                             let data: Data
                             do {
@@ -1368,17 +1965,25 @@ struct ConversationScreen: View {
                                 failed += 1
                                 continue
                             }
-                            succeeded += 1
-                            let mime = imageMimeType(data)
+                            guard let mime = imageMimeType(data) else {
+                                // 不支持解码的格式（例如 HEIC）不能直接标成 JPEG。
+                                failed += 1
+                                continue
+                            }
                             let ext = mime == "image/png" ? "png" : (mime == "image/webp" ? "webp" : "jpg")
-                            await session.addImage(
+                            let added = await session.addImage(
                                 data: data,
                                 mimeType: mime,
                                 fileName: "photo-\(UUID().uuidString).\(ext)"
                             )
+                            if added { succeeded += 1 } else { failed += 1 }
                         }
                         guard session.attachmentSelectionGeneration == selection,
-                              photoSelectionID == photoSelection else { return }
+                              photoSelectionID == photoSelection else {
+                            if photoSelectionID == photoSelection { isReadingPhotos = false }
+                            return
+                        }
+                        isReadingPhotos = false
                         photoReadFailureCount = failed
                         photoReadSucceededCount = succeeded
                         photoReadAcknowledged = false
@@ -1409,38 +2014,63 @@ struct ConversationScreen: View {
                     if showsAbortButton {
                         Task { await session.interrupt() }
                     } else {
+                        guard !isSubmitting, let intent = session.makeSendIntent() else { return }
+                        let submission = UUID()
+                        submissionID = submission
                         scrollToBottomRequest &+= 1
                         // U11：点击瞬间冻结发送意图；模型可用性检查可能等待网络，
                         // 期间切换会话/模型或继续编辑都由 send(expected:) 拒绝，不会误发。
-                        let intent = session.makeSendIntent()
                         let instruction = session.trimmedDraft
                         let isFirstInstruction = session.view.items.isEmpty
+                        // Freeze the title target at click time. Reading it after the
+                        // send await could generate a title for a newly switched session.
+                        let titleSessionID = session.attachedSessionId
+                        let titleHostID = model.currentHost?.id
+                        let titleGeneration = connection.currentConnectionGeneration
                         Task {
-                            let check = await refreshModelAvailability()
+                            defer {
+                                if submissionID == submission { submissionID = nil }
+                            }
+                            let check = await refreshModelAvailability(reuseRecent: true)
                             guard check != .superseded else { return }
                             await session.send(expected: intent)
+                            if submissionID == submission { submissionID = nil }
                             // 新建会话不再预填标题：首条指令成功发出后由 AI 生成。
-                            if isFirstInstruction, session.trimmedDraft.isEmpty {
-                                await generateTitleIfNeeded(instruction: instruction)
+                            if isFirstInstruction, session.trimmedDraft.isEmpty,
+                               let titleSessionID, let titleHostID {
+                                await generateTitleIfNeeded(
+                                    instruction: instruction,
+                                    hostID: titleHostID,
+                                    sessionID: titleSessionID,
+                                    connectionGeneration: titleGeneration
+                                )
                             }
                         }
                     }
                 } label: {
-                    Image(systemName: showsAbortButton ? "stop.fill" : "arrow.up")
-                        .font(.system(size: 15, weight: .bold))
+                    Group {
+                        if isSubmitting {
+                            ProgressView().tint(PIColor.onAccent)
+                        } else {
+                            Image(systemName: showsAbortButton ? "stop.fill" : "arrow.up")
+                                .font(.system(size: 15, weight: .bold))
+                        }
+                    }
                         .foregroundStyle(sendButtonEnabled ? PIColor.onAccent : PIColor.text3)
                         .frame(width: 36, height: 36)
                         .background(
-                            sendButtonEnabled
+                            (sendButtonEnabled || isSubmitting)
                                 ? (showsAbortButton ? PIColor.danger : PIColor.accent)
                                 : PIColor.surface3,
                             in: Circle()
                         )
+                        .frame(width: PIMetrics.minHitTarget, height: PIMetrics.minHitTarget)
                         .contentShape(Circle())
                 }
                 .disabled(!sendButtonEnabled)
+                .keyboardShortcut(.return, modifiers: .command)
                 .accessibilityIdentifier(showsAbortButton ? "conversation.interrupt" : "conversation.send")
-                .accessibilityLabel(showsAbortButton ? "中止" : "发送")
+                .accessibilityLabel(isSubmitting ? "正在提交" : (showsAbortButton ? "中止" : "发送"))
             }
             .padding(.leading, 6)
             .padding(.trailing, 6)
@@ -1453,7 +2083,7 @@ struct ConversationScreen: View {
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .strokeBorder(PIColor.separatorStrong, lineWidth: PIMetrics.hairline)
             )
-            .shadow(color: PIColor.floatingShadow.opacity(0.5), radius: 14, y: 5)
+            .shadow(color: PIColor.floatingShadow, radius: 14, y: 5)
         }
         .padding(.horizontal, PIMetrics.pageMargin)
         .padding(.vertical, PISpacing.s8)
@@ -1465,15 +2095,22 @@ struct ConversationScreen: View {
         }
     }
 
-    private func imageMimeType(_ data: Data) -> String {
-        if data.starts(with: [0x89, 0x50, 0x4E, 0x47]) { return "image/png" }
-        if data.starts(with: [0x52, 0x49, 0x46, 0x46]) { return "image/webp" }
-        return "image/jpeg"
+    /// 用 ImageIO 判定真实格式，不能按扩展名或「非 PNG 即 JPEG」猜测。
+    /// 只接受上传协议支持的 JPEG/PNG/WebP；HEIC 等返回 nil 由调用方明确拒绝。
+    private func imageMimeType(_ data: Data) -> String? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let type = CGImageSourceGetType(source) as String? else { return nil }
+        switch type {
+        case "public.jpeg", "public.jpeg-2000": return "image/jpeg"
+        case "public.png": return "image/png"
+        case "org.webmproject.webp": return "image/webp"
+        default: return nil
+        }
     }
 
     /// 发送按钮可用性：附件部分读取失败且未确认时禁止发送（U16）。
     private var canTapSend: Bool {
-        session.canSend && !session.isBusy && !photoReadNeedsConfirmation
+        session.canSend && !session.isBusy && !isSubmitting && !isReadingPhotos && !photoReadNeedsConfirmation
     }
 
     /// 输入框为空且会话有任务正在执行时，发送按钮切换成中止按钮；
@@ -1485,16 +2122,16 @@ struct ConversationScreen: View {
     }
 
     private var sendButtonEnabled: Bool {
-        showsAbortButton
+        !isSubmitting && (showsAbortButton
             ? session.canInterrupt && !session.isBusy
-            : canTapSend
+            : canTapSend)
     }
 
     /// 最近一次选图的读取失败提示；`nil` 表示没有失败。
     private var photoReadFailureNotice: String? {
         guard photoReadFailureCount > 0 else { return nil }
         if photoReadSucceededCount > 0 {
-            return "部分图片读取失败（\(photoReadFailureCount) 张），当前只包含已读取的 \(photoReadSucceededCount) 张。确认后才能发送。"
+            return "\(photoReadFailureCount) 张图片读取失败，已读取 \(photoReadSucceededCount) 张"
         }
         return "全部图片读取失败（\(photoReadFailureCount) 张），请重新选择图片。"
     }
@@ -1504,13 +2141,26 @@ struct ConversationScreen: View {
         photoReadFailureCount > 0 && photoReadSucceededCount > 0 && !photoReadAcknowledged
     }
 
+    /// 保留异常时直接打开会话模型配置的入口；无绑定文案只改成中性名称，不复述错误。
+    private var composerModelLabel: String {
+        if selectedModelLabel == "模型未绑定" {
+            switch session.modelAvailability {
+            case .unavailable, .unknown:
+                return "会话模型"
+            default:
+                break
+            }
+        }
+        return selectedModelLabel
+    }
+
     private var composerConfigurationChips: some View {
         HStack(spacing: PISpacing.s8) {
             // 会话模式 / 权限模式不再压在输入框上方：它们仍可在「会话操作 →
             // 会话配置」里查看与切换，输入区只保留与本次发送直接相关的模型信息。
             Spacer(minLength: PISpacing.s4)
             configurationChip(
-                title: selectedModelLabel,
+                title: composerModelLabel,
                 tint: PIColor.text2,
                 identifier: "composer.modelChip",
                 systemImage: "cpu",
@@ -1548,8 +2198,9 @@ struct ConversationScreen: View {
                         .accessibilityHidden(true)
                 }
                 Text(title)
-                    .lineLimit(1)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 0 : 1)
                     .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: dynamicTypeSize.isAccessibilitySize)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(PIColor.text3)
@@ -1559,8 +2210,7 @@ struct ConversationScreen: View {
             .padding(.horizontal, PISpacing.s8)
             .frame(minHeight: 30)
             .frame(maxWidth: maxWidth, alignment: alignment)
-            .background(PIColor.surface2, in: Capsule())
-            .overlay(Capsule().strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline))
+            // 输入区已有唯一外框，模型入口作为轻量文本控件，不再叠第二层胶囊描边。
             // 视觉 30pt 高，热区补足到 44pt（spec AC-7）。
             .padding(.vertical, (PIMetrics.minHitTarget - 30) / 2)
             .contentShape(Capsule())
@@ -1606,9 +2256,15 @@ struct ConversationScreen: View {
     ///
     /// 已经是用户命名 / 已生成过标题的会话不会再调用；旧版 PI-adaptor 没有
     /// `session/suggest-title` 时会退回指令首行，避免会话一直叫「New session」。
-    private func generateTitleIfNeeded(instruction: String) async {
-        guard let sessionID = session.attachedSessionId,
-              let hostID = model.currentHost?.id
+    private func generateTitleIfNeeded(
+        instruction: String,
+        hostID: UUID,
+        sessionID: String,
+        connectionGeneration: Int
+    ) async {
+        guard model.currentHost?.id == hostID,
+              session.attachedSessionId == sessionID,
+              connection.currentConnectionGeneration == connectionGeneration
         else { return }
         let current = model.sessionDisplayTitle(
             hostID: hostID,
@@ -1641,6 +2297,18 @@ struct ConversationScreen: View {
         }
         let cleaned = sanitizedTitle(title) ?? localFallbackTitle(instruction)
         guard !cleaned.isEmpty else { return }
+        // The user may have renamed the session or switched away while the
+        // suggestion was in flight; never overwrite a manual title.
+        guard model.currentHost?.id == hostID,
+              session.attachedSessionId == sessionID,
+              connection.currentConnectionGeneration == connectionGeneration
+        else { return }
+        let latest = model.sessionDisplayTitle(
+            hostID: hostID,
+            sessionID: sessionID,
+            fallback: session.attachedSummary?.title ?? ""
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard latest.isEmpty || latest == "New session" || latest == "新会话" else { return }
         guard model.renameSession(hostID: hostID, sessionID: sessionID, title: cleaned) else { return }
         // 本机标题先生效；服务器写入失败不回滚本机名称，下次打开仍能看到。
         try? await connection.renameSession(sessionId: sessionID, title: cleaned)
@@ -1662,10 +2330,51 @@ struct ConversationScreen: View {
         return collapsed.count <= 24 ? collapsed : String(collapsed.prefix(24)) + "…"
     }
 
+    // MARK: - 恢复路径（模型不可用）
+
+    /// 模型不可用的唯一恢复出口：直达「模型服务」子页（不是设置根页）。
+    ///
+    /// 上一轮删掉「重新检查」时的理由是「打开模型配置就会重新检查」——那是错的：
+    /// 检查只在会话 ID / 模型绑定变化时触发，于是模型服务恢复后横幅会一直挂着，
+    /// 而唯一的动作只是把用户丢到设置根页，让他自己再找一次。
+    /// 现在点一下就落到 `SettingsRoute.models`，修完回到会话页会自动重查。
+    ///
+    /// 横幅挂在会话页本身、不在浮层里，所以这里**不**调用 `dismiss()`——那会把会话页
+    /// 自己关掉。浮层里的同一入口（会话配置的「模型服务」行）由浮层自己先 `dismiss()`。
+    /// 兜底：若配置浮层正开着，先关掉再切根，避免设置页被压在半屏浮层底下。
+    private func openModelServices() {
+        if showingConfig { showingConfig = false }
+        model.showSettings(.models)
+    }
+
+    /// 恢复路径的有界重查：只在「明确不可用 / 状态未知」时补一次。
+    ///
+    /// 排除两种状态，避免把一次廉价检查变成服务器压力：
+    /// - `.available`：已有可信结论。否则每次开关配置浮层、每次回到会话页都会打一次服务器，
+    ///   还会闪一次「正在检查模型可用性」。
+    /// - `.checking`：上一次检查还没回来。叠第二次会 `modelAvailabilityGeneration` 自增，
+    ///   让先发起的那次返回 `superseded`——并发两次互相覆盖，结论反而更不可信。
+    ///
+    /// 触发点只有两个：配置浮层关闭、会话页重新出现。没有定时器，也不挂在其它 UI 事件上。
+    private func recheckModelAvailabilityIfNeeded() {
+        switch session.modelAvailability {
+        case .unavailable, .unknown:
+            Task { await refreshModelAvailability() }
+        case .available, .checking:
+            return
+        }
+    }
+
+    private var modelAvailabilityContextKey: String {
+        "\(connection.currentConnectionGeneration):\(session.attachedSessionId ?? ""):\(session.selectedBindingKey):\(session.openingSessionID ?? "")"
+    }
+
     /// 检查当前会话模型的可用性，并返回显式结果（U11）：`superseded` 表示检查期间
     /// 会话/服务器/模型绑定已经被更新的检查取代，发送方必须放弃这次点击而不是继续发送。
     @discardableResult
-    private func refreshModelAvailability() async -> ModelAvailabilityCheckResult {
+    private func refreshModelAvailability(reuseRecent: Bool = false) async -> ModelAvailabilityCheckResult {
+        guard !Task.isCancelled, session.openingSessionID == nil else { return .superseded }
+        if reuseRecent, session.hasRecentModelAvailability() { return .available }
         guard connection.state.isOnline,
               let sessionID = session.attachedSessionId,
               let host = model.currentHost
@@ -1677,18 +2386,15 @@ struct ConversationScreen: View {
         modelAvailabilityGeneration &+= 1
         let generation = modelAvailabilityGeneration
         let bindingKey = session.selectedBindingKey
-        isCheckingModelAvailability = true
+        let connectionGeneration = connection.currentConnectionGeneration
         session.markModelAvailabilityChecking()
-        defer {
-            if generation == modelAvailabilityGeneration {
-                isCheckingModelAvailability = false
-            }
-        }
         do {
             // Prefer the v2 PI-adaptor's own provider store; fall back to the legacy
             // SSH-based binding probe for old v1 Hosts.
             let status = try await connection.adaptorV2BindingStatus(sessionId: sessionID)
             guard generation == modelAvailabilityGeneration,
+                  !Task.isCancelled, session.openingSessionID == nil,
+                  connection.currentConnectionGeneration == connectionGeneration,
                   model.currentHost?.id == host.id,
                   session.attachedSessionId == sessionID,
                   session.selectedBindingKey == bindingKey
@@ -1710,6 +2416,10 @@ struct ConversationScreen: View {
                     pinnedModelId: status.pinnedModelId,
                     host: host
                 )
+                guard !Task.isCancelled, generation == modelAvailabilityGeneration,
+                      connection.currentConnectionGeneration == connectionGeneration,
+                      model.currentHost?.id == host.id, session.attachedSessionId == sessionID,
+                      session.openingSessionID == nil else { return .superseded }
                 if healed {
                     session.markModelAvailabilityChecking()
                     return .skipped(reason: "已触发模型重新绑定，正在重新检查可用性")
@@ -1722,6 +2432,9 @@ struct ConversationScreen: View {
                 return Self.availabilityCheckResult(session.modelAvailability)
             }
         } catch {
+            guard !Task.isCancelled, generation == modelAvailabilityGeneration,
+                  connection.currentConnectionGeneration == connectionGeneration,
+                  session.openingSessionID == nil else { return .superseded }
             legacyOnlyProviderIDs = []
             do {
                 let receipt = try await connection.providerBindingStatus(
@@ -1729,6 +2442,8 @@ struct ConversationScreen: View {
                     sessionId: sessionID
                 )
                 guard generation == modelAvailabilityGeneration,
+                      !Task.isCancelled, session.openingSessionID == nil,
+                      connection.currentConnectionGeneration == connectionGeneration,
                       model.currentHost?.id == host.id,
                       session.attachedSessionId == sessionID,
                       session.selectedBindingKey == bindingKey
@@ -1747,6 +2462,8 @@ struct ConversationScreen: View {
                 }
             } catch {
                 guard generation == modelAvailabilityGeneration,
+                      !Task.isCancelled, session.openingSessionID == nil,
+                      connection.currentConnectionGeneration == connectionGeneration,
                       model.currentHost?.id == host.id,
                       session.attachedSessionId == sessionID,
                       session.selectedBindingKey == bindingKey
@@ -1786,8 +2503,8 @@ struct ConversationScreen: View {
               let providerId = status.pinnedProviderId,
               legacyOnly.contains(providerId)
         else { return nil }
-        return "该模型服务只导入到了服务器的旧存储，尚未同步到 PI-adaptor，因此无法驱动会话。"
-            + "请到 设置 → 模型服务 重新导入这个服务（导入会一并写入 PI-adaptor 并保存密钥）。"
+        return "这个模型服务只在服务器的旧存储里，未同步到 PI-adaptor。"
+            + "到 设置 → 模型服务 重新导入即可。"
     }
 
     /// Best-effort self-heal for the two-store split (§7): when a session is
@@ -1833,6 +2550,20 @@ struct ConversationScreen: View {
             legacyProviderId: pinnedProviderId,
             hostV2Mirror: true
         ) else { return false }
+        // 镜像后会话绑定的是新的 v2 provider id；Keychain 里的明文仍挂在 legacy id
+        // 下。发送路径按会话里的 provider id 取 key，这里不同步写一份就会得到
+        // PROVIDER_SECRET_MISSING——provider 已上传服务器、key 却没有同步。
+        if !KeychainStore.saveProviderKey(key, hostID: host.id, providerId: mirrored.id) {
+            PILog.warn(
+                "Model",
+                "provider 镜像后本机密钥写入失败 provider=\(String(mirrored.id.prefix(8)))"
+            )
+        } else {
+            PILog.info(
+                "Model",
+                "provider 镜像完成 provider=\(String(mirrored.id.prefix(8))) legacy=\(String(pinnedProviderId.prefix(8))) key=synced"
+            )
+        }
         await session.configure(providerId: mirrored.id, modelId: pinnedModelId)
         return true
     }
@@ -1877,6 +2608,38 @@ private struct ConversationItemFrameKey: PreferenceKey {
     }
 }
 
+/// Explicit copy action kept separate from selectable text so long press always
+/// belongs to the system selection gesture. Empty bodies intentionally copy "".
+private func copyMessageButton(_ item: RACPItem) -> some View {
+    copyMessageButton(
+        text: item.text ?? "",
+        identifier: "conversation.copyMessage.\(item.id)"
+    )
+}
+
+private func copyMessageButton(_ entry: OfflineSessionCacheEntry) -> some View {
+    copyMessageButton(
+        text: entry.text,
+        identifier: "conversation.offlineCopyMessage.\(entry.id)"
+    )
+}
+
+private func copyMessageButton(text: String, identifier: String) -> some View {
+    Button {
+        UIPasteboard.general.string = text
+    } label: {
+        Label("复制消息", systemImage: "doc.on.doc")
+            .labelStyle(.iconOnly)
+    }
+    .buttonStyle(.borderless)
+    .font(PIFont.caption)
+    .foregroundStyle(PIColor.text2)
+    .frame(width: 32, height: 32)
+    .contentShape(Rectangle())
+    .accessibilityLabel("复制消息")
+    .accessibilityIdentifier(identifier)
+}
+
 private struct ToolItemCard: View {
     enum Style {
         /// 线程里单独出现的一条工具调用。
@@ -1887,6 +2650,7 @@ private struct ToolItemCard: View {
 
     let item: RACPItem
     var style: Style = .standalone
+    var showsStatus: Bool = true
     private let presentation: ToolResultPresentation
     @State private var expanded = false
     @State private var renderStartedAt: TimeInterval?
@@ -1898,9 +2662,10 @@ private struct ToolItemCard: View {
     private static let inlineBodyByteLimit = 1_200
     private static let maxBodyHeight: CGFloat = 280
 
-    init(item: RACPItem, style: Style = .standalone) {
+    init(item: RACPItem, style: Style = .standalone, showsStatus: Bool = true) {
         self.item = item
         self.style = style
+        self.showsStatus = showsStatus
         presentation = ToolResultPresentation(text: item.text ?? "")
 #if DEBUG
         measuresRender = ProcessInfo.processInfo.environment["PI_IOS_MEASURE_TOOL_RENDER"] == "1"
@@ -1914,11 +2679,15 @@ private struct ToolItemCard: View {
             ToolRowHeader(
                 icon: ToolVisuals.icon(for: item.status),
                 iconTint: ToolVisuals.iconTint(for: item.status),
-                title: item.toolName.map { "工具 · \($0)" } ?? "工具调用",
-                statusText: ToolStatusPresentation.label(for: item.status),
+                title: toolTitle,
+                statusText: showsStatus
+                    ? (ToolStatusPresentation.label(for: item.status) ?? "状态未知")
+                    : nil,
                 statusTint: ToolVisuals.statusTint(for: item.status),
                 summary: collapsedSummary,
-                isExpanded: expanded
+                isExpanded: expanded,
+                titleIdentifier: "toolCard.\(item.id).title",
+                statusIdentifier: showsStatus ? "toolCard.\(item.id).status" : nil
             )
             .contentShape(Rectangle())
             .onTapGesture { toggleExpansion() }
@@ -1943,21 +2712,30 @@ private struct ToolItemCard: View {
                         if let notice = presentation.truncationNotice {
                             Text(notice)
                                 .font(PIFont.meta)
-                                .foregroundStyle(PIColor.text3)
+                                .foregroundStyle(PIColor.text2)
                                 .accessibilityIdentifier("toolCard.\(item.id).truncation")
                         }
-                    } else {
+                    }
+                    // 结束但没有正文：折叠行已经写了「无输出」，展开区不再复述（R9）。
+                    if let emptyBodyNotice {
                         Text(emptyBodyNotice)
                             .font(PIFont.caption)
-                            .foregroundStyle(PIColor.text3)
+                            .foregroundStyle(PIColor.text2)
+                            .accessibilityIdentifier("toolCard.\(item.id).emptyBody")
+                    }
+                    HStack {
+                        Spacer()
+                        copyMessageButton(item)
                     }
                 }
                 .padding(.top, PISpacing.s4)
                 .padding(.bottom, PISpacing.s8)
                 .transition(.opacity)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("toolCard.\(item.id).body")
             }
         }
-        .padding(.horizontal, PISpacing.s12)
+        .padding(.horizontal, style == .nested ? 0 : PISpacing.s12)
         .background(cardBackground)
         .overlay(cardBorder)
         .animation(.easeInOut(duration: 0.22), value: expanded)
@@ -1999,8 +2777,8 @@ private struct ToolItemCard: View {
             RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
                 .fill(PIColor.surface)
         case .nested:
-            RoundedRectangle(cornerRadius: PISpacing.s8, style: .continuous)
-                .fill(PIColor.surface2)
+            // 外层 ToolRunCard 已提供唯一表面与边界，内部行只保留内容。
+            Color.clear
         }
     }
 
@@ -2043,13 +2821,20 @@ private struct ToolItemCard: View {
         )
     }
 
-    /// 运行中的工具只是还没有正文。把「还没输出」说成「服务器没有返回工具输出正文」
-    /// 会让用户以为工具已经结束、结果丢了。
-    private var emptyBodyNotice: String {
+    /// 工具名就是标题：图标已经说明这是工具调用，不再加「工具 · 」前缀。
+    private var toolTitle: String {
+        let name = item.toolName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? "工具调用" : name
+    }
+
+    /// 运行中的工具只是还没有正文；把「还没输出」说成「没有返回正文」会让用户
+    /// 以为工具已经结束、结果丢了。结束且真的没有正文时，折叠行已经说了「无输出」，
+    /// 这里不再复述。
+    private var emptyBodyNotice: String? {
         if item.status == nil || ToolStatusPresentation.isRunning(item.status) {
-            return "工具执行中…"
+            return "执行中"
         }
-        return "服务器没有返回工具输出正文。"
+        return nil
     }
 }
 
@@ -2066,11 +2851,14 @@ private struct ToolRunCard: View {
                 iconTint: group.hasFailure ? PIColor.danger : PIColor.text2,
                 title: group.title,
                 statusText: group.statusSummary,
+                // 运行中不是强调色场景：accent 只用于可交互（quiet-v2 §2）。
                 statusTint: group.hasFailure
                     ? PIColor.danger
-                    : (group.isRunning ? PIColor.accent : PIColor.success),
+                    : (group.isRunning ? PIColor.text2 : PIColor.success),
                 summary: group.toolSummary,
-                isExpanded: expanded
+                isExpanded: expanded,
+                titleIdentifier: "toolGroup.\(group.items.first?.id ?? group.id).title",
+                statusIdentifier: "toolGroup.\(group.items.first?.id ?? group.id).status"
             )
             .contentShape(Rectangle())
             .onTapGesture {
@@ -2084,16 +2872,22 @@ private struct ToolRunCard: View {
             .accessibilityAddTraits(.isButton)
 
             if expanded {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(group.items, id: \.id) { item in
+                VStack(alignment: .leading, spacing: 0) {
+                    PIRowDivider(leadingInset: 0)
+                        .padding(.top, PISpacing.s4)
+                    ForEach(Array(group.items.enumerated()), id: \.element.id) { index, item in
+                        if index > 0 { PIRowDivider(leadingInset: 0) }
                         if item.isToolItem {
-                            ToolItemCard(item: item, style: .nested)
+                            ToolItemCard(
+                                item: item,
+                                style: .nested,
+                                showsStatus: !allItemsCompleted
+                            )
                         } else {
                             ToolRunMessage(item: item)
                         }
                     }
                 }
-                .padding(.top, PISpacing.s4)
                 .padding(.bottom, PISpacing.s8)
                 .transition(.opacity)
             }
@@ -2109,6 +2903,12 @@ private struct ToolRunCard: View {
         )
         .animation(.easeInOut(duration: 0.22), value: expanded)
     }
+
+    /// 只有整组完成时才省略子行重复状态；混合组继续显示每一项的真实状态。
+    private var allItemsCompleted: Bool {
+        !group.toolItems.isEmpty
+            && group.toolItems.allSatisfy { ToolStatusPresentation.isCompleted($0.status) }
+    }
 }
 
 /// 分组内的中间过程消息：工具调用之间的过渡说明，展开分组后按正文样式展示。
@@ -2116,16 +2916,21 @@ private struct ToolRunMessage: View {
     let item: RACPItem
 
     var body: some View {
-        PIMarkdownView(text: item.text ?? item.kind ?? "条目")
-            .padding(.horizontal, PISpacing.s8)
-            .padding(.vertical, PISpacing.s4)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityIdentifier("toolGroup.message.\(item.id)")
+        HStack(alignment: .top, spacing: PISpacing.s8) {
+            PIMarkdownView(text: item.text ?? item.kind ?? "条目")
+                .padding(.horizontal, PISpacing.s8)
+                .padding(.vertical, PISpacing.s4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("toolGroup.message.\(item.id)")
+            copyMessageButton(item)
+        }
     }
 }
 
 /// 工具行标题：工具名/数量、状态、结果摘要各占清晰层级，整体保持两行以内的紧凑高度。
 private struct ToolRowHeader: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     let icon: String
     let iconTint: Color
     let title: String
@@ -2133,47 +2938,77 @@ private struct ToolRowHeader: View {
     let statusTint: Color
     let summary: String?
     let isExpanded: Bool
+    var titleIdentifier: String? = nil
+    var statusIdentifier: String? = nil
 
     var body: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: PISpacing.s4) {
+                HStack(spacing: PISpacing.s8) {
+                    leadingContent
+                    Spacer(minLength: PISpacing.s4)
+                    chevron
+                }
+                summaryContent
+                    .padding(.leading, 28)
+            }
+            .frame(minHeight: PIMetrics.minHitTarget, alignment: .leading)
+        } else {
+            HStack(spacing: PISpacing.s8) {
+                leadingContent
+                summaryContent
+                chevron
+            }
+            .frame(minHeight: PIMetrics.minHitTarget)
+        }
+    }
+
+    private var leadingContent: some View {
         HStack(spacing: PISpacing.s8) {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(iconTint)
-                .frame(width: 24, height: 24)
-                .background(iconTint.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .frame(width: 20)
                 .accessibilityHidden(true)
             Text(title)
                 .font(PIFont.captionStrong)
                 .foregroundStyle(PIColor.text)
-                .lineLimit(1)
+                .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+                .fixedSize(horizontal: false, vertical: dynamicTypeSize.isAccessibilitySize)
                 .layoutPriority(2)
+                .piOptionalIdentifier(titleIdentifier)
             if let statusText, !statusText.isEmpty {
                 Text(statusText)
                     .font(PIFont.metaSmall.weight(.semibold))
                     .foregroundStyle(statusTint)
                     .lineLimit(1)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1)
-                    .background(statusTint.opacity(0.12), in: Capsule())
                     .layoutPriority(1)
+                    .piOptionalIdentifier(statusIdentifier)
             }
-            if let summary, !summary.isEmpty {
-                Text(summary)
-                    .font(PIFont.metaSmall)
-                    .foregroundStyle(PIColor.text3)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                Spacer(minLength: 0)
-            }
-            Image(systemName: "chevron.right")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(PIColor.text3)
-                .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                .accessibilityHidden(true)
         }
-        .frame(minHeight: PIMetrics.minHitTarget)
+    }
+
+    @ViewBuilder
+    private var summaryContent: some View {
+        if let summary, !summary.isEmpty {
+            Text(summary)
+                .font(PIFont.metaSmall)
+                .foregroundStyle(PIColor.text2)
+                .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: dynamicTypeSize.isAccessibilitySize)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else if !dynamicTypeSize.isAccessibilitySize {
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var chevron: some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(PIColor.text3)
+            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+            .accessibilityHidden(true)
     }
 }
 
@@ -2187,13 +3022,13 @@ private enum ToolVisuals {
 
     static func iconTint(for status: String?) -> Color {
         if ToolStatusPresentation.isFailure(status) { return PIColor.danger }
-        if ToolStatusPresentation.isRunning(status) { return PIColor.accent }
+        if ToolStatusPresentation.isRunning(status) { return PIColor.text2 }
         return PIColor.text2
     }
 
     static func statusTint(for status: String?) -> Color {
         if ToolStatusPresentation.isFailure(status) { return PIColor.danger }
-        if ToolStatusPresentation.isRunning(status) { return PIColor.accent }
+        if ToolStatusPresentation.isRunning(status) { return PIColor.text2 }
         if ToolStatusPresentation.isCompleted(status) { return PIColor.success }
         return PIColor.text3
     }
@@ -2244,6 +3079,26 @@ private struct ToolFirstFrameProbe: UIViewRepresentable {
 }
 #endif
 
+/// 只在有值时套 identifier：避免空字符串标识混进无障碍树。
+private struct PIOptionalIdentifier: ViewModifier {
+    let identifier: String?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let identifier, !identifier.isEmpty {
+            content.accessibilityIdentifier(identifier)
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func piOptionalIdentifier(_ identifier: String?) -> some View {
+        modifier(PIOptionalIdentifier(identifier: identifier))
+    }
+}
+
 // MARK: - 会话配置（AC-07）
 
 private struct SessionConfigSheet: View {
@@ -2253,7 +3108,9 @@ private struct SessionConfigSheet: View {
     /// Providers our local catalog knows but the connected v2 PI-adaptor's own store
     /// does not (legacy-only imports); their models cannot drive a turn.
     let unavailableProviderIDs: Set<String>
+    let extensionSessionID: String?
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var model: AppModel
 
     private var selectedBinding: ModelRecord? {
         flatten(groups).first {
@@ -2262,7 +3119,7 @@ private struct SessionConfigSheet: View {
     }
 
     private var configLocked: Bool { session.isTurnRunning || session.isBusy }
-    private var configEnabled: Bool { !configLocked && session.isOnline }
+    private var configEnabled: Bool { !configLocked && session.isOnline && session.attachedSessionId != nil }
 
     var body: some View {
         NavigationStack {
@@ -2277,48 +3134,63 @@ private struct SessionConfigSheet: View {
                     if !unavailableProviderIDs.isEmpty {
                         PIInlineMessage(
                             kind: .warning,
-                            text: "部分模型未同步到 PI-adaptor：标记为「未同步」的模型只存在于服务器的旧存储，无法在该服务器上运行。"
-                                + "请到 设置 → 模型服务 重新导入对应服务（会写入 PI-adaptor）。"
+                            text: "有模型只存在于服务器的旧存储，未同步到 PI-adaptor。"
+                                + "到 设置 → 模型服务 重新导入即可。"
                         )
                     }
                     if configLocked {
-                        PIInlineMessage(
-                            kind: .warning,
-                            text: "当前轮次仍在运行：模型、会话模式和思考档位会在本轮结束后恢复可切换。"
-                        )
+                        PIInlineMessage(kind: .warning, text: "当前轮次仍在运行：本轮结束后可切换。")
                     } else if !session.isOnline {
-                        PIInlineMessage(kind: .warning, text: "服务器离线，恢复连接后才能提交会话配置。")
+                        PIInlineMessage(kind: .warning, text: "服务器离线，恢复连接后才能提交。")
                     }
-                    PIGroup("权限模式", footer: "改动通过 `session/configure` 下发，运行中的轮次不允许切换。") {
-                        ForEach(RACPPermissionMode.allCases, id: \.self) { mode in
-                            PIListRow(
+                    if let sessionID = extensionSessionID {
+                        SessionExtensionsLink(catalog: model.connection.extensions, sessionID: sessionID)
+                    }
+                    // quiet-v2 §6.3：配置组不再用 footer 解释协议名。单选控件用勾选表达状态，
+                    // 选择即提交，用户从行本身就能读懂。
+                    PIGroup("权限模式") {
+                        let modes = RACPPermissionMode.allCases
+                        ForEach(Array(modes.enumerated()), id: \.element) { index, mode in
+                            configOptionRow(
                                 title: mode.title,
-                                value: session.permissionMode == mode ? "当前" : nil,
-                                isEnabled: configEnabled,
-                                showsDivider: mode != .auto,
-                                action: { Task { await session.configure(permissionMode: mode) } }
-                            )
+                                isSelected: session.permissionMode == mode,
+                                showsDivider: index != modes.count - 1,
+                                identifier: "conversation.config.permission.\(mode.rawValue)"
+                            ) {
+                                Task { await session.configure(permissionMode: mode) }
+                            }
                         }
                     }
-                    PIGroup("会话模式", footer: "Plan 模式提交计划后需要你在这里或用审批卡批准。") {
-                        ForEach(RACPSessionMode.allCases, id: \.self) { mode in
-                            PIListRow(
+                    PIGroup("会话模式") {
+                        let modes = RACPSessionMode.allCases
+                        ForEach(Array(modes.enumerated()), id: \.element) { index, mode in
+                            configOptionRow(
                                 title: mode.title,
-                                value: session.sessionMode == mode ? "当前" : nil,
-                                isEnabled: configEnabled,
-                                showsDivider: mode != .goal,
-                                action: { Task { await session.configure(mode: mode) } }
-                            )
+                                isSelected: session.sessionMode == mode,
+                                showsDivider: index != modes.count - 1,
+                                identifier: "conversation.config.mode.\(mode.rawValue)"
+                            ) {
+                                Task { await session.configure(mode: mode) }
+                            }
                         }
                     }
-                    PIGroup("模型", footer: "来自本机模型清单；选择后通过 `session/configure` 下发 providerId、modelId 与该模型的默认思考档位。") {
+                    PIGroup("模型") {
                         if groups.isEmpty {
+                            // quiet-v2：原来是一行禁用说明（"先到 设置 → 模型服务 导入模型"），
+                            // 属于用文案补布局。改成可点的出口：状态写在副标题，动作在行本身。
                             PIListRow(
-                                title: "没有可用模型",
-                                subtitle: "先到 设置 → 模型服务 导入模型",
-                                isEnabled: false,
-                                showsDivider: false
+                                title: "模型服务",
+                                subtitle: "没有可用模型",
+                                showsChevron: true,
+                                showsDivider: false,
+                                action: {
+                                    // 浮层自己先关，再走同一条深链：落到「模型服务」子页，
+                                    // 不是设置根页——用户已经选了「模型服务」，不该再找一次。
+                                    dismiss()
+                                    model.showSettings(.models)
+                                }
                             )
+                            .accessibilityIdentifier("conversation.openModelServices")
                         } else {
                             ForEach(groups.indices, id: \.self) { groupIndex in
                                 let group = groups[groupIndex]
@@ -2333,31 +3205,30 @@ private struct SessionConfigSheet: View {
                                     PIListRow(
                                         title: record.displayName,
                                         subtitle: unavailable
-                                            ? "\(modelSubtitle(record)) · 未同步到 PI-adaptor"
+                                            ? "\(modelSubtitle(record)) · 未同步"
                                             : modelSubtitle(record),
                                         value: isSelected(record) ? "当前" : nil,
                                         isEnabled: configEnabled && !unavailable,
                                         showsDivider: !(groupIndex == groups.count - 1 && modelIndex == group.models.count - 1),
                                         action: { select(record) }
                                     )
+                                    .accessibilityIdentifier("conversation.config.model.\(record.modelId)")
                                 }
                             }
                         }
                     }
                     if let selectedBinding, !selectedBinding.thinkingLevels.isEmpty {
-                        PIGroup("思考档位", footer: "档位只来自当前模型；未声明档位的模型不显示本组。") {
+                        PIGroup("思考档位") {
                             let levels = selectedBinding.thinkingLevels
                             ForEach(Array(levels.enumerated()), id: \.offset) { index, raw in
-                                let level = RACPThinkingLevel(rawValue: raw)
-                                PIListRow(
+                                configOptionRow(
                                     title: raw,
-                                    value: session.thinkingLevel?.rawValue == raw ? "当前" : nil,
-                                    isEnabled: configEnabled,
+                                    isSelected: session.thinkingLevel?.rawValue == raw,
                                     showsDivider: index != levels.count - 1,
-                                    action: {
-                                        Task { await select(selectedBinding, thinking: level) }
-                                    }
-                                )
+                                    identifier: "conversation.config.thinking.\(raw)"
+                                ) {
+                                    Task { await select(selectedBinding, thinking: RACPThinkingLevel(rawValue: raw)) }
+                                }
                             }
                         }
                     }
@@ -2379,6 +3250,25 @@ private struct SessionConfigSheet: View {
                 }
             }
         }
+    }
+
+    /// 单选行：勾选即状态。footer 删掉后，选中态就是唯一的约束表达。
+    @ViewBuilder
+    private func configOptionRow(
+        title: String,
+        isSelected: Bool,
+        showsDivider: Bool,
+        identifier: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        PIOptionRow(
+            title: title,
+            isSelected: isSelected,
+            showsDivider: showsDivider,
+            action: action
+        )
+        .disabled(!configEnabled)
+        .accessibilityIdentifier(identifier)
     }
 
     private func isSelected(_ record: ModelRecord) -> Bool {
@@ -2430,7 +3320,7 @@ private struct SessionConfigSheet: View {
 
 /// 在发出历史请求前同步记录旧行位置；工具分组跨页重组时，新行也能沿用同一像素基准。
 @MainActor
-private final class ConversationViewportMeasurement {
+final class ConversationViewportMeasurement {
     private final class WeakAnchor {
         weak var view: UIView?
         init(_ view: UIView) { self.view = view }
@@ -2438,21 +3328,39 @@ private final class ConversationViewportMeasurement {
 
     private var anchors: [String: WeakAnchor] = [:]
     private(set) var requestID: UUID?
+    private(set) var itemID: String?
     private(set) var viewportY: CGFloat?
     private(set) var appliedRequestID: UUID?
+
+#if DEBUG
+    var activeAnchorCount: Int { anchors.values.filter { $0.view?.window != nil }.count }
+    var registeredAnchorCount: Int { anchors.count }
+#endif
 
     func register(_ view: UIView, itemID: String) {
         anchors[itemID] = WeakAnchor(view)
     }
 
-    func begin(requestID: UUID, itemID: String?) {
+    func unregister(_ view: UIView, itemID: String) {
+        if anchors[itemID]?.view === view { anchors.removeValue(forKey: itemID) }
+    }
+
+    func begin(requestID: UUID, itemID: String?, topSpacing: CGFloat) {
         anchors = anchors.filter { $0.value.view != nil }
         self.requestID = requestID
+        self.itemID = itemID
         viewportY = nil
         appliedRequestID = nil
         guard let itemID, let view = anchors[itemID]?.view,
               view.window != nil, let scrollView = view.enclosingScrollView else { return }
-        viewportY = view.convert(view.bounds, to: scrollView).minY - scrollView.contentOffset.y
+        let contentMinY = ConversationViewportGeometry.pagingContentMinY(
+            anchorMinY: view.convert(view.bounds, to: scrollView).minY,
+            topSpacing: topSpacing
+        )
+        viewportY = ConversationViewportGeometry.viewportMinY(
+            contentMinY: contentMinY,
+            contentOffsetY: scrollView.contentOffset.y
+        )
     }
 
     func markApplied(_ requestID: UUID) {
@@ -2462,6 +3370,7 @@ private final class ConversationViewportMeasurement {
 
     func cancel() {
         requestID = nil
+        itemID = nil
         viewportY = nil
         appliedRequestID = nil
     }
@@ -2472,17 +3381,23 @@ private final class ConversationViewportMeasurement {
 /// the restore directly to the enclosing UIScrollView, then the measured frame is
 /// used by `ConversationScreen` to confirm success.
 private struct ReadingRestoreAnchor: UIViewRepresentable {
+    private static let historySettlePasses = 8
+
     let itemID: String
     let targetID: String?
     let requestID: Int
     let historyAnchorID: String?
+    let historyTopSpacing: CGFloat
     let historyRequestID: UUID?
     let viewportMeasurement: ConversationViewportMeasurement
     let onUserInteraction: () -> Void
 
     final class Coordinator {
+        var itemID: String?
+        var viewportMeasurement: ConversationViewportMeasurement?
         var appliedRequestID = 0
         var historyRequestID: UUID?
+        var historyTopSpacing: CGFloat = 0
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -2496,7 +3411,16 @@ private struct ReadingRestoreAnchor: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
+        if context.coordinator.itemID != itemID,
+           let oldItemID = context.coordinator.itemID {
+            viewportMeasurement.unregister(uiView, itemID: oldItemID)
+        }
+        context.coordinator.itemID = itemID
+        context.coordinator.viewportMeasurement = viewportMeasurement
         viewportMeasurement.register(uiView, itemID: itemID)
+        if targetID != itemID { context.coordinator.appliedRequestID = 0 }
+        if historyAnchorID != itemID { context.coordinator.historyRequestID = nil }
+        context.coordinator.historyTopSpacing = historyTopSpacing
         updateHistoryPosition(uiView, coordinator: context.coordinator)
         guard targetID == itemID,
               requestID > 0,
@@ -2520,9 +3444,15 @@ private struct ReadingRestoreAnchor: UIViewRepresentable {
                 onUserInteraction()
                 return
             }
+            scrollView.layoutIfNeeded()
             let current = uiView.convert(uiView.bounds, to: scrollView)
             let inset = scrollView.adjustedContentInset
-            let desiredY = scrollView.contentOffset.y + current.minY
+            // Both restore confirmation and this correction use the same
+            // canonical viewport top: visual top minus the adjusted top inset.
+            let desiredY = ConversationViewportGeometry.restoreContentOffsetY(
+                anchorContentMinY: current.minY,
+                adjustedTopInset: inset.top
+            )
             let minimumY = -inset.top
             let maximumY = max(
                 minimumY,
@@ -2548,10 +3478,30 @@ private struct ReadingRestoreAnchor: UIViewRepresentable {
         }
         guard coordinator.historyRequestID != historyRequestID else { return }
         coordinator.historyRequestID = historyRequestID
-        DispatchQueue.main.async {
-            guard coordinator.historyRequestID == historyRequestID,
-                  viewportMeasurement.requestID == historyRequestID,
-                  viewportMeasurement.appliedRequestID != historyRequestID else { return }
+        settleHistoryPosition(
+            uiView,
+            coordinator: coordinator,
+            requestID: historyRequestID,
+            viewportY: viewportY,
+            pass: 0
+        )
+    }
+
+    /// Hold the pre-page viewport origin across a few layout passes. A single
+    /// correction can run before the load control / merged row finishes laying
+    /// out, which leaves the original item a few points off even though the
+    /// first offset was correct. Any user drag aborts this immediately.
+    private func settleHistoryPosition(
+        _ uiView: UIView,
+        coordinator: Coordinator,
+        requestID: UUID,
+        viewportY: CGFloat,
+        pass: Int
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+            guard coordinator.historyRequestID == requestID,
+                  viewportMeasurement.requestID == requestID,
+                  viewportMeasurement.appliedRequestID != requestID else { return }
             guard uiView.window != nil,
                   let scrollView = uiView.enclosingScrollView else {
                 coordinator.historyRequestID = nil
@@ -2565,14 +3515,38 @@ private struct ReadingRestoreAnchor: UIViewRepresentable {
             let inset = scrollView.adjustedContentInset
             let minimumY = -inset.top
             let maximumY = max(minimumY, scrollView.contentSize.height - scrollView.bounds.height + inset.bottom)
-            let targetY = uiView.convert(uiView.bounds, to: scrollView).minY - viewportY
-            scrollView.setContentOffset(
-                CGPoint(x: scrollView.contentOffset.x, y: min(max(targetY, minimumY), maximumY)),
-                animated: false
+            let anchorMinY = uiView.convert(uiView.bounds, to: scrollView).minY
+            let contentMinY = ConversationViewportGeometry.pagingContentMinY(
+                anchorMinY: anchorMinY,
+                topSpacing: coordinator.historyTopSpacing
             )
-            viewportMeasurement.markApplied(historyRequestID)
+            let targetY = min(max(contentMinY - viewportY, minimumY), maximumY)
+            if abs(scrollView.contentOffset.y - targetY) > 0.5 {
+                scrollView.setContentOffset(
+                    CGPoint(x: scrollView.contentOffset.x, y: targetY),
+                    animated: false
+                )
+            }
+            if pass + 1 >= ReadingRestoreAnchor.historySettlePasses {
+                viewportMeasurement.markApplied(requestID)
+            } else {
+                settleHistoryPosition(
+                    uiView,
+                    coordinator: coordinator,
+                    requestID: requestID,
+                    viewportY: viewportY,
+                    pass: pass + 1
+                )
+            }
         }
     }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        guard let itemID = coordinator.itemID,
+              let viewportMeasurement = coordinator.viewportMeasurement else { return }
+        viewportMeasurement.unregister(uiView, itemID: itemID)
+    }
+
 }
 
 private extension UIView {
@@ -2585,13 +3559,44 @@ private extension UIView {
         return nil
     }
 }
+private struct AttachmentReadSource {
+    let key: AttachmentImageKey
+    let read: AttachmentImageLoader.Read
+
+    static func current(attachment: RACPV2Attachment, hostID: UUID?, client: RACPClient?) -> Self? {
+        guard let hostID else { return nil }
+        if let client {
+            return Self(
+                key: AttachmentImageKey(hostID: hostID, connectionID: ObjectIdentifier(client), attachment: attachment),
+                read: { offset, length in
+                    try await client.readImageAttachment(attachmentId: attachment.id, offset: offset, length: length)
+                }
+            )
+        }
+#if DEBUG
+        if let fixture = UITestFixture.stabilityImageSource(attachment: attachment, hostID: hostID) {
+            return Self(key: fixture.key, read: fixture.read)
+        }
+#endif
+        return nil
+    }
+}
+
 struct AttachmentThumbnailView: View {
     let attachment: RACPV2Attachment
     @EnvironmentObject private var connection: ConnectionModel
+    @EnvironmentObject private var model: AppModel
     @State private var uiImage: UIImage?
     @State private var isLoading = false
     @State private var loadFailed = false
     @State private var showingDetail = false
+    @State private var loadID = UUID()
+
+    private var source: AttachmentReadSource? {
+        AttachmentReadSource.current(attachment: attachment, hostID: model.currentHost?.id, client: connection.activeClient)
+    }
+
+    private var key: AttachmentImageKey? { source?.key }
 
     var body: some View {
         VStack(alignment: .leading, spacing: PISpacing.s4) {
@@ -2602,69 +3607,183 @@ struct AttachmentThumbnailView: View {
                     .frame(maxHeight: 200)
                     .cornerRadius(PIRadius.control)
                     .onTapGesture { showingDetail = true }
+                    .accessibilityLabel("查看图片")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityIdentifier("conversation.attachment.\(attachment.id)")
             } else if isLoading {
-                ProgressView()
-                    .frame(height: 100)
+                ProgressView().frame(height: 100)
             } else if loadFailed {
                 Label("图片加载失败", systemImage: "exclamationmark.triangle")
                     .font(PIFont.meta)
                     .foregroundStyle(PIColor.danger)
+                    .accessibilityIdentifier("conversation.attachment.\(attachment.id).error")
             } else {
-                HStack(spacing: PISpacing.s4) {
-                    Image(systemName: "photo")
-                    Text(attachment.fileName)
-                        .font(PIFont.meta)
-                }
-                .padding(PISpacing.s8)
-                .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
+                Label(attachment.fileName, systemImage: "photo")
+                    .font(PIFont.meta)
+                    .padding(PISpacing.s8)
+                    .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control))
             }
         }
-        .task {
-            await loadImage()
+        .task(id: key) { await loadImage() }
+        .onChange(of: key) { _, newKey in
+            if newKey == nil {
+                showingDetail = false
+            }
+        }
+        .onDisappear {
+            loadID = UUID()
+            uiImage = nil
+            isLoading = false
+            showingDetail = false
         }
         .sheet(isPresented: $showingDetail) {
-            if let uiImage {
-                NavigationStack {
-                    VStack {
-                        Image(uiImage: uiImage)
-                            .resizable()
-                            .scaledToFit()
-                            .padding()
-                        ShareLink(
-                            item: Image(uiImage: uiImage),
-                            preview: SharePreview(attachment.fileName, image: Image(uiImage: uiImage))
-                        ) {
-                            Label("保存或分享图片", systemImage: "square.and.arrow.up")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .padding()
-                    }
-                    .navigationTitle(attachment.fileName)
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        Button("关闭") { showingDetail = false }
-                    }
-                }
+            if let source {
+                AttachmentImageDetail(attachment: attachment, key: source.key, read: source.read, session: connection.session)
+            } else {
+                Color.clear
+                    .onAppear { showingDetail = false }
             }
         }
     }
 
     private func loadImage() async {
-        guard uiImage == nil, !isLoading else { return }
-        guard let client = connection.activeClient else { return }
+        let requestID = UUID()
+        loadID = requestID
+        uiImage = nil
+        loadFailed = false
+        isLoading = false
+        guard let source else { return }
+        let key = source.key
         isLoading = true
-        defer { isLoading = false }
+        defer { if loadID == requestID { isLoading = false } }
         do {
-            let read = try await client.readImageAttachment(attachmentId: attachment.id, offset: 0, length: 20 * 1024 * 1024)
-            if let data = Data(base64Encoded: read.dataBase64), let image = UIImage(data: data) {
-                uiImage = image
-                loadFailed = false
-            } else {
-                loadFailed = true
-            }
+            let bitmap = try await AttachmentImageLoader.shared.thumbnail(key: key, attachment: attachment, read: source.read)
+            guard !Task.isCancelled, loadID == requestID, self.key == key else { return }
+            uiImage = UIImage(cgImage: bitmap.image)
+        } catch is CancellationError {
+            // A disappearing row has no failure to present.
         } catch {
+            guard !Task.isCancelled, loadID == requestID, self.key == key else { return }
             loadFailed = true
         }
     }
 }
 
+private struct AttachmentImageDetail: View {
+    let attachment: RACPV2Attachment
+    let key: AttachmentImageKey
+    let read: AttachmentImageLoader.Read
+    @ObservedObject var session: SessionController
+    @EnvironmentObject private var connection: ConnectionModel
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var content: AttachmentImageContent?
+    @State private var failed = false
+
+    private var isCurrent: Bool {
+        session.attachedSessionId == key.sessionID
+            && AttachmentReadSource.current(attachment: attachment, hostID: model.currentHost?.id,
+                                            client: connection.activeClient)?.key == key
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack {
+                if let content {
+                    let image = Image(uiImage: UIImage(cgImage: content.bitmap.image))
+                    image.resizable().scaledToFit().padding()
+                        .accessibilityIdentifier("conversation.attachment.detailImage")
+                        .accessibilityLabel("原图")
+#if DEBUG
+                    Text(verbatim: "width=\(content.bitmap.image.width),height=\(content.bitmap.image.height),bytes=\(content.original.count)")
+                        .font(.system(size: 1)).frame(width: 1, height: 1).clipped()
+                        .accessibilityIdentifier("conversation.attachment.debugDetailContent")
+#endif
+                    shareLink(for: content, previewImage: image)
+                        .buttonStyle(.borderedProminent)
+                        .padding()
+                        .accessibilityIdentifier("conversation.attachment.shareOriginal")
+                } else if failed {
+                    Label("图片加载失败", systemImage: "exclamationmark.triangle")
+                } else {
+                    ProgressView("正在读取原图…")
+                }
+            }
+            .navigationTitle(attachment.fileName)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                Button("关闭") { dismiss() }
+                    .accessibilityIdentifier("conversation.attachment.closeDetail")
+            }
+        }
+        .task(id: isCurrent) {
+            guard isCurrent else { content = nil; dismiss(); return }
+            do {
+                let loaded = try await AttachmentImageLoader.shared.detail(attachment: attachment, read: read)
+                guard !Task.isCancelled, isCurrent else { return }
+                content = loaded
+            } catch is CancellationError {
+            } catch {
+                if !Task.isCancelled, isCurrent { failed = true }
+            }
+        }
+        .onDisappear { content = nil }
+    }
+
+    @ViewBuilder
+    private func shareLink(
+        for content: AttachmentImageContent,
+        previewImage: Image
+    ) -> some View {
+        let format = AttachmentShareFormat(
+            mimeType: attachment.mimeType,
+            fileName: attachment.fileName
+        )
+        let fileName = format.normalizedFileName(attachment.fileName)
+        let preview = SharePreview(fileName, image: previewImage)
+        switch format {
+        case .png:
+            ShareLink(
+                item: AttachmentOriginal<PNGOriginalContentType>(
+                    data: content.original,
+                    fileName: fileName
+                ),
+                preview: preview
+            ) {
+                shareLabel
+            }
+        case .jpeg:
+            ShareLink(
+                item: AttachmentOriginal<JPEGOriginalContentType>(
+                    data: content.original,
+                    fileName: fileName
+                ),
+                preview: preview
+            ) {
+                shareLabel
+            }
+        case .webp:
+            ShareLink(
+                item: AttachmentOriginal<WebPOriginalContentType>(
+                    data: content.original,
+                    fileName: fileName
+                ),
+                preview: preview
+            ) {
+                shareLabel
+            }
+        }
+    }
+
+    private var shareLabel: some View {
+        Label("保存或分享图片", systemImage: "square.and.arrow.up")
+    }
+}
+
+
+/// 审批卡“查看完整参数”弹层内容。
+private struct ApprovalFullInput: Identifiable {
+    let id: String
+    let title: String
+    let text: String
+}

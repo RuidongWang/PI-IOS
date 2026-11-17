@@ -81,7 +81,55 @@ struct PIPressableButtonStyle: ButtonStyle {
     }
 }
 
-/// 主操作按钮：琥珀实心 + 深色文字（深色模式为近黑字，浅色模式白字）。
+/// 实心主按钮外观：禁用态由**环境** `isEnabled` 决定。
+///
+/// 为什么放在 ButtonStyle 里：`Button` 的禁用态只存在于环境，调用方用 `.disabled(...)`
+/// 时视图本体读不到。放在 style 里读，`isEnabled:` 参数与 `.disabled()` 两条路径
+/// 就只有一个真相，不会出现「看着能按其实按不了」。
+struct PIFilledButtonStyle: ButtonStyle {
+    var minHeight: CGFloat = 46
+    var fill: Color = PIColor.accent
+
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(isEnabled ? PIColor.onAccent : PIColor.text2)
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: minHeight)
+            .background(
+                isEnabled ? fill : PIColor.surface2,
+                in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+            )
+            .opacity(isEnabled && configuration.isPressed ? 0.82 : 1)
+            .scaleEffect(isEnabled && configuration.isPressed ? 0.985 : 1)
+            .animation(PIMotion.quick, value: configuration.isPressed)
+    }
+}
+
+/// 次级按钮外观：表面色底 + 发丝描边；禁用态同样读环境。
+struct PISecondaryButtonStyle: ButtonStyle {
+    var minHeight: CGFloat = 46
+
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(isEnabled ? PIColor.text : PIColor.text2)
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: minHeight)
+            .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
+                    .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
+            )
+            .opacity(isEnabled && configuration.isPressed ? 0.82 : 1)
+            .scaleEffect(isEnabled && configuration.isPressed ? 0.985 : 1)
+            .animation(PIMotion.quick, value: configuration.isPressed)
+    }
+}
+
+/// 主操作按钮：强调色实心 + 反色文字。禁用态由环境 `isEnabled` 决定。
 struct PIPrimaryButton: View {
     let title: String
     var isEnabled: Bool = true
@@ -92,20 +140,8 @@ struct PIPrimaryButton: View {
         Button(action: action) {
             Text(title)
                 .font(PIFont.button)
-                .foregroundStyle(isEnabled ? PIColor.onAccent : PIColor.onAccent.opacity(0.6))
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: 46)
-                .background(
-                    RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
-                        .fill(isEnabled ? PIColor.accent : PIColor.accent.opacity(0.38))
-                )
-                .shadow(
-                    color: isEnabled ? PIColor.accent.opacity(0.22) : .clear,
-                    radius: 10,
-                    y: 4
-                )
         }
-        .buttonStyle(PIPressableButtonStyle())
+        .buttonStyle(PIFilledButtonStyle())
         .modifier(OptionalAccessibilityIdentifier(identifier: identifier))
         .disabled(!isEnabled)
     }
@@ -134,48 +170,13 @@ struct PISecondaryButton: View {
         Button(action: action) {
             Text(title)
                 .font(PIFont.button)
-                .foregroundStyle(isEnabled ? PIColor.text : PIColor.text3)
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: 46)
-                .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
-                        .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
-                )
         }
-        .buttonStyle(PIPressableButtonStyle())
+        .buttonStyle(PISecondaryButtonStyle())
         .disabled(!isEnabled)
     }
 }
 
-/// 行内补充动作：小号琥珀胶囊，用在状态横幅下方的「去项目页」「选择其他模型」这类次级入口。
-struct PIGhostChipButton: View {
-    let title: String
-    var systemImage: String? = nil
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: PISpacing.s4) {
-                if let systemImage {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                Text(title)
-                    .font(PIFont.captionStrong)
-            }
-            .foregroundStyle(PIColor.accent)
-            .padding(.horizontal, PISpacing.s12)
-            .padding(.vertical, 7)
-            .background(PIColor.accentSoft, in: Capsule())
-            .overlay(Capsule().strokeBorder(PIColor.accentBorder, lineWidth: PIMetrics.hairline))
-            .contentShape(Capsule())
-        }
-        .buttonStyle(PIPressableButtonStyle())
-    }
-}
-
-/// 审批卡主决策按钮：琥珀实心、整宽、44pt 热区。
+/// 审批卡主决策按钮：accent 实心、整宽、44pt 热区；禁用时改用中性表面。
 struct PIApprovalPrimaryButton: View {
     let title: String
     var isEnabled: Bool = true
@@ -185,11 +186,11 @@ struct PIApprovalPrimaryButton: View {
         Button(action: action) {
             Text(title)
                 .font(PIFont.captionStrong)
-                .foregroundStyle(isEnabled ? PIColor.onAccent : PIColor.onAccent.opacity(0.6))
+                .foregroundStyle(isEnabled ? PIColor.onAccent : PIColor.text2)
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: PIMetrics.minHitTarget)
                 .background(
-                    (isEnabled ? PIColor.accent : PIColor.accent.opacity(0.38)),
+                    isEnabled ? PIColor.accent : PIColor.surface2,
                     in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
                 )
         }
@@ -208,7 +209,7 @@ struct PIApprovalSecondaryButton: View {
         Button(action: action) {
             Text(title)
                 .font(PIFont.captionStrong)
-                .foregroundStyle(isEnabled ? PIColor.text : PIColor.text3)
+                .foregroundStyle(isEnabled ? PIColor.text : PIColor.text2)
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: PIMetrics.minHitTarget)
                 .background(PIColor.surface2, in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous))
@@ -232,16 +233,16 @@ struct PIDangerOutlineButton: View {
         Button(action: action) {
             Text(title)
                 .font(PIFont.captionStrong)
-                .foregroundStyle(isEnabled ? PIColor.danger : PIColor.text3)
+                .foregroundStyle(isEnabled ? PIColor.danger : PIColor.text2)
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: PIMetrics.minHitTarget)
                 .background(
-                    (isEnabled ? PIColor.dangerSoft.opacity(0.5) : Color.clear),
+                    PIColor.surface2,
                     in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
-                        .strokeBorder(isEnabled ? PIColor.danger : PIColor.separator, lineWidth: 1.2)
+                        .strokeBorder(isEnabled ? PIColor.danger.opacity(0.45) : PIColor.separator, lineWidth: PIMetrics.hairline)
                 )
         }
         .buttonStyle(PIPressableButtonStyle())
@@ -264,7 +265,7 @@ struct PIOptionRow: View {
                     VStack(alignment: .leading, spacing: PISpacing.s4) {
                         Text(title)
                             .font(PIFont.listTitle)
-                            .foregroundStyle(isSelected ? PIColor.accent : PIColor.text)
+                            .foregroundStyle(PIColor.text)
                         if let subtitle {
                             Text(subtitle)
                                 .font(PIFont.caption)
@@ -280,14 +281,9 @@ struct PIOptionRow: View {
                             .accessibilityHidden(true)
                     }
                 }
-                .padding(.horizontal, PISpacing.s12)
+                .padding(.horizontal, PISpacing.s16)
                 .padding(.vertical, PISpacing.s12)
-                .frame(minHeight: PIMetrics.minHitTarget)
-                .background(
-                    isSelected ? PIColor.accentSoft : Color.clear,
-                    in: RoundedRectangle(cornerRadius: PIRadius.control, style: .continuous)
-                )
-                .padding(.horizontal, PISpacing.s4)
+                .frame(minHeight: PIMetrics.listRowMinHeight)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)

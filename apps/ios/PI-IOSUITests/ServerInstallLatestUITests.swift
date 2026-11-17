@@ -1,6 +1,6 @@
 import XCTest
 
-/// 真实服务器验证：确认安装页会解析 GitHub 最新稳定发布（失败时回退并在界面说明）。
+/// 真实服务器验证：安装页解析到的目标版本与来源必须写在一行状态里（回退时另起警示横幅）。
 /// 默认跳过；模拟器里需已有已保存凭证的服务器记录，并设置 `PI_IOS_LIVE_RELEASE_INSTALL=1`。
 final class ServerInstallLatestUITests: XCTestCase {
     private let timeout: TimeInterval = 20 * 60
@@ -32,12 +32,7 @@ final class ServerInstallLatestUITests: XCTestCase {
         installRow.tap()
         XCTAssertTrue(app.navigationBars["安装 PI-adaptor"].waitForExistence(timeout: 10))
 
-        let policy = app.staticTexts["installHost.releasePolicy"]
-        XCTAssertTrue(policy.waitForExistence(timeout: 10), "安装页应说明自动匹配最新发布")
-        XCTAssertTrue(policy.label.contains("最新稳定发布"), policy.label)
-        XCTAssertTrue(policy.label.contains("回退"), policy.label)
-
-        let start = app.buttons["开始安装"]
+        let start = app.buttons["installHost.start"]
         scrollUntilHittable(app, start)
         XCTAssertTrue(start.waitForExistence(timeout: 10), "找不到开始安装按钮")
         start.tap()
@@ -50,12 +45,12 @@ final class ServerInstallLatestUITests: XCTestCase {
         // 守住（App MARKETING_VERSION == host-release.json == BootstrapRelease）；
         // 跨版本复跑时可用 `PI_IOS_EXPECTED_RELEASE_VERSION` 覆盖。
         let expectedVersion = ProcessInfo.processInfo.environment["PI_IOS_EXPECTED_RELEASE_VERSION"]
-            ?? "0.0.4"
+            ?? "0.0.5"
         XCTAssertTrue(
             resolved.label.contains("PI-adaptor \(expectedVersion)"),
             "本次目标版本应为 PI-adaptor \(expectedVersion)，实际：\(resolved.label)\n\(dumpTexts(app))"
         )
-        if resolved.label.contains("GitHub 最新稳定发布") {
+        if resolved.label.contains("最新发布") {
             print("LIVE_RELEASE_SOURCE=latest label=\(resolved.label)")
         } else {
             // 代理出口的 GitHub API 配额用尽时走回退；记录后继续验证真机安装。
@@ -66,7 +61,7 @@ final class ServerInstallLatestUITests: XCTestCase {
             )
         }
 
-        let success = app.staticTexts["安装与设备验证完成"]
+        let success = app.staticTexts["安装完成"]
         let failure = app.staticTexts["安装未完成"]
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {

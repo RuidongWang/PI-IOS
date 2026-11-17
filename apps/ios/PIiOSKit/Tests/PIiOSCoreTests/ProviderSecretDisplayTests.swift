@@ -27,7 +27,7 @@ final class ProviderSecretDisplayTests: XCTestCase {
             hasLocalKey: true
         )
         XCTAssertEqual(withKey, .localOnly(hasLocalKey: true))
-        XCTAssertEqual(ProviderSecretDisplay.text(withKey), "密钥仅存本机")
+        XCTAssertEqual(ProviderSecretDisplay.text(withKey), "本机有密钥")
 
         let withoutKey = ProviderSecretDisplay.status(
             authKind: "api_key",
@@ -36,7 +36,7 @@ final class ProviderSecretDisplayTests: XCTestCase {
             keyStorage: "client",
             hasLocalKey: false
         )
-        XCTAssertEqual(ProviderSecretDisplay.text(withoutKey), "本机缺少密钥")
+        XCTAssertEqual(ProviderSecretDisplay.text(withoutKey), "本机缺密钥")
     }
 
     func testApiKeyMaskNilIsNeverRenderedAsNoSecret() {
@@ -50,7 +50,7 @@ final class ProviderSecretDisplayTests: XCTestCase {
                 hasLocalKey: hasLocalKey
             )
             XCTAssertNotEqual(text, "无密钥")
-            XCTAssertTrue(text == "密钥仅存本机" || text == "本机缺少密钥")
+            XCTAssertTrue(text == "本机有密钥" || text == "本机缺密钥")
         }
     }
 
@@ -81,8 +81,8 @@ final class ProviderSecretDisplayTests: XCTestCase {
     // MARK: - 本机记录（无服务端 authKind）
 
     func testLocalRecordTextOnlyDependsOnKeychain() {
-        XCTAssertEqual(ProviderSecretDisplay.localText(hasLocalKey: true), "密钥仅存本机")
-        XCTAssertEqual(ProviderSecretDisplay.localText(hasLocalKey: false), "本机缺少密钥")
+        XCTAssertEqual(ProviderSecretDisplay.localText(hasLocalKey: true), "本机有密钥")
+        XCTAssertEqual(ProviderSecretDisplay.localText(hasLocalKey: false), "本机缺密钥")
     }
 
     // MARK: - 缺失密钥时的下一步

@@ -1,6 +1,19 @@
 import Foundation
 import PIiOSCore
 import PIiOSNet
+#if DEBUG
+import CoreGraphics
+import CryptoKit
+import ImageIO
+#endif
+
+/// DEBUG UI-test-only earlier-history page. `delayMilliseconds` keeps the
+/// production loading state observable long enough for a user drag to cancel it.
+struct UITestEarlierHistoryPage {
+    let items: [RACPItem]
+    let hasMore: Bool
+    let delayMilliseconds: Int
+}
 
 /// FROZEN fixture contract: DEBUG + exact PI_IOS_UI_FIXTURE_SCENARIO only.
 /// These are synthetic projections, never successful server responses.
@@ -13,11 +26,14 @@ struct UITestFixture {
         let info: RACPServerInfo
     }
 
-    let state: PersistedState
-    let cache: OfflineSessionCacheSnapshot
+    var state: PersistedState
+    var cache: OfflineSessionCacheSnapshot
     var catalog: Catalog? = nil
     var catalogs: [UUID: Catalog] = [:]
     var sessionSnapshots: [String: RACPSessionView] = [:]
+    /// Earlier pages supplied to the DEBUG `SessionController` fixture seam.
+    /// Only scenarios exercising history backfill provide pages.
+    var earlierHistoryPages: [String: [UITestEarlierHistoryPage]] = [:]
     var providerBindingStatuses: [String: ProviderBindingStatus] = [:]
     var supportsFixtureInterrupt = false
     var adaptorUnitSnapshot: AdaptorUnitSnapshot? = nil
@@ -29,15 +45,71 @@ struct UITestFixture {
     var updatableProviders: [RACPV2Provider] = []
     var directTrustPin: DirectTLSTrustPin? = nil
     var connectionStatus: ConnectionStatus? = nil
+    var extensionInventory: RACPExtensionInventory? = nil
+    var sessionExtensions: [String: RACPSessionExtensions] = [:]
+    var extensionReadFailure = false
 
+    /// Delays/failures are available only in the opt-in synthetic UI scenario.
+    var sessionOpenBehavior: (delayMilliseconds: Int, failingSessionID: String?)? = nil
+    var submissionFailureDelayMilliseconds: Int? = nil
     static var current: Self? {
 #if DEBUG
         switch ProcessInfo.processInfo.environment["PI_IOS_UI_FIXTURE_SCENARIO"] {
+        case let scenario? where scenario.hasPrefix("extensions-"):
+            let allowed = ["extensions-loaded", "extensions-offline", "extensions-unsupported", "extensions-never-run", "extensions-empty", "extensions-error"]
+            guard allowed.contains(scenario) else { return nil }
+            var fixture = onlineModelConfig()
+            ExtensionUITestData.configure(&fixture, scenario: scenario)
+            return fixture
         case "offline-two-hosts": return offlineTwoHosts()
         case "empty-state": return emptyState()
         case "offline-cache-205": return offlineCache205()
         case "online-two-sessions": return onlineTwoSessions()
+        case "interaction-smoothness":
+            var fixture = onlineReadingTwoSessions()
+            let hostID = fixture.state.hosts[0].id
+            fixture.cache.entries = [OfflineSessionCacheEntry(
+                id: "preview-S2", sessionId: "S2", hostID: hostID,
+                text: "Cached S2 history", createdAt: Date(timeIntervalSince1970: 1_704_164_640)
+            )]
+            fixture.sessionOpenBehavior = (4_000, ProcessInfo.processInfo.environment["PI_IOS_UI_FAIL_OPEN"])
+            return fixture
+        case "interaction-cache-render":
+            var fixture = onlineReadingTwoSessions()
+            let hostID = fixture.state.hosts[0].id
+            let base = Date(timeIntervalSince1970: 1_704_164_640)
+            fixture.cache.entries = [
+                OfflineSessionCacheEntry(id: "preview-user", sessionId: "S2", hostID: hostID,
+                    text: "同步今日数据", createdAt: base, kind: "message", role: "user"),
+                OfflineSessionCacheEntry(id: "preview-empty", sessionId: "S2", hostID: hostID,
+                    text: "", createdAt: base.addingTimeInterval(1), kind: "message", role: "assistant"),
+                OfflineSessionCacheEntry(id: "preview-tool", sessionId: "S2", hostID: hostID,
+                    text: "observations 2152\n" + String(repeating: "网络接收错误。", count: 20_000),
+                    createdAt: base.addingTimeInterval(2), kind: "tool_call", role: "tool",
+                    toolName: "Bash", status: "completed"),
+                OfflineSessionCacheEntry(id: "preview-answer", sessionId: "S2", hostID: hostID,
+                    text: "**同步完成**", createdAt: base.addingTimeInterval(3), kind: "message", role: "assistant")
+            ]
+            fixture.sessionOpenBehavior = (500, "S2")
+            return fixture
+        case "interaction-large-preview":
+            var fixture = onlineReadingTwoSessions()
+            let hostID = fixture.state.hosts[0].id
+            fixture.cache.entries = (0..<3_500).map { index in
+                OfflineSessionCacheEntry(id: "large-\(index)", sessionId: "S2", hostID: hostID,
+                    text: "Cached history \(index)", createdAt: Date(timeIntervalSince1970: 1_704_164_640 + Double(index)),
+                    kind: "message", role: index.isMultiple(of: 35) ? "user" : "assistant", turnId: "turn-\(index / 35)")
+            }
+            fixture.sessionOpenBehavior = (500, "S2")
+            return fixture
+        case "interaction-submit":
+            var fixture = onlineModelConfig()
+            fixture.submissionFailureDelayMilliseconds = 3_000
+            return fixture
         case "online-reading-two-sessions": return onlineReadingTwoSessions()
+        case "online-stability-history": return onlineStabilityHistory()
+        case "stability-images": return onlineStabilityImages()
+        case "stability-paging": return onlineStabilityPaging()
         case "online-large-tool-result": return onlineLargeToolResult()
         case "online-tool-result-body": return onlineToolResultBody()
         case "online-tool-batch": return onlineToolBatch()
@@ -64,6 +136,124 @@ struct UITestFixture {
     }
 
 #if DEBUG
+    static var stabilityControlsEnabled: Bool {
+        ProcessInfo.processInfo.environment["PI_IOS_UI_FIXTURE_SCENARIO"] == "online-stability-history"
+            && ProcessInfo.processInfo.environment["PI_IOS_UI_STABILITY_CONTROLS"] == "1"
+    }
+
+    /// Immutable synthetic image source; only this exact scenario can inject it.
+    /// Thumbnail and detail still run the production chunk/validate/decode loader.
+    private final class ImageConnectionToken: @unchecked Sendable {}
+    private static let imageConnectionToken = ImageConnectionToken()
+    private static let stabilityImageBytes: Data = {
+        guard let context = CGContext(data: nil, width: 2_048, height: 768,
+                                      bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            preconditionFailure("cannot create stability image fixture")
+        }
+        context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.7, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 2_048, height: 768))
+        let bytes = NSMutableData()
+        guard let image = context.makeImage(),
+              let destination = CGImageDestinationCreateWithData(bytes as CFMutableData, "public.png" as CFString, 1, nil) else {
+            preconditionFailure("cannot encode stability image fixture")
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        precondition(CGImageDestinationFinalize(destination))
+        return bytes as Data
+    }()
+    private static let stabilityImageAttachment = makeAttachment(
+        id: "stability-image-1", sessionId: "S1", kind: "input",
+        fileName: "stability-original.png", mimeType: "image/png",
+        byteLength: stabilityImageBytes.count,
+        sha256: SHA256.hash(data: stabilityImageBytes).map { String(format: "%02x", $0) }.joined(),
+        state: "ready", createdAt: "2024-01-01T00:00:00Z"
+    )
+
+    static func stabilityImageSource(
+        attachment: RACPV2Attachment, hostID: UUID
+    ) -> (key: AttachmentImageKey, read: AttachmentImageLoader.Read)? {
+        guard ProcessInfo.processInfo.environment["PI_IOS_UI_FIXTURE_SCENARIO"] == "stability-images",
+              attachment == stabilityImageAttachment else { return nil }
+        return (
+            AttachmentImageKey(hostID: hostID, connectionID: ObjectIdentifier(imageConnectionToken), attachment: attachment),
+            { offset, length in
+                try Task.checkCancellation()
+                let bytes = stabilityImageBytes
+                let end = min(bytes.count, offset + length)
+                guard offset >= 0, offset <= end else { throw AttachmentImageError.invalidChunk }
+                return Self.makeAttachmentReadResult(
+                    attachment: stabilityImageAttachment,
+                    dataBase64: bytes.subdata(in: offset..<end).base64EncodedString(),
+                    eof: end == bytes.count
+                )
+            }
+        )
+    }
+
+    /// Wire types are `Codable`-only (no public memberwise init); fixtures must
+    /// build them through the production decoding path.
+    static func makeAttachment(
+        id: String, sessionId: String, kind: String, fileName: String,
+        mimeType: String, byteLength: Int, sha256: String, state: String,
+        createdAt: String
+    ) -> RACPV2Attachment {
+        let object: [String: Any] = [
+            "id": id, "sessionId": sessionId, "kind": kind, "fileName": fileName,
+            "mimeType": mimeType, "byteLength": byteLength, "sha256": sha256,
+            "state": state, "createdAt": createdAt
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: object)) ?? Data("{}".utf8)
+        do {
+            return try JSONDecoder().decode(RACPV2Attachment.self, from: data)
+        } catch {
+            preconditionFailure("fixture attachment must decode: \(error)")
+        }
+    }
+
+    /// Wire types are `Codable`-only (no public memberwise init); fixtures must
+    /// build the read result through the production decoding path.
+    static func makeAttachmentReadResult(
+        attachment: RACPV2Attachment,
+        dataBase64: String,
+        eof: Bool
+    ) -> RACPV2AttachmentReadResult {
+        let encoded = (try? JSONEncoder().encode(attachment)) ?? Data()
+        let attachmentObject = (try? JSONSerialization.jsonObject(with: encoded)) ?? [:]
+        let object: [String: Any] = [
+            "attachment": attachmentObject,
+            "dataBase64": dataBase64,
+            "eof": eof
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: object)) ?? Data("{}".utf8)
+        do {
+            return try JSONDecoder().decode(RACPV2AttachmentReadResult.self, from: data)
+        } catch {
+            preconditionFailure("fixture read result must decode: \(error)")
+        }
+    }
+
+    private static func onlineStabilityImages() -> Self {
+        var fixture = onlineTwoSessions()
+        guard var snapshot = fixture.sessionSnapshots["S1"] else { return fixture }
+        let metadata = stabilityImageAttachment
+        snapshot.items = [RACPItem(id: "stability-image-message", payload: .object([
+            "id": .string("stability-image-message"),
+            "role": .string("user"),
+            "text": .string("Stability image fixture"),
+            "attachments": .array([.object([
+                "id": .string(metadata.id), "sessionId": .string(metadata.sessionId),
+                "kind": .string(metadata.kind), "fileName": .string(metadata.fileName),
+                "mimeType": .string(metadata.mimeType), "byteLength": .number(Double(metadata.byteLength)),
+                "sha256": .string(metadata.sha256), "state": .string(metadata.state),
+                "createdAt": .string(metadata.createdAt),
+            ])]),
+        ]))]
+        fixture.sessionSnapshots["S1"] = snapshot
+        return fixture
+    }
+
     /// 真正的首次启动空态：不受模拟器上残留的 state-v1.json 影响（G-01）。
     private static func emptyState() -> Self {
         Self(state: PersistedState(), cache: OfflineSessionCacheSnapshot())
@@ -89,6 +279,219 @@ struct UITestFixture {
             }
             fixture.sessionSnapshots[summary.id] = snapshot
         }
+        return fixture
+    }
+
+    /// 1,500 条混合历史：普通轮次 + 多中间项工具批次，用来验证锚点映射在真实
+    /// SwiftUI LazyVStack 路径上的首/中/末可达性与阅读位置恢复。
+    private static func onlineStabilityHistory() -> Self {
+        var fixture = onlineTwoSessions()
+        guard let summary = fixture.catalog?.sessions.first(where: { $0.id == "S1" }) else {
+            return fixture
+        }
+        var snapshot = RACPSessionView.empty
+        snapshot.sessionId = summary.id
+        snapshot.summary = summary
+        snapshot.revision = 1
+        snapshot.replayComplete = true
+        snapshot.cursor = RACPCursor(epoch: "fixture-stability-history", sequence: 1_500)
+
+        var items: [RACPItem] = []
+        items.reserveCapacity(1_500)
+        var index = 1
+
+        func nextNumber() -> String {
+            defer { index += 1 }
+            return String(format: "%04d", index)
+        }
+
+        func item(_ id: String, role: String, text: String, toolName: String? = nil) -> RACPItem {
+            var payload: [String: JSONValue] = [
+                "id": .string(id),
+                "role": .string(role),
+                "text": .string(text),
+            ]
+            if let toolName {
+                payload["itemType"] = .string("tool")
+                payload["kind"] = .string("tool")
+                payload["toolName"] = .string(toolName)
+                payload["status"] = .string("completed")
+            }
+            return RACPItem(id: id, payload: .object(payload))
+        }
+
+        func addSimpleTurn() {
+            let number = nextNumber()
+            items.append(item(
+                "stability-\(number)-user",
+                role: "user",
+                text: "Stability user \(number)"
+            ))
+            items.append(item(
+                "stability-\(number)-tool",
+                role: "tool",
+                text: "Stability tool \(number)",
+                toolName: "bash"
+            ))
+            items.append(item(
+                "stability-\(number)-final",
+                role: "assistant",
+                text: "Stability final \(number)"
+            ))
+        }
+
+        func addGroupedTurn() {
+            let number = nextNumber()
+            items.append(item(
+                "stability-\(number)-user",
+                role: "user",
+                text: "Stability user \(number)"
+            ))
+            for offset in 1...2 {
+                items.append(item(
+                    "stability-\(number)-tool-\(offset)",
+                    role: "tool",
+                    text: "Stability tool \(number)-\(offset)",
+                    toolName: offset == 1 ? "bash" : "grep"
+                ))
+                items.append(item(
+                    "stability-\(number)-mid-\(offset)",
+                    role: "assistant",
+                    text: "Stability mid \(number)-\(offset)"
+                ))
+            }
+            items.append(item(
+                "stability-\(number)-final",
+                role: "assistant",
+                text: "Stability final \(number)"
+            ))
+        }
+
+        for _ in 0..<490 { addSimpleTurn() }
+        for _ in 0..<5 { addGroupedTurn() }
+        precondition(items.count == 1_500, "stability fixture must contain exactly 1,500 items")
+        snapshot.items = items
+        let start = ProcessInfo.processInfo.environment["PI_IOS_UI_STABILITY_START"]
+        if start == "group", let index = snapshot.items.firstIndex(where: { $0.id == "stability-0248-final" }) {
+            // Opt-in fold regression: make a two-tool group in the middle of the
+            // same 1,500 IDs. A group only four turns from the end can legitimately
+            // enter the 96pt near-bottom zone when compact rows collapse.
+            let id = snapshot.items[index].id
+            snapshot.items[index] = item(id, role: "tool", text: "Stability second tool 0248", toolName: "grep")
+        }
+        fixture.sessionSnapshots[summary.id] = snapshot
+        if let hostID = fixture.state.hosts.first(where: { $0.isCurrent })?.id {
+            let target: String?
+            switch start {
+            case "oldest": target = "stability-0001-user"
+            case "before-middle": target = "stability-0246-user"
+            case "middle": target = "stability-0248-user"
+            case "group": target = "stability-0248-tool"
+            default: target = nil
+            }
+            if let target {
+                fixture.state.readingPositionsByHost[hostID.uuidString, default: [:]][summary.id] =
+                    ConversationReadingPosition(lastVisibleItemID: target, isNearBottom: false)
+            }
+        }
+        return fixture
+    }
+
+    /// 前插分页夹具：当前页与第一张上一页都只含同一轮的工具片段，第二张
+    /// 上一页才带任务起点。loader 必须暂存两页并一次发布五项；跨页后三条
+    /// 工具合并为一行，原阅读位置保持不动。页面延迟让半轮可见性可被观察。
+    private static func onlineStabilityPaging() -> Self {
+        var fixture = onlineTwoSessions()
+        guard let summary = fixture.catalog?.sessions.first(where: { $0.id == "S1" }),
+              let hostID = fixture.state.hosts.first(where: { $0.isCurrent })?.id
+        else { return fixture }
+
+        var snapshot = RACPSessionView.empty
+        snapshot.sessionId = summary.id
+        snapshot.summary = summary
+        snapshot.revision = 2
+        snapshot.replayComplete = true
+        snapshot.hasMoreHistory = true
+        snapshot.cursor = RACPCursor(epoch: "fixture-stability-paging", sequence: 100)
+
+        func item(
+            _ id: String,
+            role: String,
+            text: String,
+            toolName: String? = nil,
+            turnID: String? = nil
+        ) -> RACPItem {
+            var payload: [String: JSONValue] = [
+                "id": .string(id),
+                "role": .string(role),
+                "text": .string(text),
+            ]
+            if let toolName {
+                payload["itemType"] = .string("tool")
+                payload["kind"] = .string("tool")
+                payload["toolName"] = .string(toolName)
+                payload["status"] = .string("completed")
+            }
+            if let turnID {
+                payload["turnId"] = .string(turnID)
+            }
+            return RACPItem(id: id, payload: .object(payload))
+        }
+
+        // Current page starts in the middle of a turn: two tools form the legacy
+        // fallback group, then the final reply closes the segment.
+        var items: [RACPItem] = [
+            item("paging-tool-2", role: "tool", text: "Paging tool 2", toolName: "bash", turnID: "paging-turn-1"),
+            item("paging-tool-3", role: "tool", text: "Paging tool 3", toolName: "grep", turnID: "paging-turn-1"),
+            item("paging-final-1", role: "assistant", text: "Paging boundary final 01", turnID: "paging-turn-1"),
+        ]
+        for index in 1...40 {
+            let number = String(format: "%02d", index)
+            items.append(item(
+                "paging-newer-\(number)",
+                role: "user",
+                text: "Paging newer \(number)"
+            ))
+        }
+        snapshot.items = items
+        fixture.sessionSnapshots[summary.id] = snapshot
+
+        // This nearer page still has no user boundary and must never reach view.
+        let toolOnlyPage = [
+            item("paging-tool-1", role: "tool", text: "Paging tool 1", toolName: "bash", turnID: "paging-turn-1"),
+        ]
+        var boundaryPage: [RACPItem] = []
+        for index in 1...3 {
+            let number = String(format: "%02d", index)
+            boundaryPage.append(item(
+                "paging-earlier-\(number)",
+                role: "user",
+                text: "Paging earlier \(number)"
+            ))
+        }
+        boundaryPage.append(item(
+            "paging-user-1",
+            role: "user",
+            text: "Paging boundary user 01",
+            turnID: "paging-turn-1"
+        ))
+        fixture.earlierHistoryPages[summary.id] = [
+            UITestEarlierHistoryPage(
+                items: toolOnlyPage,
+                hasMore: true,
+                delayMilliseconds: 1_200
+            ),
+            UITestEarlierHistoryPage(
+                items: boundaryPage,
+                hasMore: false,
+                delayMilliseconds: 3_000
+            ),
+        ]
+        fixture.state.readingPositionsByHost[hostID.uuidString, default: [:]][summary.id] =
+            ConversationReadingPosition(
+                lastVisibleItemID: "paging-tool-2",
+                isNearBottom: false
+            )
         return fixture
     }
 
@@ -368,7 +771,7 @@ struct UITestFixture {
         snapshot.summary = summary
         snapshot.revision = 1
         snapshot.replayComplete = true
-        snapshot.cursor = RACPCursor(epoch: "fixture-markdown", sequence: 3)
+        snapshot.cursor = RACPCursor(epoch: "fixture-markdown", sequence: 4)
         let text = """
         ## 磁盘信息
 
@@ -386,10 +789,31 @@ struct UITestFixture {
         ```
         """
         snapshot.items = [
+            RACPItem(id: "markdown-user-message", payload: .object([
+                "id": .string("markdown-user-message"),
+                "role": .string("user"),
+                "text": .string("请用 Markdown 展示磁盘信息"),
+            ])),
             RACPItem(id: "markdown-message", payload: .object([
                 "id": .string("markdown-message"),
                 "role": .string("assistant"),
                 "text": .string(text),
+            ])),
+            // Keep the empty tool in its own turn so it cannot pull the Markdown
+            // response above into a collapsed tool-run group.
+            RACPItem(id: "markdown-empty-tool-user", payload: .object([
+                "id": .string("markdown-empty-tool-user"),
+                "role": .string("user"),
+                "text": .string("执行一个无输出工具"),
+            ])),
+            // No `text`: copy tests must not mistake kind/toolName for a raw body.
+            RACPItem(id: "markdown-empty-tool", payload: .object([
+                "id": .string("markdown-empty-tool"),
+                "itemType": .string("tool"),
+                "kind": .string("tool"),
+                "role": .string("tool"),
+                "toolName": .string("bash"),
+                "status": .string("completed"),
             ])),
         ]
         fixture.sessionSnapshots[summary.id] = snapshot
@@ -518,14 +942,29 @@ struct UITestFixture {
             thinkingLevels: ["off", "low"], defaultThinkingLevel: nil,
             alias: "Alpha Mini"
         )
-        state.modelProviders = [StoredModelProvider(
-            providerId: "prv_alpha", hostV2Mirror: true, hostID: hostID,
-            name: "Alpha Models", baseURL: "https://alpha.invalid",
-            apiStyle: "chat_completions",
-            models: [StoredModelBinding(spec: pro), StoredModelBinding(spec: mini)],
-            defaultModelId: "alpha-pro",
-            importedAt: Date(timeIntervalSince1970: 1_704_164_640)
-        )]
+        // 第二条非默认服务：用于回归「编辑非默认服务的模型参数不能抢走全局默认」。
+        let beta = ProviderModelSpec(
+            id: "beta-basic", contextWindow: 32_000, maxTokens: 4_096,
+            thinkingLevels: [], alias: "Beta Basic"
+        )
+        state.modelProviders = [
+            StoredModelProvider(
+                providerId: "prv_alpha", hostV2Mirror: true, hostID: hostID,
+                name: "Alpha Models", baseURL: "https://alpha.invalid",
+                apiStyle: "chat_completions",
+                models: [StoredModelBinding(spec: pro), StoredModelBinding(spec: mini)],
+                defaultModelId: "alpha-pro",
+                importedAt: Date(timeIntervalSince1970: 1_704_164_640)
+            ),
+            StoredModelProvider(
+                providerId: "prv_beta", hostV2Mirror: true, hostID: hostID,
+                name: "Beta Models", baseURL: "https://beta.invalid",
+                apiStyle: "chat_completions",
+                models: [StoredModelBinding(spec: beta)],
+                defaultModelId: nil,
+                importedAt: Date(timeIntervalSince1970: 1_704_164_000)
+            ),
+        ]
         return Self(
             state: state,
             cache: fixture.cache,
@@ -546,6 +985,18 @@ struct UITestFixture {
                     "contextWindow":128000,"maxTokens":4096,
                     "thinkingLevels":["off","low"],
                     "supportsImages":false
+                }],
+                "createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"
+            }
+            """#.utf8)), try! JSONDecoder().decode(RACPV2Provider.self, from: Data(#"""
+            {
+                "id":"prv_beta","name":"Beta Models","vendorKey":"custom-beta",
+                "type":"openai_compatible","protocol":"openai_completions",
+                "baseUrl":"https://beta.invalid","authKind":"api_key",
+                "hasApiKey":true,"isDefault":false,"models":[{
+                    "id":"beta-basic","displayName":"Beta Basic",
+                    "contextWindow":32000,"maxTokens":4096,
+                    "thinkingLevels":[],"supportsImages":false
                 }],
                 "createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"
             }
@@ -986,6 +1437,14 @@ struct UITestFixture {
                     id: "fixture-item", sessionId: id, hostID: hostID,
                     text: "Fixture \(suffix) \(shared ? "shared" : "private") history", createdAt: time
                 ))
+                if hostID == hostB && !shared {
+                    // 无正文工具行：复制结果应为空，不得拿显示 fallback 冒充原文。
+                    cache.entries.append(OfflineSessionCacheEntry(
+                        id: "fixture-empty-tool", sessionId: id, hostID: hostID,
+                        text: "", createdAt: time.addingTimeInterval(1),
+                        kind: "tool", role: "tool", toolName: "bash", sequence: 8
+                    ))
+                }
                 cache.cursors.append(OfflineSessionCursor(
                     hostID: hostID, sessionId: id, epoch: "fixture-\(suffix)",
                     sequence: 7, updatedAt: time
@@ -1054,22 +1513,40 @@ struct UITestFixture {
         )
         state.offlineCacheLimit = 200
         var cache = OfflineSessionCacheSnapshot()
-        cache.entries = (1...205).map { index in
+        // 205 个完整轮次，每轮 user + assistant 并共享 turnId。默认保留 200 轮，
+        // 因而 001…005 必须整轮淘汰，006…205 必须整轮保留。
+        cache.entries = (1...205).flatMap { index in
             let number = String(format: "%03d", index)
-            return OfflineSessionCacheEntry(
-                id: "cache-item-\(number)",
-                sessionId: sessionID,
-                hostID: hostID,
-                text: "Cache item \(number)",
-                createdAt: time.addingTimeInterval(Double(index))
-            )
+            let turnID = "cache-turn-\(number)"
+            return [
+                OfflineSessionCacheEntry(
+                    id: "cache-user-\(number)",
+                    sessionId: sessionID,
+                    hostID: hostID,
+                    text: "Cache item \(number)",
+                    createdAt: time.addingTimeInterval(Double(index * 2)),
+                    role: "user",
+                    sequence: index * 2,
+                    turnId: turnID
+                ),
+                OfflineSessionCacheEntry(
+                    id: "cache-assistant-\(number)",
+                    sessionId: sessionID,
+                    hostID: hostID,
+                    text: "Cache reply \(number)",
+                    createdAt: time.addingTimeInterval(Double(index * 2 + 1)),
+                    role: "assistant",
+                    sequence: index * 2 + 1,
+                    turnId: turnID
+                ),
+            ]
         }
         cache.cursors = [
             OfflineSessionCursor(
                 hostID: hostID,
                 sessionId: sessionID,
                 epoch: "fixture-cache",
-                sequence: 205,
+                sequence: 410,
                 updatedAt: time
             ),
         ]

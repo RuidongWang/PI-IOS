@@ -685,12 +685,14 @@ public enum ProviderImportValidation {
                 )
             )
         }
-        if !ProviderVendorSchema.p0AuthKinds.contains(input.authKind) {
+        // `none` is a valid Host provider type: editing such a provider must be
+        // possible without inventing a secret. Other unsupported kinds still fail.
+        if !ProviderVendorSchema.p0AuthKinds.contains(input.authKind) && input.authKind != "none" {
             issues.append(
                 .init(
                     kind: .invalidEnumValue,
                     path: "\(providerPath).authKind",
-                    message: "authKind 首版只支持 \(ProviderVendorSchema.p0AuthKinds.joined(separator: " / "))（订阅账号与 none 不在 P0 范围），当前是「\(input.authKind)」"
+                    message: "authKind 首版只支持 \(ProviderVendorSchema.p0AuthKinds.joined(separator: " / ")) 或 none，当前是「\(input.authKind)」"
                 )
             )
         }

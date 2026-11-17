@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import PIiOSCore
 
 /// 三个根页 + 左上 ≡ 抽屉侧边栏（information-architecture.md §2/§3，不做底部标签栏）。
@@ -7,6 +8,7 @@ struct AppRootView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var connection: ConnectionModel
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     /// U10：用户是否明确选择过「启用提醒」，以及是否已经解释过一次。
     @AppStorage(NotificationPromptPolicy.userEnabledDefaultsKey)
@@ -15,6 +17,7 @@ struct AppRootView: View {
     private var notificationsExplained = false
     @State private var notificationStatus: LocalNotificationAuthorizationStatus = .notDetermined
     @State private var showingNotificationPrompt = false
+    @State private var backgroundFlush: BackgroundFlushLease?
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -23,6 +26,7 @@ struct AppRootView: View {
             if model.isSidebarOpen {
                 scrim
                 SidebarView()
+                    .frame(width: dynamicTypeSize.isAccessibilitySize ? UIScreen.main.bounds.width : PIMetrics.sidebarWidth)
                     .transition(.move(edge: .leading))
             }
         }
@@ -33,6 +37,16 @@ struct AppRootView: View {
                 notificationPromptBanner
             }
         }
+#if DEBUG
+        .overlay(alignment: .bottomLeading) {
+            // UI-test runners are background processes on recent iOS releases and
+            // may be denied pasteboard reads. Read the real pasteboard in the app
+            // process only for the explicit test probe; never included in release.
+            if ProcessInfo.processInfo.environment["PI_IOS_UI_CLIPBOARD_PROBE"] == "1" {
+                UIClipboardProbe()
+            }
+        }
+#endif
         // 指纹核对 / 指纹变化浮层放在根视图（DEF-R4-004）：它可能在任意页面由
         // 后台重连触发，不能只在服务器页或安装页可见时才呈现。
         .sheet(item: $connection.hostKeyPrompt) { prompt in
@@ -70,10 +84,36 @@ struct AppRootView: View {
             evaluateNotificationPrompt()
         }
         .onChange(of: scenePhase) { _, phase in
+            // 卡顿监测只在真正可见时运行；前后台切换各记一条，便于对齐日志时间轴。
+            model.updateLogSceneActive(phase == .active)
+            switch phase {
+            case .active:
+                PILog.info("App", "回到前台")
+            case .background:
+                PILog.info("App", "进入后台")
+            case .inactive:
+                break
+            @unknown default:
+                break
+            }
             if phase == .background {
                 model.captureBackgroundBaseline()
-                model.flushPersistentState()
-                Task { await model.connection.flushPendingCacheWrites() }
+                backgroundFlush?.cancelAndFinish()
+                let lease = BackgroundFlushLease(name: "PI-IOS persistence")
+                backgroundFlush = lease
+                lease.start(
+                    work: {
+                        await model.flushForBackground()
+                        await model.flushLogsForBackground()
+                    },
+                    completion: {
+                        // Only the newest, still-active lease may publish its
+                        // completion to the view; a cancelled/expired lease's
+                        // already queued IO is not rolled back.
+                        guard self.backgroundFlush?.version == lease.version else { return }
+                        self.backgroundFlush = nil
+                    }
+                )
             }
         }
         .task(id: scenePhase) {
@@ -123,22 +163,17 @@ struct AppRootView: View {
 
     // MARK: - 通知授权说明（U10）
 
-    /// 解释卡只在「有可继续的会话 + 系统还没决定 + 用户没启用也没选稍后」时出现；
-    /// 点「启用提醒」才真正弹系统授权，点「稍后」不再打扰。
+    /// 解释卡只在「有可继续的会话 + 系统还没决定 + 用户没启用也没选稍后」时出现。
+    ///
+    /// quiet-v2：一行话 + 两个动作。原来三行（标题/正文/细节）是把产品文档搬进 UI，
+    /// 用户只需要知道「要不要开」，不需要知道通知的实现方式。
     @ViewBuilder
     private var notificationPromptBanner: some View {
         if showingNotificationPrompt {
-            VStack(alignment: .leading, spacing: PISpacing.s8) {
+            VStack(alignment: .leading, spacing: PISpacing.s12) {
                 Text(NotificationPromptPolicy.explanationTitle)
                     .font(PIFont.captionStrong)
                     .foregroundStyle(PIColor.text)
-                Text(NotificationPromptPolicy.explanationBody)
-                    .font(PIFont.caption)
-                    .foregroundStyle(PIColor.text2)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(NotificationPromptPolicy.explanationDetail)
-                    .font(PIFont.meta)
-                    .foregroundStyle(PIColor.text3)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: PISpacing.s8) {
                     PISecondaryButton(title: "稍后") {
@@ -160,7 +195,7 @@ struct AppRootView: View {
                 RoundedRectangle(cornerRadius: PIRadius.card, style: .continuous)
                     .strokeBorder(PIColor.separator, lineWidth: PIMetrics.hairline)
             )
-            .shadow(color: PIColor.floatingShadow.opacity(0.5), radius: 14, y: 5)
+            .shadow(color: PIColor.floatingShadow, radius: 14, y: 5)
             .padding(.horizontal, PIMetrics.pageMargin)
             .padding(.top, PISpacing.s8)
             .accessibilityIdentifier("notifications.prompt")
@@ -201,5 +236,94 @@ struct AppRootView: View {
     private func deferNotificationPrompt() {
         notificationsExplained = true
         showingNotificationPrompt = false
+    }
+}
+
+#if DEBUG
+/// Read-only, in-process clipboard evidence for UI tests. The one-pixel view is
+/// non-interactive and exists only when the explicit launch environment opts in.
+private struct UIClipboardProbe: View {
+    @State private var text = "<empty>"
+    private let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Text(text)
+            .accessibilityIdentifier("uitest.clipboard.contents")
+            .frame(width: 1, height: 1)
+            .opacity(0.01)
+            .allowsHitTesting(false)
+            .onReceive(timer) { _ in
+                let raw = UIPasteboard.general.string ?? ""
+                let current = raw.isEmpty ? "<empty>" : raw
+                guard current != text else { return }
+                text = current
+            }
+    }
+}
+#endif
+
+/// Owns one UIKit background-task assertion and ends it exactly once, whether
+/// the ordered flushes finish or the system invokes the expiration handler.
+/// The assertion is acquired in `init`, before the persistence `Task` starts.
+@MainActor
+final class BackgroundFlushLease {
+    /// Monotonic lease version used to gate completion-visible work.
+    private static var nextVersion: UInt64 = 0
+    let version: UInt64
+    private var identifier: UIBackgroundTaskIdentifier = .invalid
+    private var task: Task<Void, Never>?
+    private var ended = false
+    private let endAssertion: (UIBackgroundTaskIdentifier) -> Void
+
+    init(name: String,
+         begin: ((_ expiration: @escaping @Sendable () -> Void) -> UIBackgroundTaskIdentifier)? = nil,
+         end: ((UIBackgroundTaskIdentifier) -> Void)? = nil) {
+        BackgroundFlushLease.nextVersion &+= 1
+        version = BackgroundFlushLease.nextVersion
+        endAssertion = end ?? { UIApplication.shared.endBackgroundTask($0) }
+        let expiration: @Sendable () -> Void = { [weak self] in
+            Task { @MainActor in self?.expire() }
+        }
+        identifier = begin?(expiration)
+            ?? UIApplication.shared.beginBackgroundTask(withName: name, expirationHandler: expiration)
+    }
+
+    /// Current means not ended by `cancelAndFinish`/`expire` and not cancelled.
+    var isActive: Bool { !ended && !Task.isCancelled }
+
+    func start(
+        work: @escaping @MainActor () async -> Void,
+        completion: @escaping @MainActor () -> Void = {}
+    ) {
+        guard !ended, task == nil else { return }
+        task = Task { @MainActor [self] in
+            defer { finish() }
+            guard isActive else { return }
+            await work()
+            // Physical IO may already be committed; cancellation only suppresses
+            // completion-visible state, never pretends the write was undone.
+            guard isActive else { return }
+            completion()
+        }
+    }
+
+    func cancelAndFinish() {
+        task?.cancel()
+        finish()
+    }
+
+    private func expire() {
+        task?.cancel()
+        finish()
+    }
+
+    private func finish() {
+        guard !ended else { return }
+        ended = true
+        task = nil
+        let identifier = self.identifier
+        self.identifier = .invalid
+        guard identifier != .invalid else { return }
+        endAssertion(identifier)
     }
 }

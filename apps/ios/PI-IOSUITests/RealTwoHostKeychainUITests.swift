@@ -70,7 +70,7 @@ final class RealTwoHostKeychainUITests: XCTestCase {
         }
         XCTAssertTrue(app.staticTexts["已保存设备令牌"].waitForExistence(timeout: 10))
         XCTAssertTrue(
-            app.staticTexts["在线"].waitForExistence(timeout: 30),
+            waitForOnline(timeout: 30),
             "PI-adaptor B must reconnect with its newly persisted token."
         )
 
@@ -79,7 +79,7 @@ final class RealTwoHostKeychainUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["已保存设备令牌"].waitForExistence(timeout: 10))
         connectPiHost()
         XCTAssertTrue(
-            app.staticTexts["在线"].waitForExistence(timeout: 30),
+            waitForOnline(timeout: 30),
             "PI-adaptor A must keep its own token and reconnect independently."
         )
 
@@ -88,9 +88,20 @@ final class RealTwoHostKeychainUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["已保存设备令牌"].waitForExistence(timeout: 10))
         connectPiHost()
         XCTAssertTrue(
-            app.staticTexts["在线"].waitForExistence(timeout: 30),
+            waitForOnline(timeout: 30),
             "PI-adaptor B must reconnect again without borrowing PI-adaptor A's token."
         )
+    }
+
+    /// 在线状态优先读「已保存设备令牌」行的 identifier 与标签，避免只靠中文文案定位。
+    private func waitForOnline(timeout: TimeInterval) -> Bool {
+        let row = app.descendants(matching: .any)["servers.pairing.tokenState"].firstMatch
+        if row.waitForExistence(timeout: 5) {
+            let predicate = NSPredicate(format: "label CONTAINS %@", "在线")
+            let expectation = XCTNSPredicateExpectation(predicate: predicate, object: row)
+            return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+        }
+        return app.staticTexts["在线"].waitForExistence(timeout: timeout)
     }
 
     private func connectPiHost() {
