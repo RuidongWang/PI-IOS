@@ -44,8 +44,11 @@ final class ServerInstallLatestUITests: XCTestCase {
         // `scripts/check-host-release-consistency.py` 与 `AdaptorReleaseManifestTests`
         // 守住（App MARKETING_VERSION == host-release.json == BootstrapRelease）；
         // 跨版本复跑时可用 `PI_IOS_EXPECTED_RELEASE_VERSION` 覆盖。
-        let expectedVersion = ProcessInfo.processInfo.environment["PI_IOS_EXPECTED_RELEASE_VERSION"]
-            ?? "0.0.5"
+        let expectedVersion = try XCTUnwrap(
+            ProcessInfo.processInfo.environment["PI_IOS_EXPECTED_RELEASE_VERSION"]
+                ?? (Bundle(for: Self.self).object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String),
+            "无法读取 UI 测试构建的版本号"
+        )
         XCTAssertTrue(
             resolved.label.contains("PI-adaptor \(expectedVersion)"),
             "本次目标版本应为 PI-adaptor \(expectedVersion)，实际：\(resolved.label)\n\(dumpTexts(app))"

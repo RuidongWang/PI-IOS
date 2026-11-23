@@ -46,7 +46,7 @@ struct StoredModelBinding: Codable, Equatable, Identifiable {
 
 }
 
-/// The API key is deliberately absent: the server owns it after import.
+/// Local provider metadata. The API key lives in the device Keychain.
 struct StoredModelProvider: Codable, Equatable, Identifiable {
     var providerId: String
     /// The provider id the legacy SSH `provider-import` assigned, when this
@@ -67,6 +67,9 @@ struct StoredModelProvider: Codable, Equatable, Identifiable {
     var models: [StoredModelBinding]
     var defaultModelId: String?
     var importedAt: Date
+    /// Older Keychain records contain just the key. Keep their original URL across local edits.
+    var legacyKeyBaseURL: String? = nil
+    var endpointForLegacyKey: String { legacyKeyBaseURL ?? baseURL }
 
     var id: String { "\(hostID.uuidString):\(providerId)" }
 

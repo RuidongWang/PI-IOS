@@ -33,7 +33,7 @@ SSH 凭证、设备令牌、直连证书指纹和模型 API Key 只存本机 Key
 
 - 浏览服务器目录、注册项目、创建/改名/归档/删除会话。
 - 会话内运行 turn，流式查看回复、工具调用与结果。
-- 审批卡（allow once / allow session / deny）、提问卡、中断与排队发送。
+- 审批卡（allow once / allow session / deny）、中断与排队发送。
 - 工具结果默认折叠，大结果按有界预览展示。
 
 ### 模型

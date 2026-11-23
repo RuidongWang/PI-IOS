@@ -22,7 +22,7 @@ final class SessionIdempotencyRetryTests: XCTestCase {
 
     private func itemID(_ action: SessionRequestAction) -> String? {
         switch action {
-        case .turn: return nil
+        case .sessionCreate, .turn: return nil
         case .input: return "input"
         default: return "approval"
         }
@@ -175,6 +175,9 @@ final class SessionIdempotencyRetryTests: XCTestCase {
         let revision = itemID(action) == "input" ? model.expectedRevisionForInput(id: "input") : model.expectedRevisionForApproval(id: "approval")
         let context = RACPContext(requestId: requestID, idempotencyKey: attempt.idempotencyKey, expectedRevision: revision)
         switch action {
+        case .sessionCreate(var params):
+            params.context = context
+            return try encoded(.sessionCreate, params, requestID: requestID)
         case .turn(let text):
             return try encoded(.turnStart, RACPTurnStartParams(sessionId: "fixture-session", admission: attempt.admission, input: RACPTurnInput(text: text), context: context), requestID: requestID)
         case .turnAttachments(let text, let attachmentIds):

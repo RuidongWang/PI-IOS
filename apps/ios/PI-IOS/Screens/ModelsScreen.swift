@@ -698,7 +698,8 @@ struct ModelsScreen: View {
                             if !KeychainStore.saveProviderKey(
                                 normalizedAPIKey,
                                 hostID: operation.hostID,
-                                providerId: providerId
+                                providerId: providerId,
+                                baseURL: input.baseUrl ?? ""
                             ) {
                                 keyWarning = "已导入 \(input.models.count) 个模型，但密钥未存上：请重新填写 API Key。"
                             }

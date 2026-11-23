@@ -17,8 +17,9 @@ final class ProviderKeyLookupTests: XCTestCase {
         let otherProviderID = "provider_beta"
         let key = "sk-test-client-only"
 
-        let written = KeychainStore.saveProviderKey(key, hostID: hostID, providerId: providerID)
-            && KeychainStore.saveProviderKey("sk-other", hostID: otherHostID, providerId: providerID)
+        let endpoint = "https://provider.invalid/v1"
+        let written = KeychainStore.saveProviderKey(key, hostID: hostID, providerId: providerID, baseURL: endpoint)
+            && KeychainStore.saveProviderKey("sk-other", hostID: otherHostID, providerId: providerID, baseURL: endpoint)
         guard written else {
             throw XCTSkip("模拟器 Keychain 不可写，跳过 provider key lookup 用例")
         }
@@ -70,33 +71,53 @@ final class ProviderKeyLegacyFallbackTests: XCTestCase {
 
     func testTurnKeyFallsBackToLegacyProviderID() throws {
         let key = "sk-legacy-only"
-        guard KeychainStore.saveProviderKey(key, hostID: hostID, providerId: "prv_legacy") else {
+        guard KeychainStore.set(
+            Data(key.utf8),
+            service: "dev.piios.providerkey",
+            account: "provider-key:\(hostID.uuidString.lowercased()):prv_legacy"
+        ) else {
             throw XCTSkip("模拟器 Keychain 不可写，跳过 provider key fallback 用例")
         }
 
         let model = makeModel()
         XCTAssertEqual(
-            model.providerKeyForTurn(providerId: "prv_v2", hostID: hostID),
+            model.providerCredentialForTurn(providerId: "prv_v2", hostID: hostID)?.value,
             key,
             "v2 id 没有明文时必须回退到本机记录里的 legacy id"
         )
         XCTAssertEqual(
-            model.connection.session.providerAPIKey?("prv_v2"),
+            model.connection.session.providerCredential?("prv_v2")?.value,
             key,
             "会话发送注入的解析器也必须走同一回退"
         )
-        XCTAssertNil(model.providerKeyForTurn(providerId: "prv_unknown", hostID: hostID))
+        XCTAssertEqual(model.connection.session.providerCredential?("prv_v2")?.baseURL, "https://legacy.invalid")
+        XCTAssertNil(model.providerCredentialForTurn(providerId: "prv_unknown", hostID: hostID))
+
+        let host = try XCTUnwrap(model.currentHost)
+        let context = try XCTUnwrap(model.providerOperationContext(for: host))
+        let changed = ProviderCreateInput(
+            name: "Edited mirror", vendorKey: "fixture", type: "openai_compatible",
+            protocol: "openai_completions", authKind: "api_key", baseUrl: "https://new.invalid",
+            models: []
+        )
+        XCTAssertTrue(model.recordImportedProvider(
+            context: context, input: changed, providerId: "prv_v2", serverDefaultSet: false,
+            legacyProviderId: "prv_legacy", hostV2Mirror: true
+        ))
+        XCTAssertEqual(model.connection.session.providerCredential?("prv_v2")?.baseURL, "https://legacy.invalid")
     }
 
     func testDirectProviderIDKeyWinsOverLegacyFallback() throws {
-        guard KeychainStore.saveProviderKey("sk-legacy", hostID: hostID, providerId: "prv_legacy"),
-              KeychainStore.saveProviderKey("sk-v2", hostID: hostID, providerId: "prv_v2")
+        guard KeychainStore.saveProviderKey("sk-legacy", hostID: hostID, providerId: "prv_legacy", baseURL: "https://legacy.invalid"),
+              KeychainStore.saveProviderKey("sk-v2", hostID: hostID, providerId: "prv_v2", baseURL: "https://v2.invalid")
         else {
             throw XCTSkip("模拟器 Keychain 不可写，跳过 provider key fallback 用例")
         }
 
         let model = makeModel()
-        XCTAssertEqual(model.providerKeyForTurn(providerId: "prv_v2", hostID: hostID), "sk-v2")
+        let credential = model.providerCredentialForTurn(providerId: "prv_v2", hostID: hostID)
+        XCTAssertEqual(credential?.value, "sk-v2")
+        XCTAssertEqual(credential?.baseURL, "https://v2.invalid")
     }
 
     private func makeModel() -> AppModel {

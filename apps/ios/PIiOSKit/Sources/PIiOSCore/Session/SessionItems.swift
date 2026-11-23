@@ -76,6 +76,9 @@ public struct RACPItem: Equatable, Sendable {
             ?? payload.value(at: ["kind"])?.stringValue
     }
     public var kind: String? { itemType }
+    public var historyTextByteLength: Int? {
+        payload.value(at: ["textByteLength"])?.intValue
+    }
     public var role: String? {
         payload.value(at: ["role"])?.stringValue
             ?? contentObject?.value(at: ["role"])?.stringValue

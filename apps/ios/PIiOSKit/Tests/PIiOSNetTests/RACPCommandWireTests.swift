@@ -114,12 +114,17 @@ final class RACPCommandWireTests: XCTestCase {
             admission: nil,
             input: RACPTurnInput(text: "继续"),
             context: RACPContext(requestId: "req_3"),
-            apiKey: "sk-transient-only-in-memory"
+            apiKey: "sk-transient-only-in-memory",
+            providerBinding: .init(providerId: "provider-1", baseUrl: "https://provider.invalid/v1")
         )
         let withKeyPayload = try XCTUnwrap(
             try encodedObject(.turnStart, params: withKey)["params"] as? [String: Any]
         )
         XCTAssertEqual(withKeyPayload["apiKey"] as? String, "sk-transient-only-in-memory")
+        XCTAssertEqual(
+            withKeyPayload["providerBinding"] as? [String: String],
+            ["providerId": "provider-1", "baseUrl": "https://provider.invalid/v1"]
+        )
         XCTAssertNil(withKeyPayload["idempotencyKey"], "幂等键仍只能出现在 context 内")
 
         let withoutKey = RACPTurnStartParams(
@@ -131,6 +136,7 @@ final class RACPCommandWireTests: XCTestCase {
             try encodedObject(.turnStart, params: withoutKey)["params"] as? [String: Any]
         )
         XCTAssertNil(withoutKeyPayload["apiKey"], "nil 必须省略字段，不能发送 null")
+        XCTAssertNil(withoutKeyPayload["providerBinding"])
     }
 
     func testTurnInterruptAddressesTurnById() throws {

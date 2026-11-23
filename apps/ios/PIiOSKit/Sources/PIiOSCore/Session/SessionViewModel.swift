@@ -4,6 +4,7 @@ import CryptoKit
 // MARK: - Persistent request identity (AC-14.4)
 
 public enum SessionRequestAction: Codable, Equatable, Sendable {
+    case sessionCreate(RACPSessionCreateParams)
     case turn(text: String)
     case turnAttachments(text: String, attachmentIds: [String])
     case approval(decision: RACPApprovalDecision, permissionMode: RACPPermissionMode?)
@@ -385,6 +386,7 @@ public final class SessionViewModel {
     public private(set) var activeTurnId: String?
     private var terminalTurnSequences: [String: Int] = [:]
     public private(set) var queuedTurns: [JSONValue] = []
+    public private(set) var failedQueueStartID: String?
     private var queuedTurnIDs: Set<String> = []
     public private(set) var pendingApprovals: [RACPApprovalRequest] = []
     public private(set) var pendingInputs: [RACPInputRequest] = []
@@ -435,6 +437,7 @@ public final class SessionViewModel {
         terminalTurnSequences = [:]
         queuedTurns = []
         queuedTurnIDs = []
+        failedQueueStartID = nil
         pendingApprovals = []
         pendingInputs = []
         hasMoreHistory = false
@@ -745,6 +748,10 @@ public final class SessionViewModel {
             activeTurnId = turnId
             removeQueuedTurn(id: turnId)
         case "turn.completed", "turn.interrupted", "turn.failed", "turn.canceled":
+            if kind == "turn.failed",
+               event.payload.value(at: ["payload", "turn", "settledReason"])?.stringValue == "queue_start_failed" {
+                failedQueueStartID = turnId
+            }
             if event.sequence > 0 {
                 terminalTurnSequences[turnId] = max(terminalTurnSequences[turnId] ?? 0, event.sequence)
             }

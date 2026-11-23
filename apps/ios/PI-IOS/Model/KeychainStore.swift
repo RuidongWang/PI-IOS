@@ -435,9 +435,16 @@ enum KeychainStore {
         "provider-key:\(hostID.uuidString.lowercased()):\(providerId)"
     }
 
+    struct ProviderKeyRecord: Codable {
+        var value: String
+        var baseURL: String?
+    }
+
     @discardableResult
-    static func saveProviderKey(_ key: String, hostID: UUID, providerId: String) -> Bool {
-        guard !key.isEmpty, let data = key.data(using: .utf8) else { return false }
+    static func saveProviderKey(_ key: String, hostID: UUID, providerId: String, baseURL: String) -> Bool {
+        guard !key.isEmpty, !baseURL.isEmpty,
+              let data = try? JSONEncoder().encode(ProviderKeyRecord(value: key, baseURL: baseURL))
+        else { return false }
         return set(
             data,
             service: Service.providerKey,
@@ -446,11 +453,18 @@ enum KeychainStore {
     }
 
     static func loadProviderKey(hostID: UUID, providerId: String) -> String? {
+        loadProviderKeyRecord(hostID: hostID, providerId: providerId)?.value
+    }
+
+    static func loadProviderKeyRecord(hostID: UUID, providerId: String) -> ProviderKeyRecord? {
         guard let data = get(
             service: Service.providerKey,
             account: providerKeyAccount(hostID: hostID, providerId: providerId)
         ) else { return nil }
-        return String(data: data, encoding: .utf8)
+        if let scoped = try? JSONDecoder().decode(ProviderKeyRecord.self, from: data) {
+            return scoped
+        }
+        return String(data: data, encoding: .utf8).map { ProviderKeyRecord(value: $0, baseURL: nil) }
     }
 
     /// 区分「确实不存在」和「读取失败」。仅凭 `loadProviderKey` 的 nil 无法判断

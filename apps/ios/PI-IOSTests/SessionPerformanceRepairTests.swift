@@ -231,6 +231,14 @@ final class SessionPerformanceRepairTests: XCTestCase {
         XCTAssertTrue(pending.isEmpty)
     }
 
+    func testQueuedOrCanceledTurnDoesNotCreateTranscriptEcho() {
+        XCTAssertFalse(SessionController.shouldEchoSend(status: "queued", queued: true))
+        XCTAssertFalse(SessionController.shouldEchoSend(status: nil, queued: true))
+        XCTAssertFalse(SessionController.shouldEchoSend(status: "canceled", queued: false))
+        XCTAssertFalse(SessionController.shouldEchoSend(status: "failed", queued: false))
+        XCTAssertTrue(SessionController.shouldEchoSend(status: "running", queued: false))
+    }
+
     func testOptimisticEchoIsSessionScopedAndDoesNotDuplicateOnRefresh() {
         var pending = [echo(id: "local-user-1", session: "a", turn: "turn1", text: "hello",
                              baseline: [])]

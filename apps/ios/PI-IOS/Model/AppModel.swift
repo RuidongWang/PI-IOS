@@ -1408,30 +1408,27 @@ final class AppModel: ObservableObject {
         modelProviders.first { $0.hostID == hostID && $0.providerId == providerId }
     }
 
-    /// 发送前按「当前 Host + 会话绑定的 provider id」取本机 Keychain 明文。
-    ///
-    /// 早期通过 SSH legacy 路径导入、后来镜像到 v2 的记录，本机密钥可能仍只挂在
-    /// `legacyProviderId` 上。这里按本机映射再回退一次，避免出现「provider 已同步
-    /// 到服务器、key 却没有同步」造成的 `PROVIDER_SECRET_MISSING`；未命中时返回
-    /// nil，由服务器按契约明确拒绝，不猜测、不复用其他服务的 key。
-    func providerKeyForTurn(providerId: String, hostID: UUID) -> String? {
-        if let key = KeychainStore.loadProviderKey(hostID: hostID, providerId: providerId) {
-            return key
+    /// Resolve the key with its saved endpoint. Raw Keychain entries can use the
+    /// existing local projection, including an explicitly recorded legacy mirror.
+    func providerCredentialForTurn(providerId: String, hostID: UUID) -> KeychainStore.ProviderKeyRecord? {
+        let stored = storedProvider(hostID: hostID, providerId: providerId)
+        var key = KeychainStore.loadProviderKeyRecord(hostID: hostID, providerId: providerId)
+        if key == nil, let legacyID = stored?.legacyProviderId, legacyID != providerId {
+            key = KeychainStore.loadProviderKeyRecord(hostID: hostID, providerId: legacyID)
         }
-        guard let legacyProviderId = modelProviders.first(where: {
-            $0.hostID == hostID && $0.providerId == providerId
-        })?.legacyProviderId,
-        legacyProviderId != providerId
-        else { return nil }
-        return KeychainStore.loadProviderKey(hostID: hostID, providerId: legacyProviderId)
+        let legacyEndpoint = stored?.endpointForLegacyKey
+        if key?.baseURL == nil, let legacyEndpoint, !legacyEndpoint.isEmpty {
+            key?.baseURL = legacyEndpoint
+        }
+        return key
     }
 
     /// 会话发送路径的 key 解析器。ConnectionModel 在 init 里装了默认实现（只按
     /// provider id 查）；AppModel 持有本机映射，能在默认实现之上补 legacy 回退。
     private func installProviderAPIKeyResolver() {
-        connection.session.providerAPIKey = { [weak self] providerId in
+        connection.session.providerCredential = { [weak self] providerId in
             guard let self, let hostID = self.currentHost?.id else { return nil }
-            return self.providerKeyForTurn(providerId: providerId, hostID: hostID)
+            return self.providerCredentialForTurn(providerId: providerId, hostID: hostID)
         }
     }
 
@@ -1454,6 +1451,9 @@ final class AppModel: ObservableObject {
             $0.hostID == hostID && $0.providerId == providerId
         }
         let previousDefault = previousRecord?.defaultModelId
+        let legacyKeyBaseURL = previousRecord?.endpointForLegacyKey
+            ?? legacyProviderId.flatMap { storedProvider(hostID: hostID, providerId: $0)?.endpointForLegacyKey }
+            ?? ""
         // 默认模型是 host 级单选：`input.defaultModelId` 代表「本次用户明确选择或
         // 导入载荷声明的默认」，必须优先于本机旧值；旧实现把 previous 排在新选择
         // 前面，导致「设为默认」在刷新本机记录时被还原成旧默认。
@@ -1479,7 +1479,8 @@ final class AppModel: ObservableObject {
                 apiStyle: input.apiStyle ?? "chat_completions",
                 models: input.models.map(StoredModelBinding.init(spec:)),
                 defaultModelId: defaultModelId,
-                importedAt: Date()
+                importedAt: Date(),
+                legacyKeyBaseURL: legacyKeyBaseURL
             )
         )
         if defaultModelId != nil {

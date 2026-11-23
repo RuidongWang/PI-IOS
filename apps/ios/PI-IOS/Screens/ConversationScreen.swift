@@ -113,6 +113,14 @@ struct ConversationScreen: View {
 
     private var currentHost: HostRecord? { model.currentHost }
 
+    private var historyTextLoader: @MainActor (RACPItem) async -> String? {
+        let selection = session.attachmentSelectionGeneration
+        return { item in
+            guard session.attachmentSelectionGeneration == selection else { return nil }
+            return await session.copyableHistoryText(for: item)
+        }
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -334,6 +342,7 @@ struct ConversationScreen: View {
                 }
                 if session.openingSessionID == nil { composer }
             }
+            .environment(\.conversationHistoryTextLoader, historyTextLoader)
             .piPageBackground()
             .overlay(alignment: .topLeading) {
 #if DEBUG
@@ -2282,13 +2291,18 @@ struct ConversationScreen: View {
         var title: String?
         if let providerID = session.selectedProviderId,
            let modelID = session.selectedModelId {
+            let credential = session.providerCredential?(providerID)
+            let binding = credential?.baseURL.flatMap { baseURL in
+                baseURL.isEmpty ? nil : RACPProviderKeyBinding(providerId: providerID, baseUrl: baseURL)
+            }
             do {
                 title = try await connection.suggestSessionTitle(
                     sessionId: sessionID,
                     instruction: instruction,
                     providerId: providerID,
                     modelId: modelID,
-                    apiKey: session.providerAPIKey?(providerID),
+                    apiKey: binding == nil ? nil : credential?.value,
+                    providerBinding: binding,
                     thinkingLevel: session.thinkingLevel?.rawValue
                 )
             } catch {
@@ -2521,9 +2535,11 @@ struct ConversationScreen: View {
         guard let local = model.currentModelProviders.first(where: {
             $0.providerId == pinnedProviderId && $0.hostV2Mirror != true
         }) else { return false }
-        guard let key = KeychainStore.loadProviderKey(hostID: host.id, providerId: pinnedProviderId),
+        guard let credential = model.providerCredentialForTurn(providerId: pinnedProviderId, hostID: host.id),
+              credential.baseURL == local.baseURL,
               let operation = model.providerOperationContext(for: host)
         else { return false }
+        let key = credential.value
         let specs = local.models.map(\.providerSpec)
         guard let mirrored = try? await connection.registerAdaptorProvider(
             name: local.name,
@@ -2553,7 +2569,7 @@ struct ConversationScreen: View {
         // 镜像后会话绑定的是新的 v2 provider id；Keychain 里的明文仍挂在 legacy id
         // 下。发送路径按会话里的 provider id 取 key，这里不同步写一份就会得到
         // PROVIDER_SECRET_MISSING——provider 已上传服务器、key 却没有同步。
-        if !KeychainStore.saveProviderKey(key, hostID: host.id, providerId: mirrored.id) {
+        if !KeychainStore.saveProviderKey(key, hostID: host.id, providerId: mirrored.id, baseURL: mirrored.baseUrl) {
             PILog.warn(
                 "Model",
                 "provider 镜像后本机密钥写入失败 provider=\(String(mirrored.id.prefix(8)))"
@@ -2608,26 +2624,55 @@ private struct ConversationItemFrameKey: PreferenceKey {
     }
 }
 
-/// Explicit copy action kept separate from selectable text so long press always
-/// belongs to the system selection gesture. Empty bodies intentionally copy "".
+private struct ConversationHistoryTextLoaderKey: EnvironmentKey {
+    static let defaultValue: (@MainActor (RACPItem) async -> String?)? = nil
+}
+
+private extension EnvironmentValues {
+    var conversationHistoryTextLoader: (@MainActor (RACPItem) async -> String?)? {
+        get { self[ConversationHistoryTextLoaderKey.self] }
+        set { self[ConversationHistoryTextLoaderKey.self] = newValue }
+    }
+}
+
+/// A separate action leaves the system text-selection gesture available.
 private func copyMessageButton(_ item: RACPItem) -> some View {
-    copyMessageButton(
-        text: item.text ?? "",
-        identifier: "conversation.copyMessage.\(item.id)"
-    )
+    ConversationItemCopyButton(item: item)
+}
+
+private struct ConversationItemCopyButton: View {
+    let item: RACPItem
+    @Environment(\.conversationHistoryTextLoader) private var loadHistoryText
+    @State private var isLoading = false
+
+    var body: some View {
+        copyMessageButton(identifier: "conversation.copyMessage.\(item.id)") {
+            guard item.historyTextByteLength != nil, let loadHistoryText else {
+                UIPasteboard.general.string = item.text ?? ""
+                return
+            }
+            isLoading = true
+            Task { @MainActor in
+                defer { isLoading = false }
+                if let text = await loadHistoryText(item) {
+                    UIPasteboard.general.string = text
+                }
+            }
+        }
+        .disabled(isLoading)
+    }
 }
 
 private func copyMessageButton(_ entry: OfflineSessionCacheEntry) -> some View {
     copyMessageButton(
-        text: entry.text,
         identifier: "conversation.offlineCopyMessage.\(entry.id)"
-    )
+    ) {
+        UIPasteboard.general.string = entry.text
+    }
 }
 
-private func copyMessageButton(text: String, identifier: String) -> some View {
-    Button {
-        UIPasteboard.general.string = text
-    } label: {
+private func copyMessageButton(identifier: String, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
         Label("复制消息", systemImage: "doc.on.doc")
             .labelStyle(.iconOnly)
     }

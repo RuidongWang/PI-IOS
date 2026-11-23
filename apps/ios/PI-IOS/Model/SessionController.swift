@@ -115,7 +115,7 @@ final class SessionController: ObservableObject {
     /// 密钥不落服务器（keyStorage=client），发送时按当前 `selectedProviderId` 取 key
     /// 并作为 `turn/start.apiKey` 一次性透传。这里只保存取 key 的闭包，绝不缓存 key、
     /// 不写日志；读取失败返回 nil，由服务端以 `PROVIDER_SECRET_MISSING` 明确拒绝。
-    var providerAPIKey: ((String) -> String?)?
+    var providerCredential: ((String) -> KeychainStore.ProviderKeyRecord?)?
 
     private var client: RACPClient?
     private var bindGeneration = 0
@@ -367,6 +367,9 @@ final class SessionController: ObservableObject {
             into: latest.items,
             sessionID: latest.sessionId ?? attachedSessionId
         )
+        if let failedID = next.failedQueueStartID, failedID != view.failedQueueStartID {
+            lastError = "排队消息未能启动，请检查模型服务后重新发送"
+        }
         if view != next { view = next }
         if runningTurnId != latest.runningTurnId { runningTurnId = latest.runningTurnId }
         if let summary = latest.summary {
@@ -804,6 +807,17 @@ final class SessionController: ObservableObject {
             notice = "会话、模型或草稿已变化：本次发送已取消，草稿已保留"
             return
         }
+        let credential = selectedProviderId.flatMap { providerCredential?($0) }
+        let providerBinding: RACPProviderKeyBinding?
+        if let credential, let providerID = selectedProviderId {
+            guard let baseURL = credential.baseURL, !baseURL.isEmpty else {
+                lastError = "本机密钥没有绑定服务地址，请在模型服务设置中重新保存 API Key"
+                return
+            }
+            providerBinding = RACPProviderKeyBinding(providerId: providerID, baseUrl: baseURL)
+        } else {
+            providerBinding = nil
+        }
         do {
             let attachmentIDs = pendingAttachments.map(\.id)
             let action: SessionRequestAction = attachmentIDs.isEmpty
@@ -817,7 +831,7 @@ final class SessionController: ObservableObject {
             onDraftChanged?(sessionId, draftText, attempt.idempotencyKey)
             // 密钥只从本机 Keychain 取一次并随这次请求透传；不缓存、不写日志。
             // 排查「key 是否同步」时只记录有无（present/absent），绝不记录明文。
-            let apiKey = selectedProviderId.flatMap { providerAPIKey?($0) }
+            let apiKey = credential?.value
             PILog.debug(
                 "Model",
                 "turn/start provider=\(String((selectedProviderId ?? "-").prefix(8)))"
@@ -829,7 +843,8 @@ final class SessionController: ObservableObject {
                 attachments: attachmentIDs,
                 admission: attempt.admission,
                 idempotencyKey: attempt.idempotencyKey,
-                apiKey: apiKey
+                apiKey: apiKey,
+                providerBinding: providerBinding
             )
             PILog.debug(
                 "Model",
@@ -837,24 +852,28 @@ final class SessionController: ObservableObject {
             )
             try requestKeys.acknowledge(attempt)
             guard isCurrent(client, generation: generation, selection: selection) else { return }
-            let echo = PendingUserEcho(
-                id: "local-user-\(result.turn.id)",
-                sessionID: sessionId,
-                turnID: result.turn.id,
-                text: text.isEmpty ? "已发送 \(attachmentIDs.count) 个附件" : text,
-                baselineItemIDs: Set(view.items.map(\.id)),
-                anchorItemID: view.items.last?.id
-            )
-            pendingUserEchoes.removeAll { $0.id == echo.id }
-            pendingUserEchoes.append(echo)
-            var optimistic = view
-            optimistic.items = Self.mergePendingUserEchoes(
-                &pendingUserEchoes,
-                into: view.items,
-                sessionID: sessionId
-            )
-            if optimistic != view { view = optimistic }
-            PILog.debug("Session", "local echo added turn=\(echo.turnID.prefix(8)) items=\(view.items.count)")
+            let status = result.turn.status?.lowercased()
+            let queued = status == "queued" || (status == nil && attempt.admission == .queue)
+            if Self.shouldEchoSend(status: status, queued: queued) {
+                let echo = PendingUserEcho(
+                    id: "local-user-\(result.turn.id)",
+                    sessionID: sessionId,
+                    turnID: result.turn.id,
+                    text: text.isEmpty ? "已发送 \(attachmentIDs.count) 个附件" : text,
+                    baselineItemIDs: Set(view.items.map(\.id)),
+                    anchorItemID: view.items.last?.id
+                )
+                pendingUserEchoes.removeAll { $0.id == echo.id }
+                pendingUserEchoes.append(echo)
+                var optimistic = view
+                optimistic.items = Self.mergePendingUserEchoes(
+                    &pendingUserEchoes,
+                    into: view.items,
+                    sessionID: sessionId
+                )
+                if optimistic != view { view = optimistic }
+                PILog.debug("Session", "local echo added turn=\(echo.turnID.prefix(8)) items=\(view.items.count)")
+            }
             runningTurnId = await client.sessionView().runningTurnId
             if intentIsCurrent(intent),
                trimmedDraft == text,
@@ -863,9 +882,7 @@ final class SessionController: ObservableObject {
                 draftPreview = nil
                 pendingAttachments = []
             }
-            notice = attempt.admission == nil
-                ? nil
-                : "已排队：当前 turn 结束后自动开始（\(result.turn.id)）"
+            notice = queued ? "已排队：当前 turn 结束后自动开始（\(result.turn.id)）" : nil
             lastError = nil
             await refreshView()
         } catch {
@@ -874,6 +891,12 @@ final class SessionController: ObservableObject {
             lastError = ConnectionErrorText.describe(error)
             modelAvailabilityCheck = nil
         }
+    }
+
+    static func shouldEchoSend(status: String?, queued: Bool) -> Bool {
+        // The queue already shows waiting messages. Only put submitted
+        // messages in the transcript when the server can have written them.
+        !queued && !["canceled", "cancelled", "failed", "interrupted", "uncertain"].contains(status ?? "")
     }
 
     /// 当前发送状态的快照，用于冻结/核对 `SendIntent`。
@@ -1012,6 +1035,7 @@ final class SessionController: ObservableObject {
         do {
             try await client.cancelTurn(turnId: turnId)
             guard isCurrent(client, generation: generation, selection: selection) else { return }
+            pendingUserEchoes.removeAll { $0.turnID == turnId }
             notice = "已取消排队项"
             await refreshView()
         } catch {
@@ -1298,6 +1322,30 @@ final class SessionController: ObservableObject {
 
     func clearError() { lastError = nil }
     func clearNotice() { notice = nil }
+
+    func copyableHistoryText(for item: RACPItem) async -> String? {
+        guard let byteLength = item.historyTextByteLength else { return item.text ?? "" }
+        guard let client, let sessionID = attachedSessionId, isOnline else {
+            lastError = "连接 Host 后可以复制完整原文"
+            return nil
+        }
+        guard byteLength > 0, byteLength <= 16 * 1024 * 1024 else {
+            lastError = "原文超过 16 MiB，请在 Host 上查看"
+            return nil
+        }
+        let generation = bindGeneration
+        let selection = sessionSelectionGeneration
+        do {
+            let body = try await client.readHistoryText(sessionId: sessionID, itemId: item.id, byteLength: byteLength)
+            guard isCurrent(client, generation: generation, selection: selection) else { return nil }
+            return body
+        } catch {
+            if isCurrent(client, generation: generation, selection: selection) {
+                lastError = ConnectionErrorText.describe(error)
+            }
+            return nil
+        }
+    }
 
     func applyModelAvailability(_ status: ProviderBindingStatus) {
         if let providerId = status.pinnedProviderId {

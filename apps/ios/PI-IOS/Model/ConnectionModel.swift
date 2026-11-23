@@ -302,6 +302,7 @@ final class ConnectionModel: ObservableObject {
     var currentHostID: UUID? { cacheHostID }
     /// 会话内的读写（发送、审批、排队、配置）全部走它。
     let session: SessionController
+    private let requestKeys: SessionRequestKeyStore
     let extensions = ExtensionCatalogModel()
     private var extensionSnapshotGeneration: UInt64?
     private let usesUITestFixture: Bool
@@ -522,6 +523,7 @@ final class ConnectionModel: ObservableObject {
          cacheStoreOverride: SessionCacheStore? = nil) {
         self.releaseCatalog = releaseCatalog
             ?? (fixture == nil ? AdaptorReleaseCatalog() : FixtureAdaptorReleaseCatalog())
+        requestKeys = SessionRequestKeyStore(fileURL: fixture == nil ? SessionCacheStore.defaultRequestKeyURL() : nil)
         usesUITestFixture = fixture != nil
         if let fixture {
             fixtureProviderBindingStatuses = fixture.providerBindingStatuses
@@ -537,7 +539,7 @@ final class ConnectionModel: ObservableObject {
                 offlineCacheLimit: PersistedState.defaultOfflineCacheLimit,
                 inMemory: fixture.cache
             )
-            session = SessionController(requestKeys: SessionRequestKeyStore(fileURL: nil))
+            session = SessionController(requestKeys: requestKeys)
 #if DEBUG
             session.configureUITestSnapshots(fixture.sessionSnapshots)
 #endif
@@ -554,7 +556,7 @@ final class ConnectionModel: ObservableObject {
             connectionStatus = fixture.connectionStatus ?? ConnectionStatus()
         } else {
             cacheStore = cacheStoreOverride ?? SessionCacheStore(offlineCacheLimit: PersistedState.defaultOfflineCacheLimit)
-            session = SessionController()
+            session = SessionController(requestKeys: requestKeys)
         }
         offlineCacheReady = cacheStore.status.ready
         offlineCacheLoadError = cacheStore.status.error
@@ -586,9 +588,9 @@ final class ConnectionModel: ObservableObject {
         // Key 不落服务器：send 前按当前 host 从本机 Keychain 取一次，仅随
         // turn/start 透传；闭包不缓存 key、不写日志，读取失败返回 nil，由服务端
         // 以 PROVIDER_SECRET_MISSING 明确拒绝。
-        session.providerAPIKey = { [weak self] providerId in
+        session.providerCredential = { [weak self] providerId in
             guard let hostID = self?.currentHostID else { return nil }
-            return KeychainStore.loadProviderKey(hostID: hostID, providerId: providerId)
+            return KeychainStore.loadProviderKeyRecord(hostID: hostID, providerId: providerId)
         }
 #if DEBUG
         session.configureUITestInterruption(enabled: fixture?.supportsFixtureInterrupt == true)
@@ -1669,6 +1671,7 @@ final class ConnectionModel: ObservableObject {
         providerId: String,
         modelId: String,
         apiKey: String?,
+        providerBinding: RACPProviderKeyBinding?,
         thinkingLevel: String?
     ) async throws -> String {
         guard let client, state.isOnline else { throw RACPV2Error.notConnected }
@@ -1678,6 +1681,7 @@ final class ConnectionModel: ObservableObject {
             providerId: providerId,
             modelId: modelId,
             apiKey: apiKey,
+            providerBinding: providerBinding,
             thinkingLevel: thinkingLevel
         )
     }
@@ -2714,19 +2718,25 @@ final class ConnectionModel: ObservableObject {
         modelId: String? = nil,
         thinkingLevel: String? = nil
     ) async throws -> RACPSessionSummary {
-        guard let client, state.isOnline else { throw RACPClientError.notConnected }
+        guard let client, let hostID = cacheHostID, state.isOnline else { throw RACPClientError.notConnected }
         let connection = connectionGeneration
-        let created = try await client.createSession(
+        let params = RACPSessionCreateParams(
             title: title,
             projectId: projectId,
             providerId: providerId,
             modelId: modelId,
-            thinkingLevel: thinkingLevel.flatMap(RACPThinkingLevel.init(rawValue:)),
-            permissionMode: nil
+            thinkingLevel: thinkingLevel.flatMap(RACPThinkingLevel.init(rawValue:))
         )
-        guard self.client === client, connectionGeneration == connection else {
+        let attempt = try requestKeys.prepare(SessionRequestIdentity(
+            hostID: hostID.uuidString,
+            sessionID: projectId ?? "no-project",
+            action: .sessionCreate(params)
+        ))
+        let created = try await client.createSession(params, idempotencyKey: attempt.idempotencyKey)
+        guard self.client === client, connectionGeneration == connection, cacheHostID == hostID else {
             throw ConnectionLifecycleError.connectionChanged
         }
+        try requestKeys.acknowledge(attempt)
         return created
     }
 

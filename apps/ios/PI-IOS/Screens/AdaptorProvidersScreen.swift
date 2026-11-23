@@ -400,7 +400,7 @@ struct AdaptorProvidersScreen: View {
             }
             recordLocalBinding(provider)
             if let key = intent.keychainAPIKey,
-               !KeychainStore.saveProviderKey(key, hostID: intent.hostID, providerId: id) {
+               !KeychainStore.saveProviderKey(key, hostID: intent.hostID, providerId: id, baseURL: provider.baseUrl) {
                 editKeyWarning = "已保存，但密钥未存上：请重新填写 API Key。"
             }
             if intent.apiKeyDraftIsUnchanged(editApiKey) {
@@ -495,7 +495,7 @@ struct AdaptorProvidersScreen: View {
             recordLocalBinding(provider)
             // Keychain 写入只用冻结值，并按提交时的 Host 记录；失败必须可见。
             if let key = intent.keychainAPIKey,
-               !KeychainStore.saveProviderKey(key, hostID: intent.hostID, providerId: provider.id) {
+               !KeychainStore.saveProviderKey(key, hostID: intent.hostID, providerId: provider.id, baseURL: provider.baseUrl) {
                 createWarning = "已创建，但密钥未存上：请重新填写 API Key。"
             }
             // 保存期间被改动的内容不清空（字段已禁用，这里只做防御）。

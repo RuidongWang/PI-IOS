@@ -340,16 +340,12 @@ struct ModelProviderDetailSheet: View {
             return
         }
         if hasLocalProviderKey {
-            guard let key = KeychainStore.loadProviderKey(
-                hostID: snapshot.hostID,
-                providerId: snapshot.providerId
-            ) ?? snapshot.legacyProviderId.flatMap({ legacyID in
-                KeychainStore.loadProviderKey(hostID: snapshot.hostID, providerId: legacyID)
-            }) else {
-                errorMessage = "本机密钥读取失败，请先编辑服务信息重新填写 API Key。"
+            guard let credential = model.providerCredentialForTurn(providerId: snapshot.providerId, hostID: snapshot.hostID),
+                  credential.baseURL == snapshot.baseURL else {
+                errorMessage = "请在服务设置中为当前地址重新保存 API Key。"
                 return
             }
-            apiKey = key
+            apiKey = credential.value
         } else {
             errorMessage = "本机没有保存这条服务的 API Key，请先「编辑服务信息」填写后再重新获取。"
             return
@@ -481,7 +477,8 @@ struct ModelProviderDetailSheet: View {
                 if !KeychainStore.saveProviderKey(
                     key,
                     hostID: intent.hostID,
-                    providerId: snapshot.providerId
+                    providerId: snapshot.providerId,
+                    baseURL: updated.baseUrl
                 ) {
                     keyWarning = "服务器已更新，但本机密钥保存失败：发送时服务器会拒绝，请重新填写 API Key。"
                 }

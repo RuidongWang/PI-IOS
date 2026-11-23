@@ -535,6 +535,7 @@ public struct RACPSessionCreateParams: Codable, Equatable, Sendable {
     public var modelId: String?
     public var thinkingLevel: RACPThinkingLevel?
     public var permissionMode: RACPPermissionMode?
+    public var context: RACPContext?
 
     public init(
         title: String? = nil,
@@ -543,7 +544,8 @@ public struct RACPSessionCreateParams: Codable, Equatable, Sendable {
         providerId: String? = nil,
         modelId: String? = nil,
         thinkingLevel: RACPThinkingLevel? = nil,
-        permissionMode: RACPPermissionMode? = nil
+        permissionMode: RACPPermissionMode? = nil,
+        context: RACPContext? = nil
     ) {
         self.title = title
         self.projectId = projectId
@@ -552,6 +554,7 @@ public struct RACPSessionCreateParams: Codable, Equatable, Sendable {
         self.modelId = modelId
         self.thinkingLevel = thinkingLevel
         self.permissionMode = permissionMode
+        self.context = context
     }
 }
 
@@ -601,25 +604,43 @@ public struct RACPSessionRevokeResult: Codable, Equatable, Sendable {
 }
 
 public struct RACPSessionHistoryParams: Codable, Equatable, Sendable {
+    public struct TextRange: Codable, Equatable, Sendable {
+        public var itemId: String
+        public var offset: Int
+
+        public init(itemId: String, offset: Int) {
+            self.itemId = itemId
+            self.offset = offset
+        }
+    }
+
     public var sessionId: String
     public var beforeItemId: String?
     /// 默认 100，上限 200（契约 §3.1）。
     public var limit: Int?
+    public var textRange: TextRange?
 
     public static let maxLimit = 200
     public static let defaultLimit = 100
 
-    public init(sessionId: String, beforeItemId: String? = nil, limit: Int? = nil) {
+    public init(sessionId: String, beforeItemId: String? = nil, limit: Int? = nil, textRange: TextRange? = nil) {
         self.sessionId = sessionId
         self.beforeItemId = beforeItemId
         self.limit = limit.map { min($0, RACPSessionHistoryParams.maxLimit) }
+        self.textRange = textRange
     }
 }
 
 public struct RACPSessionHistoryResult: Codable, Equatable, Sendable {
+    public struct TextChunk: Codable, Equatable, Sendable {
+        public var dataBase64: String
+        public var totalBytes: Int
+    }
+
     public var items: [RACPItem]
     public var hasMore: Bool?
     public var revision: Int?
+    public var textChunk: TextChunk? = nil
 }
 
 public struct RACPEventsSubscribeParams: Codable, Equatable, Sendable {
@@ -678,6 +699,16 @@ public struct RACPTurnInput: Codable, Equatable, Sendable {
     }
 }
 
+public struct RACPProviderKeyBinding: Codable, Equatable, Sendable {
+    public let providerId: String
+    public let baseUrl: String
+
+    public init(providerId: String, baseUrl: String) {
+        self.providerId = providerId
+        self.baseUrl = baseUrl
+    }
+}
+
 public struct RACPTurnStartParams: Codable, Equatable, Sendable {
     public var sessionId: String
     /// 只放在 `context.idempotencyKey`，顶层不再传（契约 §3.1 要点）。
@@ -689,19 +720,22 @@ public struct RACPTurnStartParams: Codable, Equatable, Sendable {
     /// 服务端不持久化 provider key（只在内存中用于本次 turn），客户端不得把它写进
     /// 日志/错误文本/幂等结果；`nil` 时 JSON 编码省略该字段，旧调用点行为不变。
     public var apiKey: String?
+    public var providerBinding: RACPProviderKeyBinding?
 
     public init(
         sessionId: String,
         admission: RACPTurnAdmission? = nil,
         input: RACPTurnInput,
         context: RACPContext,
-        apiKey: String? = nil
+        apiKey: String? = nil,
+        providerBinding: RACPProviderKeyBinding? = nil
     ) {
         self.sessionId = sessionId
         self.admission = admission
         self.input = input
         self.context = context
         self.apiKey = apiKey
+        self.providerBinding = providerBinding
     }
 }
 

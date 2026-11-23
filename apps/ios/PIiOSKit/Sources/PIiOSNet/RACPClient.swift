@@ -374,6 +374,7 @@ public struct RACPSessionView: Equatable, Sendable {
     public var activeItems: [RACPItem]
     /// 排队中的补充指令（AC-13.1）；元素形状未冻结，只解析出可用于取消的 id。
     public var queuedTurns: [QueuedTurn]
+    public var failedQueueStartID: String?
     public var pendingApprovals: [RACPApprovalRequest]
     public var pendingInputs: [RACPInputRequest]
     /// 曾出现、但已不在快照里的审批卡（AC-14.5：显示为失效且不可点击）。
@@ -398,13 +399,15 @@ public struct RACPSessionView: Equatable, Sendable {
         revision: Int,
         replayComplete: Bool,
         hasMoreHistory: Bool,
-        runningTurnId: String?
+        runningTurnId: String?,
+        failedQueueStartID: String? = nil
     ) {
         self.sessionId = sessionId
         self.summary = summary
         self.items = items
         self.activeItems = activeItems
         self.queuedTurns = queuedTurns
+        self.failedQueueStartID = failedQueueStartID
         self.pendingApprovals = pendingApprovals
         self.pendingInputs = pendingInputs
         self.expiredApprovalIds = expiredApprovalIds
@@ -1608,6 +1611,7 @@ public actor RACPClient {
         admission: RACPTurnAdmission?,
         idempotencyKey: String,
         apiKey: String? = nil,
+        providerBinding: RACPProviderKeyBinding? = nil,
         timeout: TimeInterval = 30
     ) async throws -> RACPTurnStartResult {
         let params = RACPTurnStartParams(
@@ -1615,7 +1619,8 @@ public actor RACPClient {
             admission: admission,
             input: RACPTurnInput(text: text, attachments: attachments.map(JSONValue.string)),
             context: makeContext(idempotencyKey: idempotencyKey),
-            apiKey: apiKey
+            apiKey: apiKey,
+            providerBinding: providerBinding
         )
         let result: RACPTurnStartResult = try await request(.turnStart, params: params, timeout: timeout)
         let status = result.turn.status?.lowercased()
@@ -1645,6 +1650,30 @@ public actor RACPClient {
         return result
     }
 
+    /// Fetch an oversized history item's original text without changing the current view.
+    public func readHistoryText(sessionId: String, itemId: String, byteLength: Int) async throws -> String {
+        var body = Data()
+        while body.count < byteLength {
+            try Task.checkCancellation()
+            let params = RACPSessionHistoryParams(
+                sessionId: sessionId,
+                textRange: .init(itemId: itemId, offset: body.count)
+            )
+            let result: RACPSessionHistoryResult = try await request(.sessionHistory, params: params)
+            guard let chunk = result.textChunk,
+                  chunk.totalBytes == byteLength,
+                  let bytes = Data(base64Encoded: chunk.dataBase64),
+                  !bytes.isEmpty,
+                  bytes.count <= min(64 * 1024, byteLength - body.count)
+            else { throw RACPClientError.protocolMismatch("历史原文分段与预览不一致") }
+            body.append(bytes)
+        }
+        guard let text = String(data: body, encoding: .utf8) else {
+            throw RACPClientError.protocolMismatch("历史原文不是有效的 UTF-8")
+        }
+        return text
+    }
+
     /// 让 AI 根据首条指令生成会话标题（0.0.4 起支持）。
     ///
     /// 旧版 PI-adaptor 没有这个方法，调用方应把 `METHOD_NOT_FOUND` 当成
@@ -1655,6 +1684,7 @@ public actor RACPClient {
         providerId: String,
         modelId: String,
         apiKey: String?,
+        providerBinding: RACPProviderKeyBinding? = nil,
         thinkingLevel: String? = nil,
         timeout: TimeInterval = 30
     ) async throws -> String {
@@ -1668,6 +1698,12 @@ public actor RACPClient {
             "modelId": .string(modelId),
         ]
         if let apiKey, !apiKey.isEmpty { fields["apiKey"] = .string(apiKey) }
+        if let providerBinding {
+            fields["providerBinding"] = .object([
+                "providerId": .string(providerBinding.providerId),
+                "baseUrl": .string(providerBinding.baseUrl),
+            ])
+        }
         if let thinkingLevel, !thinkingLevel.isEmpty { fields["thinkingLevel"] = .string(thinkingLevel) }
         let params: JSONValue = .object(fields)
         let result: RACPV2SuggestTitleResult = try await request(
@@ -1851,6 +1887,12 @@ public actor RACPClient {
             thinkingLevel: thinkingLevel,
             permissionMode: permissionMode
         )
+        return try await createSession(params, idempotencyKey: "session_create_\(UUID().uuidString)")
+    }
+
+    public func createSession(_ draft: RACPSessionCreateParams, idempotencyKey: String) async throws -> RACPSessionSummary {
+        var params = draft
+        params.context = makeContext(idempotencyKey: idempotencyKey)
         let result: RACPSessionCreateResult = try await request(.sessionCreate, params: params)
         return result.session
     }
@@ -1922,7 +1964,8 @@ public actor RACPClient {
             revision: viewModel.revision,
             replayComplete: viewModel.lastReplayComplete,
             hasMoreHistory: viewModel.hasMoreHistory,
-            runningTurnId: viewModel.activeTurnId
+            runningTurnId: viewModel.activeTurnId,
+            failedQueueStartID: viewModel.failedQueueStartID
         )
     }
 

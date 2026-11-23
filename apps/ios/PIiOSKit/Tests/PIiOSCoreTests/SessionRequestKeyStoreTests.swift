@@ -37,6 +37,15 @@ final class SessionRequestKeyStoreTests: XCTestCase {
         }
     }
 
+    func testSessionCreationRetryReusesKeyUntilAcknowledged() throws {
+        let params = RACPSessionCreateParams(projectId: "project-1", providerId: "provider-1", modelId: "model-1")
+        let request = identity(session: "project-1", action: .sessionCreate(params))
+        let attempt = try store.prepare(request)
+        XCTAssertEqual(try store.prepare(request).idempotencyKey, attempt.idempotencyKey)
+        try store.acknowledge(attempt)
+        XCTAssertNotEqual(try store.prepare(request).idempotencyKey, attempt.idempotencyKey)
+    }
+
     func testHostSessionAndItemAreIsolated() throws {
         let requests = [identity(), identity(host: "other-host"), identity(session: "other-session"),
                         identity(item: "item-one"), identity(item: "item-two")]

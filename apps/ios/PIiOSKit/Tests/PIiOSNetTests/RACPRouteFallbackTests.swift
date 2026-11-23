@@ -5,6 +5,40 @@ import XCTest
 @testable import PIiOSNet
 
 final class RACPRouteFallbackTests: XCTestCase {
+    func testSessionCreateSendsTheSameOperationKeyOnRetry() async throws {
+        let socket = ScriptedSocket()
+        let client = RACPClient(testingSocket: socket, subscriptionId: nil, subscribedSessionId: nil)
+        let pump = Task {
+            for await data in socket.inbound { await client.receiveForTesting(data) }
+        }
+        defer { pump.cancel() }
+
+        let draft = RACPSessionCreateParams(projectId: "project-1", providerId: "provider-1")
+        let first = try await client.createSession(draft, idempotencyKey: "create-attempt")
+        let retry = try await client.createSession(draft, idempotencyKey: "create-attempt")
+        XCTAssertEqual(first.id, retry.id)
+        XCTAssertEqual(socket.sessionCreateKeys, ["create-attempt", "create-attempt"])
+        await client.stop()
+    }
+
+    func testReadHistoryTextReassemblesUTF8AcrossChunks() async throws {
+        let original = String(repeating: "a", count: 65_535) + "🧪历史"
+        let socket = ScriptedSocket()
+        socket.historyText = Data(original.utf8)
+        let client = RACPClient(testingSocket: socket, subscriptionId: nil, subscribedSessionId: nil)
+        let pump = Task {
+            for await data in socket.inbound { await client.receiveForTesting(data) }
+        }
+        defer { pump.cancel() }
+
+        let text = try await client.readHistoryText(
+            sessionId: "session_1", itemId: "large_item", byteLength: original.utf8.count
+        )
+        XCTAssertEqual(text, original)
+        XCTAssertEqual(socket.methods.filter { $0 == "session/history" }.count, 2)
+        await client.stop()
+    }
+
     func testBootstrapDeviceIdentityUsesAuthenticatedPingHostID() async throws {
         let socket = ScriptedSocket()
         socket.pingHostID = "host_1"
@@ -591,12 +625,14 @@ private final class ScriptedSocket: RACPSocket, @unchecked Sendable {
     var pingErrorCode: String?
     var subscribeErrorCode: String?
     var hostReplayComplete = true
+    var historyText: Data?
     var discoveryUpstreamStatus: Int?
     var directTransportCapability: Bool? = true
     var ignorePing = false
     /// 模拟“关闭永不返回”：NIO 的 EventLoopFuture.get() 不响应 Swift 任务取消。
     var hangOnClose = false
     private(set) var methods: [String] = []
+    private(set) var sessionCreateKeys: [String] = []
     private(set) var subscriptionAfterCursors: [String] = []
 
     init() {
@@ -694,6 +730,26 @@ private final class ScriptedSocket: RACPSocket, @unchecked Sendable {
         }
         if method == "session/list" {
             yieldResult(id: id, result: ["sessions": []])
+            return
+        }
+        if method == "session/create",
+           let params = object["params"] as? [String: Any],
+           let context = params["context"] as? [String: Any],
+           let operationKey = context["idempotencyKey"] as? String {
+            lock.withLock { sessionCreateKeys.append(operationKey) }
+            yieldResult(id: id, result: ["session": ["id": "created-session"]])
+            return
+        }
+        if method == "session/history", let historyText,
+           let params = object["params"] as? [String: Any],
+           let range = params["textRange"] as? [String: Any],
+           range["itemId"] as? String == "large_item",
+           let offset = range["offset"] as? Int, (0..<historyText.count).contains(offset) {
+            let chunk = historyText[offset..<min(offset + 64 * 1024, historyText.count)]
+            yieldResult(id: id, result: [
+                "items": [], "hasMore": false, "revision": 1,
+                "textChunk": ["dataBase64": chunk.base64EncodedString(), "totalBytes": historyText.count],
+            ])
             return
         }
         yieldResult(id: id, result: [:])

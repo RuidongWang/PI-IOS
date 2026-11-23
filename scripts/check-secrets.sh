@@ -48,7 +48,9 @@ scan() {
   local hits
 
   if command -v rg >/dev/null 2>&1; then
-    if ! hits=$(rg -n -e "$pattern" "${rg_flags[@]}" .); then
+    if hits=$(rg -n -e "$pattern" "${rg_flags[@]}" .); then
+      :
+    else
       local rg_status=$?
       # 1 = no match; anything else is a scan error and must fail closed.
       if [[ $rg_status -ne 1 ]]; then
@@ -63,7 +65,9 @@ scan() {
     fi
   else
     # Exclude options must precede `--`; after `--` they are treated as paths.
-    if ! hits=$(grep -RInE "${grep_excludes[@]}" -e "$pattern" .); then
+    if hits=$(grep -RInE "${grep_excludes[@]}" -e "$pattern" .); then
+      :
+    else
       local grep_status=$?
       if [[ $grep_status -ne 1 ]]; then
         echo "check-secrets: grep scan failed (status $grep_status)" >&2
