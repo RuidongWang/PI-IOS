@@ -62,6 +62,10 @@ public enum RemotePiMaintenance {
         } catch {
             throw RemotePiMaintenanceError.updateUnverified
         }
+        return try verifiedVersion(from: result, toAtLeast: latest)
+    }
+
+    static func verifiedVersion(from result: SSHExecResult, toAtLeast latest: RemotePiVersion) throws -> RemotePiVersion {
         let verified = try version(from: result)
         guard !verified.needsUpgrade(to: latest) else { throw RemotePiMaintenanceError.updateUnverified }
         return verified
