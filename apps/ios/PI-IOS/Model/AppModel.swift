@@ -152,6 +152,7 @@ final class AppModel: ObservableObject {
         }
         if seed == nil, !usesUITestFixture {
             migrateLegacyDeviceTokens()
+            recoverPromotedInstallReceipts()
         }
         root = LandingRule.initialRoot(hosts: hosts)
         connection.updateOfflineCacheLimit(offlineCacheLimit)
@@ -169,6 +170,9 @@ final class AppModel: ObservableObject {
         connection.onBootstrapPairingCommit = { [weak self] commit in
             guard let self else { return .staleTarget }
             return self.completeAdaptorInstallation(commit)
+        }
+        connection.onPrepareHostConnection = { [weak self] hostID in
+            self?.prepareHostConnection(id: hostID)
         }
         observeTunnelState()
         observeRemoteMetadata()
@@ -526,42 +530,67 @@ final class AppModel: ObservableObject {
         persist()
     }
 
-    /// Returns cached session ids that callers should evict with the project.
-    @discardableResult
-    func deleteProjectLocally(hostID: UUID, projectID: String) -> [String] {
-        let removedSessionIDs = sessionBindings
+    func deleteProjectLocally(hostID: UUID, projectID: String, name: String) -> Bool {
+        guard hosts.contains(where: { $0.id == hostID }) else { return false }
+        var next = snapshot
+        let boundSessionIDs = next.sessionBindings
             .filter { $0.hostID == hostID && $0.projectID == projectID }
             .map(\.sessionID)
-        if let index = projectBindings.firstIndex(where: {
+        let catalogSessionIDs = connection.currentCatalogHostID == hostID
+            ? connection.sessions.filter { $0.projectId == projectID }.map(\.id)
+            : []
+        let removedSessionIDs = Set(boundSessionIDs + catalogSessionIDs)
+        let now = Date()
+        if let index = next.projectBindings.firstIndex(where: {
             $0.hostID == hostID && $0.projectID == projectID
         }) {
-            projectBindings[index].isDeleted = true
-            projectBindings[index].isArchived = true
-            projectBindings[index].updatedAt = Date()
+            next.projectBindings[index].isDeleted = true
+            next.projectBindings[index].isArchived = true
+            next.projectBindings[index].updatedAt = now
+        } else {
+            next.projectBindings.append(StoredProjectBinding(
+                hostID: hostID, projectID: projectID, path: nil, name: name,
+                isArchived: true, isDeleted: true, createdAt: now, updatedAt: now
+            ))
         }
-        for index in sessionBindings.indices where
-            sessionBindings[index].hostID == hostID
-                && sessionBindings[index].projectID == projectID {
-            sessionBindings[index].isDeleted = true
-            sessionBindings[index].isPinned = false
-            sessionBindings[index].pinOrder = nil
-            sessionBindings[index].updatedAt = Date()
+        for index in next.sessionBindings.indices where
+            next.sessionBindings[index].hostID == hostID
+                && removedSessionIDs.contains(next.sessionBindings[index].sessionID) {
+            next.sessionBindings[index].isDeleted = true
+            next.sessionBindings[index].isPinned = false
+            next.sessionBindings[index].pinOrder = nil
+            next.sessionBindings[index].updatedAt = now
         }
+        let hostKey = hostID.uuidString
         for sessionID in removedSessionIDs {
-            readingPositionsByHost[hostID.uuidString]?.removeValue(forKey: sessionID)
+            next.readingPositionsByHost[hostKey]?.removeValue(forKey: sessionID)
         }
-        if readingPositionsByHost[hostID.uuidString]?.isEmpty == true {
-            readingPositionsByHost.removeValue(forKey: hostID.uuidString)
+        if next.readingPositionsByHost[hostKey]?.isEmpty == true {
+            next.readingPositionsByHost.removeValue(forKey: hostKey)
         }
-        if lastProjectByHost[hostID.uuidString] == projectID {
-            lastProjectByHost.removeValue(forKey: hostID.uuidString)
+        if next.lastProjectByHost[hostKey] == projectID {
+            next.lastProjectByHost.removeValue(forKey: hostKey)
         }
-        if let lastSession = lastSessionByHost[hostID.uuidString],
-           removedSessionIDs.contains(lastSession) {
-            lastSessionByHost.removeValue(forKey: hostID.uuidString)
+        if let lastSession = next.lastSessionByHost[hostKey], removedSessionIDs.contains(lastSession) {
+            next.lastSessionByHost.removeValue(forKey: hostKey)
         }
-        persist()
-        return removedSessionIDs
+        if currentHost?.id == hostID {
+            if next.lastProjectId == projectID { next.lastProjectId = nil }
+            if let lastSession = next.lastSessionId, removedSessionIDs.contains(lastSession) {
+                next.lastSessionId = nil
+            }
+        }
+        guard persist(next) else { return false }
+
+        projectBindings = next.projectBindings
+        sessionBindings = next.sessionBindings
+        readingPositionsByHost = next.readingPositionsByHost
+        lastProjectByHost = next.lastProjectByHost
+        lastSessionByHost = next.lastSessionByHost
+        lastProjectId = next.lastProjectId
+        lastSessionId = next.lastSessionId
+        connection.removeCachedSessions(Array(removedSessionIDs), hostID: hostID)
+        return true
     }
 
     @discardableResult
@@ -1046,122 +1075,72 @@ final class AppModel: ObservableObject {
             directEndpoint: HostValidator.canonicalDirectEndpoint(draft.directEndpoint),
             adaptorHostId: nil
         )
-        hosts.append(record)
-        persist()
+        var next = snapshot
+        next.hosts.append(record)
+        guard persist(next) else { return nil }
+        hosts = next.hosts
         return record
     }
 
     @discardableResult
     func updateHost(id: UUID, with draft: HostDraft) -> Bool {
         guard let index = hosts.firstIndex(where: { $0.id == id }) else { return false }
-        // 编辑态不要求重新输入凭证：未接 Keychain 前凭证不落盘，改名称/端口也应能保存。
         let errors = HostValidator.validate(draft, requiresSecret: false)
         guard errors.isValid else { return false }
-        let host = draft.host.piTrimmed
-        let previousHost = hosts[index].host
-        let previousPort = hosts[index].port
-        let previousUsername = hosts[index].username
-        let previousHostPort = hosts[index].hostPort
-        let previousDirectEndpoint = hosts[index].directEndpoint
-        let previousAuthKind = hosts[index].authKind
-        let wasCurrent = hosts[index].isCurrent
-        let previousAccount = KeychainStore.account(
-            username: previousUsername,
-            host: previousHost,
-            port: previousPort
-        )
-        let newPort = Int(draft.port.piTrimmed) ?? hosts[index].port
-        let serverIdentityChanged = previousHost != host
-            || previousPort != newPort
-            || previousUsername != draft.username.piTrimmed
-        hosts[index].name = draft.name.piTrimmed.isEmpty ? host : draft.name.piTrimmed
-        hosts[index].host = host
-        hosts[index].port = newPort
-        hosts[index].username = draft.username.piTrimmed
-        hosts[index].authKind = draft.authKind
-        hosts[index].hostPort = Int(draft.hostPort.piTrimmed)
-        hosts[index].keyFileName = draft.keyFileName
-        let newDirectEndpoint = HostValidator.canonicalDirectEndpoint(draft.directEndpoint)
-        hosts[index].directEndpoint = newDirectEndpoint
-        if serverIdentityChanged
-            || previousHostPort != hosts[index].hostPort
-            || previousAuthKind != hosts[index].authKind
-            || previousDirectEndpoint != newDirectEndpoint {
-            // Freeze invalidation (U15): an install attempt that started before this
-            // edit must not commit its receipt/token to the edited record.
-            bumpInstallIdentityGeneration(id)
+        let previous = hosts[index]
+        let wasCurrent = currentHost?.id == id
+        var edited = previous
+        edited.host = draft.host.piTrimmed
+        edited.name = draft.name.piTrimmed.isEmpty ? edited.host : draft.name.piTrimmed
+        edited.port = Int(draft.port.piTrimmed) ?? previous.port
+        edited.username = draft.username.piTrimmed
+        edited.authKind = draft.authKind
+        edited.hostPort = Int(draft.hostPort.piTrimmed)
+        edited.keyFileName = draft.keyFileName
+        edited.directEndpoint = HostValidator.canonicalDirectEndpoint(draft.directEndpoint)
+        let sshAddressChanged = previous.host != edited.host || previous.port != edited.port
+            || previous.username != edited.username
+        let pairingChanged = sshAddressChanged || previous.hostPort != edited.hostPort
+        let authChanged = previous.authKind != edited.authKind
+        let endpointChanged = previous.directEndpoint != edited.directEndpoint
+        if pairingChanged || endpointChanged || draft.connectionPreference != .directPreferred
+            || edited.adaptorHostId == nil
+            || KeychainStore.loadDirectTLSTrustPin(hostID: id)?.hostId != edited.adaptorHostId {
+            edited.connectionPreference = .sshOnly
         }
-        if previousDirectEndpoint != newDirectEndpoint {
-            // 配置可保存，但新 endpoint 必须重新完整验证；旧 pin/hostId 不被覆盖。
-            hosts[index].connectionPreference = .sshOnly
-        } else if draft.connectionPreference == .directPreferred,
-                  hosts[index].connectionPreference == .directPreferred,
-                  let hostId = hosts[index].adaptorHostId,
-                  KeychainStore.loadDirectTLSTrustPin(hostID: id)?.hostId == hostId {
-            hosts[index].connectionPreference = .directPreferred
-        } else {
-            // 表单不能直接制造“已验证”状态；启用只能由 markDirectVerified 完成。
-            hosts[index].connectionPreference = .sshOnly
+        if pairingChanged {
+            edited.pairedAt = nil
+            edited.tunnelUpAt = nil
+            edited.installReceipt = nil
+            edited.adaptorHostId = nil
         }
-        if (serverIdentityChanged || previousHostPort != hosts[index].hostPort
-            || previousAuthKind != hosts[index].authKind),
-           wasCurrent || pendingHostID == id {
+
+        var next = snapshot
+        next.hosts[index] = edited
+        if pairingChanged { next.removeHostDerivedData(id, wasCurrent: wasCurrent) }
+        guard persist(next) else { return false }
+        if pairingChanged || authChanged || endpointChanged { bumpInstallIdentityGeneration(id) }
+        if (pairingChanged || authChanged), wasCurrent || pendingHostID == id {
             providerIdentityGeneration &+= 1
             if wasCurrent { foregroundResumeTracker.capture(nil) }
         }
-        if previousHostPort != hosts[index].hostPort {
-            hosts[index].connectionPreference = .sshOnly
-            hosts[index].pairedAt = nil
-            hosts[index].tunnelUpAt = nil
-            hosts[index].installReceipt = nil
-            // 同一 SSH 服务器上的另一个 pi-host 端口是**另一个端点**，其项目、
-            // 会话、缓存与配对都不属于新端点。仅清配对状态会把旧端点的数据留在
-            // 同一 hostKey 下混显（契约 §数据隔离：不得混显、不得跨 host 回填）。
-            clearHostDerivedData(id, detachSession: wasCurrent)
-            KeychainStore.deleteDeviceToken(
-                hostID: id,
-                legacyAccount: previousAccount,
-                deleteLegacy: false
-            )
+        if pairingChanged {
+            let oldAccount = KeychainStore.account(username: previous.username, host: previous.host, port: previous.port)
+            let clearOldAccount = sshAddressChanged && !usesSSHAccount(oldAccount, excluding: id)
+            KeychainStore.deleteDeviceToken(hostID: id, legacyAccount: oldAccount, deleteLegacy: clearOldAccount)
+            if clearOldAccount { KeychainStore.deleteHostKey(account: oldAccount) }
+            KeychainStore.deleteDirectTLSTrustPin(hostID: id)
+            applyHostDataRemoval(next, hostID: id, wasCurrent: wasCurrent)
+        } else {
+            hosts = next.hosts
         }
-        if serverIdentityChanged {
-            hosts[index].connectionPreference = .sshOnly
-            hosts[index].pairedAt = nil
-            hosts[index].tunnelUpAt = nil
-            hosts[index].installReceipt = nil
-            // 同一 UUID 现在指向另一台服务器，所有由旧服务器派生的本机数据都必须失效。
-            clearHostDerivedData(id, detachSession: wasCurrent)
-            let anotherHostUsesOldAccount = hosts.contains { other in
-                other.id != id
-                    && KeychainStore.account(
-                        username: other.username,
-                        host: other.host,
-                        port: other.port
-                    ) == previousAccount
-            }
-            if !anotherHostUsesOldAccount {
-                KeychainStore.deleteDeviceToken(
-                    hostID: id,
-                    legacyAccount: previousAccount,
-                    deleteLegacy: true
-                )
-                KeychainStore.deleteHostKey(account: previousAccount)
-            } else {
-                KeychainStore.deleteDeviceToken(
-                    hostID: id,
-                    legacyAccount: previousAccount,
-                    deleteLegacy: false
-                )
-            }
-        }
-        persist()
         return true
     }
 
     @discardableResult
     func deleteHost(id: UUID) async -> Bool {
         guard let host = hosts.first(where: { $0.id == id }) else { return false }
-        let wasCurrent = host.isCurrent
+        let wasCurrent = currentHost?.id == id
         if wasCurrent || pendingHostID == id {
             hostSwitchGeneration &+= 1
             let generation = hostSwitchGeneration
@@ -1169,19 +1148,18 @@ final class AppModel: ObservableObject {
                 await connection.disconnect(ifHostID: id)
             }
             guard hostSwitchGeneration == generation,
-                  hosts.contains(where: { $0.id == id })
+                  hosts.contains(where: { $0.id == id && $0.address == host.address && $0.hostPort == host.hostPort })
             else { return false }
         }
+        var next = snapshot
+        next.hosts.removeAll { $0.id == id }
+        if wasCurrent, !next.hosts.isEmpty { next.hosts[0].isCurrent = true }
+        next.removeHostDerivedData(id, wasCurrent: wasCurrent)
+        guard persist(next) else { return false }
+
         // 删除 host 只删本地记录与凭证（契约 §2.4），不动服务器上的任何东西。
         let account = KeychainStore.account(username: host.username, host: host.host, port: host.port)
-        let anotherHostUsesAccount = hosts.contains { other in
-            other.id != id
-                && KeychainStore.account(
-                    username: other.username,
-                    host: other.host,
-                    port: other.port
-                ) == account
-        }
+        let anotherHostUsesAccount = usesSSHAccount(account, excluding: id)
         if !anotherHostUsesAccount {
             KeychainStore.deleteCredential(account: account)
             KeychainStore.deleteHostKey(account: account)
@@ -1192,27 +1170,20 @@ final class AppModel: ObservableObject {
             deleteLegacy: !anotherHostUsesAccount
         )
         KeychainStore.deleteDirectTLSTrustPin(hostID: id)
-        clearHostDerivedData(id, detachSession: wasCurrent)
-        hosts.removeAll { $0.id == id }
-        if wasCurrent, !hosts.isEmpty {
-            hosts[0].isCurrent = true
-            connection.setCacheHostID(hosts[0].id)
-        } else if hosts.isEmpty {
-            connection.setCacheHostID(nil)
-        }
+        applyHostDataRemoval(next, hostID: id, wasCurrent: wasCurrent)
+        if wasCurrent { connection.setCacheHostID(currentHost?.id) }
         if pendingHostID == id { pendingHostID = nil }
-        persist()
         await connection.flushPendingCacheWrites()
         return true
     }
 
-    /// 清掉某个 PI-adaptor UUID 下的全部派生数据，但保留 PI-adaptor 身份记录本身。
-    ///
-    /// `deleteHost` 与“当前 PI-adaptor 改成另一台服务器”共用这份规则，避免只清凭证却继续展示
-    /// 旧服务器的模型、项目、会话与离线历史。
-    private func clearHostDerivedData(_ id: UUID, detachSession: Bool) {
-        let hostKey = id.uuidString
-        let clearsCurrentContext = currentHost?.id == id
+    private func usesSSHAccount(_ account: String, excluding id: UUID) -> Bool {
+        hosts.contains { host in
+            host.id != id && KeychainStore.account(username: host.username, host: host.host, port: host.port) == account
+        }
+    }
+
+    private func applyHostDataRemoval(_ state: PersistedState, hostID id: UUID, wasCurrent: Bool) {
         // Provider 密钥按 host UUID + providerId 存储，而 UUID 在改绑/删除后可能
         // 指向另一台服务器。这里必须按前缀清掉全部历史 provider key（含 legacy
         // 与已从本机投影移除的 ID），否则新端点复用同名 providerId 时会取到旧
@@ -1220,23 +1191,22 @@ final class AppModel: ObservableObject {
         if !KeychainStore.deleteAllProviderKeys(hostID: id) {
             showToast("部分旧服务的 API Key 未能从 Keychain 清除，请重启应用后重试")
         }
-        modelProviders.removeAll { $0.hostID == id }
-        projectBindings.removeAll { $0.hostID == id }
-        sessionBindings.removeAll { $0.hostID == id }
+        hosts = state.hosts
+        modelProviders = state.modelProviders
+        projectBindings = state.projectBindings
+        sessionBindings = state.sessionBindings
+        lastProjectByHost = state.lastProjectByHost
+        lastSessionByHost = state.lastSessionByHost
+        collapsedProjectGroups = state.collapsedProjectGroups
+        projectBrowserPaths = state.projectBrowserPaths
+        readingPositionsByHost = state.readingPositionsByHost
+        lastProjectId = state.lastProjectId
+        lastSessionId = state.lastSessionId
         resumedSessionUpdates.removeHost(id)
-        if clearsCurrentContext { foregroundResumeTracker.capture(nil) }
         connection.removeCachedHost(id)
-        lastProjectByHost.removeValue(forKey: hostKey)
-        lastSessionByHost.removeValue(forKey: hostKey)
-        collapsedProjectGroups.removeAll { $0.hasPrefix("\(hostKey):") }
-        projectBrowserPaths.removeValue(forKey: hostKey)
-        readingPositionsByHost.removeValue(forKey: hostKey)
-        if clearsCurrentContext {
-            lastProjectId = nil
-            lastSessionId = nil
-            if detachSession {
-                connection.session.detach()
-            }
+        if wasCurrent {
+            foregroundResumeTracker.capture(nil)
+            connection.session.detach()
         }
     }
 
@@ -1301,14 +1271,11 @@ final class AppModel: ObservableObject {
         return persist()
     }
 
-    /// U15 single controlled commit point for a successful install.
-    ///
-    /// The frozen install target is compared with the current record **before**
-    /// any mutation: `ConnectionModel` only promotes the staged device token when
-    /// this returns `.committed`. The install receipt is written here exactly
-    /// once; `InstallAdaptorScreen` no longer writes a second one.
     @discardableResult
-    func completeAdaptorInstallation(_ commit: BootstrapPairingCommit) -> BootstrapPairingCommitResult {
+    func completeAdaptorInstallation(
+        _ commit: BootstrapPairingCommit,
+        promoteStaged: (() -> Bool)? = nil
+    ) -> BootstrapPairingCommitResult {
         guard let index = hosts.firstIndex(where: { $0.id == commit.hostID }) else {
             saveError = "安装完成时本机服务器记录已不存在，未把旧安装结果写回当前记录"
             return .staleTarget
@@ -1326,26 +1293,71 @@ final class AppModel: ObservableObject {
             saveError = "安装完成时服务器身份已变化，未把旧安装结果写回当前记录"
             return .staleTarget
         }
+        let promoted = promoteStaged?() ?? KeychainStore.promoteStagedPairing(
+            hostID: commit.hostID,
+            attemptId: commit.attemptId,
+            pendingInstall: commit,
+            previousAdaptorHostId: hosts[index].adaptorHostId
+        )
+        guard promoted else { return .tokenPromotionFailed }
+        return writeInstallReceipt(commit, at: index)
+    }
+
+    private func recoverPromotedInstallReceipts() {
+        for index in hosts.indices {
+            _ = recoverPromotedInstallReceipt(at: index, afterReload: true)
+        }
+    }
+
+    private func prepareHostConnection(id: UUID) -> HostRecord? {
+        guard let index = hosts.firstIndex(where: { $0.id == id }),
+              recoverPromotedInstallReceipt(at: index) else { return nil }
+        return hosts[index]
+    }
+
+    private func recoverPromotedInstallReceipt(at index: Int, afterReload: Bool = false) -> Bool {
+        let host = hosts[index]
+        guard let commit = KeychainStore.pendingInstall(hostID: host.id) else { return true }
+        if host.installReceipt?.attemptId == commit.attemptId {
+            KeychainStore.clearPendingInstall(hostID: host.id, attemptId: commit.attemptId)
+            return true
+        }
+        let generation = afterReload ? commit.target.identityGeneration : installIdentityGeneration(forHostID: host.id)
+        let current = InstallTargetSnapshot(record: host, identityGeneration: generation)
+        guard BootstrapInstallCommitPolicy.canCommit(
+            expected: commit.target,
+            current: current,
+            existingAdaptorHostId: host.adaptorHostId,
+            committedAdaptorHostId: commit.adaptorHostId
+        ), host.hostPort == commit.target.hostPort || host.hostPort == commit.port else { return false }
+        if afterReload {
+            installIdentityGenerations[host.id] = generation
+        }
+        return writeInstallReceipt(commit, at: index) == .committed
+    }
+
+    private func writeInstallReceipt(
+        _ commit: BootstrapPairingCommit,
+        at index: Int
+    ) -> BootstrapPairingCommitResult {
         let previousRecord = hosts[index]
         hosts[index].hostPort = commit.port
         hosts[index].pairedAt = Date()
         hosts[index].adaptorHostId = commit.adaptorHostId
-        if let endpoint = commit.directEndpoint {
-            hosts[index].directEndpoint = endpoint
-            // Direct 首验仍可能失败；只有 markDirectVerified 能提升为 directPreferred。
-            hosts[index].connectionPreference = .sshOnly
-        }
+        hosts[index].directEndpoint = commit.directEndpoint
+        // Direct 首验通过后，markDirectVerified 再提升连接偏好。
+        hosts[index].connectionPreference = .sshOnly
         hosts[index].installReceipt = AdaptorInstallReceipt(
             version: commit.version,
             hostPort: commit.port,
             attemptId: commit.attemptId,
             completedAt: Date(),
-            releaseSource: commit.releaseSource.map { $0.isFallback ? .fallback : .latest }
+            releaseSource: commit.releaseSource
         )
-        let persisted = persist()
-        if persisted { return .committed }
-        // Never leave an in-memory receipt that the device token was not promoted
-        // for (the caller cleans up this attempt's staging on this outcome).
+        if persist() {
+            KeychainStore.clearPendingInstall(hostID: commit.hostID, attemptId: commit.attemptId)
+            return .committed
+        }
         hosts[index] = previousRecord
         switch BootstrapInstallCompletionPolicy.disposition(
             persisted: false,
@@ -1630,7 +1642,7 @@ final class AppModel: ObservableObject {
     private func connectCurrentHostIfPaired() async {
         guard let host = currentHost else { return }
         await connection.recoverStagedPairings(record: host)
-        guard host.pairedAt != nil else { return }
+        guard host.pairedAt != nil || KeychainStore.pendingInstall(hostID: host.id) != nil else { return }
         await setCurrentHost(id: host.id)
     }
 
@@ -1887,7 +1899,7 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    private func persist() -> Bool {
+    private func persist(_ preparedState: PersistedState? = nil) -> Bool {
         persistenceGeneration &+= 1
         let generation = persistenceGeneration
 #if DEBUG
@@ -1901,10 +1913,11 @@ final class AppModel: ObservableObject {
             return false
         }
         do {
+            let state = preparedState ?? snapshot
             if let stateFileURL {
-                try StateFile.save(snapshot, to: stateFileURL)
+                try StateFile.save(state, to: stateFileURL)
             } else {
-                try StateFile.save(snapshot)
+                try StateFile.save(state)
             }
             if generation == persistenceGeneration {
                 saveError = nil

@@ -1,5 +1,13 @@
 import Foundation
 
+public enum OfflineCacheEncryptionError: Error, LocalizedError {
+    case unavailable
+
+    public var errorDescription: String? {
+        "离线缓存加密暂不可用（Keychain 或密钥读取失败），请解锁后重试。"
+    }
+}
+
 #if canImport(CryptoKit) && canImport(Security)
 import CryptoKit
 import Security
@@ -10,37 +18,20 @@ import Security
 /// 逐列把**敏感值**（消息正文、草稿、审批 payload、会话标题）用 AES-GCM 密封，
 /// 密钥保存在 Keychain，且不参与备份。密封值带 `enc:v1:` 前缀：
 ///
-/// - 旧版本写下的明文行没有前缀，读取时按明文返回，下次写入时自动重新密封；
-/// - Keychain 不可用时**降级为明文**而不是拒绝工作：离线缓存是辅助能力，
-///   让它彻底失效比暂时不加密更糟。降级只影响加密，文件保护仍然生效。
+/// 旧版本写下的明文行仍可读取。密钥不可用时，取消本次写入。
 public enum OfflineCacheCipher {
     static let prefix = "enc:v1:"
     private static let service = "com.pi-ios.offline-cache"
     private static let account = "content-key"
 
-    private static let degradeLock = NSLock()
-    private static var degraded = false
-    /// 是否发生过明文降级。加密是敏感内容的保障，降级不能完全无痕；调用方/
-    /// 诊断可以据此提示用户。
-    public static var isDegraded: Bool {
-        degradeLock.lock(); defer { degradeLock.unlock() }
-        return degraded
+    public static func seal(_ plaintext: String) throws -> String {
+        try seal(plaintext, key: loadKey())
     }
 
-    private static func markDegraded() {
-        degradeLock.lock(); degraded = true; degradeLock.unlock()
-    }
-
-    /// 密封一段文本；无法加密时原样返回（见类型注释的降级说明）。
-    public static func seal(_ plaintext: String) -> String {
-        guard let key = loadKey(), let data = plaintext.data(using: .utf8) else {
-            markDegraded()
-            return plaintext
-        }
-        guard let sealed = try? AES.GCM.seal(data, using: key), let combined = sealed.combined else {
-            markDegraded()
-            return plaintext
-        }
+    static func seal(_ plaintext: String, key: SymmetricKey?) throws -> String {
+        guard let key,
+              let combined = try? AES.GCM.seal(Data(plaintext.utf8), using: key).combined
+        else { throw OfflineCacheEncryptionError.unavailable }
         return prefix + combined.base64EncodedString()
     }
 
@@ -53,7 +44,7 @@ public enum OfflineCacheCipher {
     public static func openOrNil(_ stored: String) -> String? {
         guard stored.hasPrefix(prefix) else { return stored }
         let base64 = String(stored.dropFirst(prefix.count))
-        guard let key = loadKey(),
+        guard let key = loadKey(createIfMissing: false),
               let combined = Data(base64Encoded: base64),
               let box = try? AES.GCM.SealedBox(combined: combined),
               let data = try? AES.GCM.open(box, using: key),
@@ -62,7 +53,7 @@ public enum OfflineCacheCipher {
         return text
     }
 
-    public static func seal(optional: String?) -> String? { optional.map(seal) }
+    public static func seal(optional: String?) throws -> String? { try optional.map(seal) }
 
     public static func open(optional: String?) -> String? { optional.map(open) }
 
@@ -76,12 +67,12 @@ public enum OfflineCacheCipher {
     private static let keyLock = NSLock()
     private static var cachedKey: SymmetricKey?
 
-    private static func loadKey() -> SymmetricKey? {
+    private static func loadKey(createIfMissing: Bool = true) -> SymmetricKey? {
         keyLock.lock()
         defer { keyLock.unlock() }
         if let cached = cachedKey { return cached }
 
-        var query: [String: Any] = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
@@ -99,7 +90,7 @@ public enum OfflineCacheCipher {
         // Only generate a new key if Keychain confirmed the item does NOT exist.
         // If Keychain returned an error (e.g. locked, permissions), return nil rather than
         // generating an ephemeral key that would corrupt data on subsequent reads.
-        guard status == errSecItemNotFound else { return nil }
+        guard createIfMissing, status == errSecItemNotFound else { return nil }
 
         var bytes = [UInt8](repeating: 0, count: 32)
         guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
@@ -135,13 +126,11 @@ public enum OfflineCacheCipher {
 
 #else
 
-/// 平台没有 CryptoKit/Security（例如非 Apple 目标）时的直通实现：
-/// 不加密，但保证接口一致、缓存仍可用。
 public enum OfflineCacheCipher {
-    public static func seal(_ plaintext: String) -> String { plaintext }
+    public static func seal(_ plaintext: String) throws -> String { throw OfflineCacheEncryptionError.unavailable }
     public static func open(_ stored: String) -> String { stored }
     public static func openOrNil(_ stored: String) -> String? { stored }
-    public static func seal(optional: String?) -> String? { optional }
+    public static func seal(optional: String?) throws -> String? { try optional.map(seal) }
     public static func open(optional: String?) -> String? { optional }
     public static func openOrNil(optional: String?) -> String? { optional }
 }

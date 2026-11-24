@@ -139,13 +139,17 @@ public enum BootstrapRunResult: Equatable, Sendable {
     case unsupported(BootstrapUnsupportedReason)
 }
 
-public enum BootstrapRunnerError: Error, Equatable, CustomStringConvertible {
+public enum BootstrapRunnerError: LocalizedError, Equatable, CustomStringConvertible {
     case malformedProbe
     case architectureMismatch(expected: BootstrapArtifactTarget, actual: BootstrapArtifactTarget)
     case remoteCommandFailed(command: String, exitStatus: Int)
     case malformedState(String)
     case malformedPairingFile
+    case launcherUnavailable
+    case installationBusy
     case timedOut
+
+    public var errorDescription: String? { description }
 
     public var description: String {
         switch self {
@@ -159,6 +163,10 @@ public enum BootstrapRunnerError: Error, Equatable, CustomStringConvertible {
             return "安装状态无法读取（\(detail)）"
         case .malformedPairingFile:
             return "配对信息格式不正确"
+        case .launcherUnavailable:
+            return "服务器缺少安装启动工具。请确认 setsid、nohup 和 flock 可用后重试。"
+        case .installationBusy:
+            return "这台服务器已有安装任务，请等待它完成后重试。"
         case .timedOut:
             return "安装超过 15 分钟未完成"
         }
@@ -253,6 +261,14 @@ public final class BootstrapRunner {
             if !keepTransportOpen { await transport.close() }
             return result
         } catch {
+            if Task.isCancelled || error is CancellationError {
+                let command = BootstrapRemoteCommand.scoped(BootstrapRemoteCommand.cancel, attemptId: scriptConfiguration.attemptId)
+                let transport = self.transport
+                let timeout = configuration.commandTimeout
+                await Task.detached {
+                    _ = try? await transport.exec(command, stdin: nil, timeout: timeout)
+                }.value
+            }
             if !keepTransportOpen { await transport.close() }
             throw error
         }
@@ -289,11 +305,13 @@ public final class BootstrapRunner {
         }
 
         let script = BootstrapScriptBuilder.build(scriptConfiguration)
+        let attemptId = scriptConfiguration.attemptId
         _ = try await exec(
             BootstrapRemoteCommand.installScript,
-            stdin: Data(script.utf8)
+            stdin: Data(script.utf8),
+            attemptId: attemptId
         )
-        _ = try await exec(BootstrapRemoteCommand.launch, stdin: nil)
+        _ = try await exec(BootstrapRemoteCommand.launch, stdin: nil, attemptId: attemptId)
 
         var previousState: BootstrapStateFile?
         var stallDetector = BootstrapStallDetector(threshold: configuration.stallThreshold)
@@ -310,7 +328,7 @@ public final class BootstrapRunner {
         while true {
             try Task.checkCancellation()
 
-            let stateData = try await exec(BootstrapRemoteCommand.readState, stdin: nil).stdout
+            let stateData = try await exec(BootstrapRemoteCommand.readState, stdin: nil, attemptId: attemptId).stdout
             if let state = try decodeState(stateData), state.attemptId == scriptConfiguration.attemptId {
                 if state != previousState {
                     let issues = BootstrapStateValidator.issues(previous: previousState, current: state)
@@ -356,7 +374,8 @@ public final class BootstrapRunner {
                     }
                     let result = try await pair(
                         deviceLabel: deviceLabel,
-                        allowLegacyPPT1: configuration.allowLegacyPPT1
+                        allowLegacyPPT1: configuration.allowLegacyPPT1,
+                        attemptId: attemptId
                     )
                     switch result {
                     case .notReady:
@@ -364,13 +383,13 @@ public final class BootstrapRunner {
                     case let .paired(device):
                         pairAttempted = true
                         pairedDevice = device
-                        _ = try await exec(BootstrapRemoteCommand.writePairingOK, stdin: nil)
+                        _ = try await exec(BootstrapRemoteCommand.writePairingOK, stdin: nil, attemptId: attemptId)
                         await emit(.pairingCompleted(deviceId: device.deviceId))
                     case let .failed(detail):
                         pairAttempted = true
                         pairingFailure = .pairing
                         callbackFailureDetail = detail
-                        _ = try? await exec(BootstrapRemoteCommand.writePairingFailed, stdin: nil)
+                        _ = try? await exec(BootstrapRemoteCommand.writePairingFailed, stdin: nil, attemptId: attemptId)
                     }
                     activeSegmentStart = now()
                 }
@@ -402,7 +421,7 @@ public final class BootstrapRunner {
                             unitName: scriptConfiguration.release.unitName
                         )
                         verifiedServerInfo = serverInfo
-                        _ = try await exec(BootstrapRemoteCommand.writeVerificationOK, stdin: nil)
+                        _ = try await exec(BootstrapRemoteCommand.writeVerificationOK, stdin: nil, attemptId: attemptId)
                         await emit(.verificationCompleted)
                     } catch {
                         pairingFailure = .verification
@@ -411,7 +430,7 @@ public final class BootstrapRunner {
                             port: scriptConfiguration.port,
                             unitName: scriptConfiguration.release.unitName
                         )
-                        _ = try? await exec(BootstrapRemoteCommand.writeVerificationFailed, stdin: nil)
+                        _ = try? await exec(BootstrapRemoteCommand.writeVerificationFailed, stdin: nil, attemptId: attemptId)
                     }
                     activeSegmentStart = now()
                 }
@@ -420,7 +439,7 @@ public final class BootstrapRunner {
             if let end = activeSegmentStart {
                 let elapsed = activeElapsed + now().timeIntervalSince(end)
                 if elapsed >= configuration.overallTimeout {
-                    _ = try? await exec(BootstrapRemoteCommand.cancel, stdin: nil)
+                    _ = try? await exec(BootstrapRemoteCommand.cancel, stdin: nil, attemptId: attemptId)
                     throw BootstrapRunnerError.timedOut
                 }
             }
@@ -453,11 +472,13 @@ public final class BootstrapRunner {
 
     private func pair(
         deviceLabel: String?,
-        allowLegacyPPT1: Bool
+        allowLegacyPPT1: Bool,
+        attemptId: String
     ) async throws -> PairAttempt {
         let rawPairing = try await exec(
             BootstrapRemoteCommand.readPairing,
-            stdin: nil
+            stdin: nil,
+            attemptId: attemptId
         ).stdout
         guard !rawPairing.isEmpty else {
             // The state can be observed immediately before the owner-only file
@@ -571,12 +592,20 @@ public final class BootstrapRunner {
         }
     }
 
-    private func exec(_ command: String, stdin: Data?) async throws -> SSHExecResult {
+    private func exec(_ command: String, stdin: Data?, attemptId: String? = nil) async throws -> SSHExecResult {
+        let remoteCommand = attemptId.map { BootstrapRemoteCommand.scoped(command, attemptId: $0) } ?? command
         let result = try await transport.exec(
-            command,
+            remoteCommand,
             stdin: stdin,
             timeout: configuration.commandTimeout
         )
+        if command == BootstrapRemoteCommand.launch {
+            switch result.exitStatus {
+            case 69: throw BootstrapRunnerError.launcherUnavailable
+            case 75: throw BootstrapRunnerError.installationBusy
+            default: break
+            }
+        }
         guard result.exitStatus == 0 else {
             throw BootstrapRunnerError.remoteCommandFailed(
                 command: command,

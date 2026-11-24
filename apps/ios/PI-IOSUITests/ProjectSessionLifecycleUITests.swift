@@ -93,10 +93,15 @@ final class ProjectSessionLifecycleUITests: XCTestCase {
 
         app.buttons["会话操作"].tap()
         app.buttons["归档会话"].tap()
-        XCTAssertTrue(app.navigationBars["Renamed Alpha"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.navigationBars["Renamed Alpha"].waitForExistence(timeout: 8), "CNV-13 归档后切到下一条会话")
 
         app.buttons["打开侧边栏"].tap()
-        XCTAssertFalse(app.buttons["sidebar.session.S2"].exists)
+        XCTAssertTrue(app.buttons["sidebar.session.S1"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["sidebar.session.S2"].exists, "CNV-13 已归档会话从侧栏移除")
+        let evidence = XCTAttachment(screenshot: app.screenshot())
+        evidence.name = "CNV-13-session-archived"
+        evidence.lifetime = .keepAlways
+        add(evidence)
         app.buttons["sidebar.root.projects"].tap()
         XCTAssertTrue(app.navigationBars["项目"].waitForExistence(timeout: 5))
         app.buttons["projects.row.P1"].tap()

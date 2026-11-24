@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import PIiOSCore
 import PIiOSNet
 
@@ -91,6 +92,10 @@ final class SessionController: ObservableObject {
     @Published private(set) var historyError: String?
     @Published private(set) var isOnline = false
     @Published private(set) var runningTurnId: String?
+#if DEBUG
+    static let observesUITestTurnOutcome = ProcessInfo.processInfo.environment["PI_IOS_UI_TEST_TURN_OUTCOME"] == "1"
+    @Published private(set) var uiTestSubmittedTurnID: String?
+#endif
     @Published private(set) var permissionMode: RACPPermissionMode = .ask
     @Published private(set) var sessionMode: RACPSessionMode = .agent
     @Published private(set) var thinkingLevel: RACPThinkingLevel?
@@ -183,7 +188,8 @@ final class SessionController: ObservableObject {
 
     /// 发送准入：离线禁用；有 turn 在跑则排队（AC-13.1）。
     var sendAdmission: SendAdmission {
-        TurnQueuePolicy.admission(
+        if view.summary?.readOnlyReason != nil { return .blockedReadOnly }
+        return TurnQueuePolicy.admission(
             online: isOnline && openingSessionID == nil,
             activeItemCount: view.activeItems.count,
             runningTurnId: runningTurnId
@@ -382,7 +388,7 @@ final class SessionController: ObservableObject {
     /// Synchronous feedback before navigation or the first cache/network await.
     func prepareToOpen(sessionId: String) {
         if isAttaching && pendingAttachSessionId == sessionId { return }
-        if attachedBindGeneration == bindGeneration && openingSessionID == nil && attachedSessionId == sessionId && view.sessionId == sessionId { return }
+        if alreadyAttached(to: sessionId) { return }
         cancelPendingAttach()
         resetHistoryLoad()
         pendingAttachSessionId = sessionId
@@ -393,7 +399,7 @@ final class SessionController: ObservableObject {
 
     /// 打开会话：`session/attach` 拉快照并订阅。
     func attach(sessionId: String, source: String = "caller") async {
-        if attachedBindGeneration == bindGeneration && openingSessionID == nil && attachedSessionId == sessionId && view.sessionId == sessionId {
+        if alreadyAttached(to: sessionId) {
             PILog.debug("Session", "attach skipped source=\(source) reason=alreadyAttached session=\(sessionId.prefix(8))")
             return
         }
@@ -412,6 +418,11 @@ final class SessionController: ObservableObject {
         }
         attachTask = task
         await task.value
+    }
+
+    private func alreadyAttached(to sessionID: String) -> Bool {
+        attachedBindGeneration == bindGeneration && openingSessionID == nil
+            && attachedSessionId == sessionID && view.sessionId == sessionID && view.summary?.readOnlyReason == nil
     }
 
     private func performAttach(sessionId: String, generation: Int, selection: Int, source: String) async {
@@ -769,7 +780,9 @@ final class SessionController: ObservableObject {
         let text = trimmedDraft
         guard !text.isEmpty || !pendingAttachments.isEmpty else { return }
         guard sendAdmission.isAllowed else {
-            lastError = "隧道未连接：现在发送会失败，已阻止"
+            lastError = sendAdmission == .blockedReadOnly
+                ? RACPErrorCode.sessionReadOnly.userMessage
+                : "隧道未连接：现在发送会失败，已阻止"
             return
         }
         guard modelAvailability.allowsSending else {
@@ -801,6 +814,7 @@ final class SessionController: ObservableObject {
         await refreshView()
         guard isCurrent(client, generation: generation, selection: selection),
               trimmedDraft == text,
+              sendAdmission.isAllowed,
               let hostID = currentRequestHostID()
         else { return }
         guard intentIsCurrent(intent) else {
@@ -823,7 +837,7 @@ final class SessionController: ObservableObject {
             let action: SessionRequestAction = attachmentIDs.isEmpty
                 ? .turn(text: text)
                 : .turnAttachments(text: text, attachmentIds: attachmentIDs)
-            let attempt = try requestKeys.prepare(
+            let (attempt, isRetry) = try requestKeys.prepareSubmission(
                 SessionRequestIdentity(hostID: hostID, sessionID: sessionId, action: action),
                 admission: sendAdmission.turnAdmission
             )
@@ -844,7 +858,8 @@ final class SessionController: ObservableObject {
                 admission: attempt.admission,
                 idempotencyKey: attempt.idempotencyKey,
                 apiKey: apiKey,
-                providerBinding: providerBinding
+                providerBinding: providerBinding,
+                isRetry: isRetry
             )
             PILog.debug(
                 "Model",
@@ -852,6 +867,9 @@ final class SessionController: ObservableObject {
             )
             try requestKeys.acknowledge(attempt)
             guard isCurrent(client, generation: generation, selection: selection) else { return }
+#if DEBUG
+            if Self.observesUITestTurnOutcome, result.accepted { uiTestSubmittedTurnID = result.turn.id }
+#endif
             let status = result.turn.status?.lowercased()
             let queued = status == "queued" || (status == nil && attempt.admission == .queue)
             if Self.shouldEchoSend(status: status, queued: queued) {
@@ -874,15 +892,27 @@ final class SessionController: ObservableObject {
                 if optimistic != view { view = optimistic }
                 PILog.debug("Session", "local echo added turn=\(echo.turnID.prefix(8)) items=\(view.items.count)")
             }
-            runningTurnId = await client.sessionView().runningTurnId
+            let currentRunningTurnID = await client.sessionView().runningTurnId
+            guard isCurrent(client, generation: generation, selection: selection) else { return }
+            runningTurnId = currentRunningTurnID
             if intentIsCurrent(intent),
                trimmedDraft == text,
                draftPreview?.key == attempt.idempotencyKey {
-                draftText = ""
-                draftPreview = nil
-                pendingAttachments = []
+                if status == "uncertain" {
+                    let previewKey = "draft_\(UUID().uuidString)"
+                    draftPreview = (text, previewKey)
+                    onDraftChanged?(sessionId, draftText, previewKey)
+                } else {
+                    draftPreview = nil
+                    draftText = ""
+                    pendingAttachments = []
+                }
             }
-            notice = queued ? "已排队：当前 turn 结束后自动开始（\(result.turn.id)）" : nil
+            if status == "uncertain" {
+                notice = "服务器无法确认上一轮执行结果。草稿已保留，请核对会话后再决定是否重新发送。"
+            } else {
+                notice = queued ? "已排队：当前 turn 结束后自动开始（\(result.turn.id)）" : nil
+            }
             lastError = nil
             await refreshView()
         } catch {
@@ -1060,8 +1090,33 @@ final class SessionController: ObservableObject {
         return kind.contains("plan") || kind.contains("goal") || kind.contains("contract")
     }
 
-    func decide(approvalId: String, decision: RACPApprovalDecision) async {
-        await respondApproval(approvalId: approvalId) { _ in
+    func loadApprovalInput(_ card: RACPApprovalRequest) async throws -> (text: String, digest: String) {
+        guard isOnline, let client, let sessionId = attachedSessionId,
+              let revision = card.revision, let byteLength = card.inputByteLength,
+              (1...16 * 1024 * 1024).contains(byteLength)
+        else { throw RACPClientError.protocolMismatch("审批参数当前不可读取") }
+        let generation = bindGeneration
+        let selection = sessionSelectionGeneration
+        var body = Data()
+        while body.count < byteLength {
+            try Task.checkCancellation()
+            let params = RACPApprovalReadParams(sessionId: sessionId, approvalId: card.id, revision: revision, offset: body.count)
+            let chunk: RACPSessionHistoryResult.TextChunk = try await client.request(.approvalRead, params: params)
+            guard isCurrent(client, generation: generation, selection: selection),
+                  chunk.totalBytes == byteLength, let bytes = Data(base64Encoded: chunk.dataBase64),
+                  !bytes.isEmpty, bytes.count <= min(64 * 1024, byteLength - body.count)
+            else { throw RACPClientError.protocolMismatch("审批参数分段与请求不一致") }
+            body.append(bytes)
+        }
+        guard let text = String(data: body, encoding: .utf8) else {
+            throw RACPClientError.protocolMismatch("审批参数不是有效的 UTF-8")
+        }
+        let digest = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
+        return (text, digest)
+    }
+
+    func decide(approvalId: String, decision: RACPApprovalDecision, reviewedInputDigest: String? = nil) async {
+        await respondApproval(approvalId: approvalId, reviewedInputDigest: reviewedInputDigest) { _ in
             .approval(decision: decision, permissionMode: decision == .allowSession ? self.permissionMode : nil)
         }
     }
@@ -1074,6 +1129,7 @@ final class SessionController: ObservableObject {
 
     private func respondApproval(
         approvalId: String,
+        reviewedInputDigest: String? = nil,
         action makeAction: (RACPApprovalRequest) throws -> SessionRequestAction
     ) async {
         guard isOnline, let client else {
@@ -1101,10 +1157,11 @@ final class SessionController: ObservableObject {
             let attempt = try requestKeys.prepare(
                 SessionRequestIdentity(hostID: hostID, sessionID: sessionId, itemID: approvalId, action: action)
             )
-            let params = try RACPApprovalRespondParams(
+            var params = try RACPApprovalRespondParams(
                 approvalId: approvalId, action: action,
                 context: RACPContext(requestId: "req_\(UUID().uuidString)", idempotencyKey: attempt.idempotencyKey, expectedRevision: revision)
             )
+            params.inputDigest = reviewedInputDigest
             let result: JSONValue = try await client.request(.approvalRespond, params: params)
             try requestKeys.acknowledge(attempt)
             guard isCurrent(client, generation: generation, selection: selection) else { return }
@@ -1336,7 +1393,7 @@ final class SessionController: ObservableObject {
         let generation = bindGeneration
         let selection = sessionSelectionGeneration
         do {
-            let body = try await client.readHistoryText(sessionId: sessionID, itemId: item.id, byteLength: byteLength)
+            let body = try await client.readHistoryText(sessionId: sessionID, itemId: item.historyItemID, byteLength: byteLength)
             guard isCurrent(client, generation: generation, selection: selection) else { return nil }
             return body
         } catch {

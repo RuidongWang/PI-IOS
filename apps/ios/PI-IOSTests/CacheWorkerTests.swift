@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 import PIiOSCore
 import PIiOSNet
+import SQLite3
 
 @testable import PI_IOS
 
@@ -832,6 +833,39 @@ final class CacheWorkerTests: XCTestCase {
         XCTAssertNotNil(model.offlineCacheLoadError)
         assertFailed(await store.flush())
         XCTAssertEqual(try Data(contentsOf: fileURL), original)
+    }
+
+    @MainActor
+    func testCacheReadFailureReopensDurableStateBeforeTheNextWrite() async throws {
+        let fileURL = root.appendingPathComponent("encrypted-restore.sqlite")
+        let hostID = UUID()
+        let retained = makeEntry(hostID: hostID, sessionID: "retained", text: "original")
+        let persisted = SessionCacheStore.Snapshot(entries: [retained])
+        try OfflineSessionCacheSQLite(url: fileURL).save(persisted)
+        do {
+            var handle: OpaquePointer?
+            XCTAssertEqual(sqlite3_open_v2(fileURL.path, &handle, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
+            defer { sqlite3_close(handle) }
+            XCTAssertEqual(sqlite3_exec(handle, "UPDATE items SET text = 'enc:v1:unreadable'", nil, nil, nil), SQLITE_OK)
+        }
+
+        let store = SessionCacheStore(offlineCacheLimit: 200, fileURL: fileURL)
+        await store.waitUntilReady()
+        XCTAssertNotNil(store.status.error)
+        let lease = OfflineSessionCacheWriteLease(clientID: UUID(), connectionGeneration: 1, hostID: hostID, sessionID: "new")
+        store.updateContext(clientID: lease.clientID, generation: 1, hostID: hostID, sessionID: "new", active: true)
+        let input = makeInput(hostID: hostID, sessionID: "new", text: "after recovery")
+        let unavailable = try XCTUnwrap(store.permit(for: lease, draft: false))
+        assertFailed(await store.saveSession(input, permit: unavailable))
+        XCTAssertThrowsError(try OfflineSessionCacheSQLite(url: fileURL).loadSnapshot())
+
+        try OfflineSessionCacheSQLite(url: fileURL).save(persisted)
+        let recovered = try XCTUnwrap(store.permit(for: lease, draft: false))
+        assertCommitted(await store.saveSession(input, permit: recovered))
+        XCTAssertNil(store.status.error)
+        let final = try OfflineSessionCacheSQLite(url: fileURL).loadSnapshot()
+        XCTAssertEqual(final.cachedSession(hostID: hostID, sessionID: "retained")?.entries.first?.text, "original")
+        XCTAssertEqual(final.cachedSession(hostID: hostID, sessionID: "new")?.entries.first?.text, "after recovery")
     }
 
     @MainActor

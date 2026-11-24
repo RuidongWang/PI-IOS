@@ -356,9 +356,9 @@ public enum BootstrapOutcome: Equatable, Sendable {
 
 // MARK: - 失败码（契约 §5.2）
 
-/// 失败码：上游脚本 19 个真实 `die` 码 + 4 个客户端侧码 + 未知码。
+/// 失败码：安装脚本、客户端与未识别的错误。
 public enum BootstrapFailureCode: Equatable, Hashable, Sendable {
-    // 上游真实 die 码（19）
+    // 上游真实 die 码
     case noHome
     case missingTar
     case missingSha256Tool
@@ -372,6 +372,9 @@ public enum BootstrapFailureCode: Equatable, Hashable, Sendable {
     case installedVerificationFailed
     case missingNode
     case nodeTooOld
+    case downgradeBlocked
+    case installedVersionUnknown
+    case runningVersionUnknown
     case hostStopTimeout
     case hostStartFailed
     case hostExited
@@ -390,6 +393,7 @@ public enum BootstrapFailureCode: Equatable, Hashable, Sendable {
         .noHome, .missingTar, .missingSha256Tool, .bootstrapPermissions, .stageFailed,
         .downloadFailed, .checksumMismatch, .extractFailed, .unexpectedArchiveLayout,
         .installFailed, .installedVerificationFailed, .missingNode, .nodeTooOld,
+        .downgradeBlocked, .installedVersionUnknown, .runningVersionUnknown,
         .hostStopTimeout, .hostStartFailed, .hostExited, .readyTimeout, .receiptFailed,
         .artifactPermissions,
     ]
@@ -413,6 +417,9 @@ public enum BootstrapFailureCode: Equatable, Hashable, Sendable {
         case .installedVerificationFailed: return "installed-verification-failed"
         case .missingNode: return "missing-node"
         case .nodeTooOld: return "node-too-old"
+        case .downgradeBlocked: return "downgrade-blocked"
+        case .installedVersionUnknown: return "installed-version-unknown"
+        case .runningVersionUnknown: return "running-version-unknown"
         case .hostStopTimeout: return "host-stop-timeout"
         case .hostStartFailed: return "host-start-failed"
         case .hostExited: return "host-exited"
@@ -442,6 +449,9 @@ public enum BootstrapFailureCode: Equatable, Hashable, Sendable {
         case "installed-verification-failed": self = .installedVerificationFailed
         case "missing-node": self = .missingNode
         case "node-too-old": self = .nodeTooOld
+        case "downgrade-blocked": self = .downgradeBlocked
+        case "installed-version-unknown": self = .installedVersionUnknown
+        case "running-version-unknown": self = .runningVersionUnknown
         case "host-stop-timeout": self = .hostStopTimeout
         case "host-start-failed": self = .hostStartFailed
         case "host-exited": self = .hostExited
@@ -496,6 +506,12 @@ public enum BootstrapFailureCode: Equatable, Hashable, Sendable {
             return "安装包缺少 Node 运行时。请换完整安装包重试。"
         case .nodeTooOld:
             return "服务器 Node 版本过低（需要 22.19.0 及以上）。升级后重试。"
+        case .downgradeBlocked:
+            return "服务器已有更高版本，已停止本次安装。请选择同版本或更新的兼容版本。"
+        case .installedVersionUnknown:
+            return "无法确认服务器上的已安装版本，已停止本次安装。请检查服务器安装状态。"
+        case .runningVersionUnknown:
+            return "无法核实 PI-adaptor 服务的运行版本，已停止本次安装。请检查服务器上的服务日志后重试。"
         case .hostStopTimeout:
             return "停止旧服务超时。检查是否有手动启动的服务后重试。"
         case .hostStartFailed:

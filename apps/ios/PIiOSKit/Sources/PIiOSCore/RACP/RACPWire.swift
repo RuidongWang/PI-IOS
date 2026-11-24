@@ -52,6 +52,7 @@ public enum RACPMethod: String, CaseIterable, Sendable {
     case turnCancel = "turn/cancel"
     case turnPrioritize = "turn/prioritize"
     case approvalRespond = "approval/respond"
+    case approvalRead = "approval/read"
     case inputRespond = "input/respond"
     /// 通知，无 `id`、无响应。
     case initializedNotification = "notifications/initialized"
@@ -169,6 +170,7 @@ public enum RACPErrorCode: Equatable, Sendable {
     case methodNotFound
     case agentUnavailable
     case agentBusy
+    case sessionReadOnly
     case conflict
     case idempotencyConflict
     case cursorExpired
@@ -194,6 +196,7 @@ public enum RACPErrorCode: Equatable, Sendable {
         case "METHOD_NOT_FOUND": self = .methodNotFound
         case "AGENT_UNAVAILABLE": self = .agentUnavailable
         case "AGENT_BUSY": self = .agentBusy
+        case "SESSION_READ_ONLY": self = .sessionReadOnly
         case "CONFLICT": self = .conflict
         case "IDEMPOTENCY_CONFLICT": self = .idempotencyConflict
         case "CURSOR_EXPIRED": self = .cursorExpired
@@ -221,6 +224,7 @@ public enum RACPErrorCode: Equatable, Sendable {
         case .methodNotFound: return "METHOD_NOT_FOUND"
         case .agentUnavailable: return "AGENT_UNAVAILABLE"
         case .agentBusy: return "AGENT_BUSY"
+        case .sessionReadOnly: return "SESSION_READ_ONLY"
         case .conflict: return "CONFLICT"
         case .idempotencyConflict: return "IDEMPOTENCY_CONFLICT"
         case .cursorExpired: return "CURSOR_EXPIRED"
@@ -265,7 +269,7 @@ public enum RACPErrorCode: Equatable, Sendable {
         case .payloadTooLarge: return .askToShortenInput
         case .rateLimited: return .retryAfterBackoff
         case .pairingFailed, .pairingTokenExpired: return .restartHostForNewToken
-        case .capabilityUnavailable: return .hideOrDisableEntry
+        case .capabilityUnavailable, .sessionReadOnly: return .hideOrDisableEntry
         case .serverInternal: return .recordTraceAndRetryOnce
         case .unknown: return .displayVerbatim
         }
@@ -502,6 +506,7 @@ public struct RACPSessionSummary: Codable, Equatable, Sendable {
     /// `session/get` / `session/attach` expose the PI-adaptor's currently running turn.
     /// This is needed to interrupt a turn that was promoted from the PI-adaptor queue.
     public var activeTurnId: String? = nil
+    public var readOnlyReason: String? = nil
     public var mode: RACPSessionMode?
     public var permissionMode: RACPPermissionMode?
     // 注意：此处**不**声明 providerId / modelId / thinkingLevel。
@@ -789,6 +794,7 @@ public struct RACPApprovalRespondParams: Codable, Equatable, Sendable {
     public var decision: String
     public var permissionMode: RACPPermissionMode?
     public var context: RACPContext
+    public var inputDigest: String? = nil
 
     public init(
         approvalId: String,
@@ -826,6 +832,20 @@ public struct RACPApprovalRespondParams: Codable, Equatable, Sendable {
             self.init(approvalId: approvalId, contractDecision: decision, permissionMode: mode, context: context)
         default: throw ActionError.invalidAction
         }
+    }
+}
+
+public struct RACPApprovalReadParams: Codable, Equatable, Sendable {
+    public let sessionId: String
+    public let approvalId: String
+    public let revision: Int
+    public let offset: Int
+
+    public init(sessionId: String, approvalId: String, revision: Int, offset: Int) {
+        self.sessionId = sessionId
+        self.approvalId = approvalId
+        self.revision = revision
+        self.offset = offset
     }
 }
 

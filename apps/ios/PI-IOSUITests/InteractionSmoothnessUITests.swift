@@ -7,7 +7,7 @@ final class InteractionSmoothnessUITests: XCTestCase {
     override func tearDownWithError() throws { app.terminate() }
 
     func testDelayedOpenClosesSidebarAndHidesPreviousSessionControls() {
-        launch()
+        launch(openDelayMilliseconds: 12_000)
         open("S2", fromSidebar: true)
         XCTAssertTrue(app.navigationBars["Fixture S2 Beta"].waitForExistence(timeout: 2))
         XCTAssertTrue(app.buttons["sidebar.close"].waitForNonExistence(timeout: 1))
@@ -15,7 +15,7 @@ final class InteractionSmoothnessUITests: XCTestCase {
         XCTAssertFalse(element("conversation.composer").exists)
         XCTAssertTrue(element("conversation.previewMessage.preview-S2").exists)
         XCTAssertFalse(element("conversation.agentMessage.reading-S1-040").exists)
-        XCTAssertTrue(element("conversation.composer").waitForExistence(timeout: 8))
+        XCTAssertTrue(element("conversation.composer").waitForExistence(timeout: 18))
         XCTAssertFalse(element("conversation.sessionOpening").exists)
     }
 
@@ -136,9 +136,10 @@ final class InteractionSmoothnessUITests: XCTestCase {
         return XCTWaiter.wait(for: [expectation], timeout: 8) == .completed
     }
 
-    private func launch(failingSession: String? = nil) {
+    private func launch(failingSession: String? = nil, openDelayMilliseconds: Int? = nil) {
         app.launchEnvironment["PI_IOS_UI_FIXTURE_SCENARIO"] = "interaction-smoothness"
         if let failingSession { app.launchEnvironment["PI_IOS_UI_FAIL_OPEN"] = failingSession }
+        if let openDelayMilliseconds { app.launchEnvironment["PI_IOS_UI_OPEN_DELAY_MS"] = String(openDelayMilliseconds) }
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         app.launch()
         XCTAssertTrue(app.buttons["sidebar.session.S2"].waitForExistence(timeout: 8))

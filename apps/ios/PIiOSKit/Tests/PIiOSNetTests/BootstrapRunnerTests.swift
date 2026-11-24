@@ -591,6 +591,34 @@ final class BootstrapRunnerTests: XCTestCase {
         XCTAssertEqual(transport.count(for: BootstrapRemoteCommand.cancel), 1)
     }
 
+    func testBusyInstallStopsBeforePollingOrCancelling() async throws {
+        let transport = MockBootstrapTransport(responses: [
+            BootstrapRemoteCommand.probe: [SSHExecResult(
+                exitStatus: 0, stdout: Data("platform=Linux\narch=aarch64\n".utf8), stderr: Data()
+            )],
+            BootstrapRemoteCommand.installScript: [success()],
+            BootstrapRemoteCommand.launch: [SSHExecResult(exitStatus: 75, stdout: Data(), stderr: Data())],
+        ])
+        let runner = BootstrapRunner(
+            transport: transport,
+            pairing: RecordingPairer(result: BootstrapPairedDevice(deviceId: "unused", deviceToken: "unused", roles: [])),
+            verifier: RecordingVerifier()
+        )
+        let attempt = try configuration()
+        do {
+            _ = try await runner.run(configuration: attempt)
+            XCTFail("busy install should exit before polling")
+        } catch {
+            XCTAssertEqual(error as? BootstrapRunnerError, .installationBusy)
+            XCTAssertTrue(error.localizedDescription.contains("已有安装任务"))
+        }
+        XCTAssertTrue(transport.allCommands().contains(
+            BootstrapRemoteCommand.scoped(BootstrapRemoteCommand.launch, attemptId: attempt.attemptId)
+        ))
+        XCTAssertEqual(transport.count(for: BootstrapRemoteCommand.readState), 0)
+        XCTAssertEqual(transport.count(for: BootstrapRemoteCommand.cancel), 0)
+    }
+
     private enum TestError: Error {
         case pairing
         case verification
@@ -618,13 +646,14 @@ private final class MockBootstrapTransport: BootstrapCommandTransport, @unchecke
     ) async throws -> SSHExecResult {
         withLock {
             commands.append(command)
-            var queue = responses[command] ?? []
+            let operation = Self.operation(in: command)
+            var queue = responses[operation] ?? []
             if !queue.isEmpty {
                 let next = queue.removeFirst()
-                responses[command] = queue
+                responses[operation] = queue
                 return next
             }
-            if let fallback = fallbacks[command] {
+            if let fallback = fallbacks[operation] {
                 return fallback
             }
             return SSHExecResult(exitStatus: 0, stdout: Data(), stderr: Data())
@@ -636,7 +665,12 @@ private final class MockBootstrapTransport: BootstrapCommandTransport, @unchecke
     }
 
     func count(for command: String) -> Int {
-        withLock { commands.filter { $0 == command }.count }
+        withLock { commands.filter { Self.operation(in: $0) == command }.count }
+    }
+
+    private static func operation(in command: String) -> String {
+        guard command.hasPrefix("attempt="), let lineEnd = command.firstIndex(of: "\n") else { return command }
+        return String(command[command.index(after: lineEnd)...])
     }
 
     func allCommands() -> [String] {

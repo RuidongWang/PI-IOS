@@ -6,7 +6,7 @@ import Foundation
 /// the end of the bootstrap SSH session. That identity must be compared with the
 /// current local record **before** the staged token is promoted, otherwise a
 /// record re-pointed to another server could receive the old server's token.
-public struct InstallTargetSnapshot: Equatable, Sendable {
+public struct InstallTargetSnapshot: Codable, Equatable, Sendable {
     public let hostID: UUID
     public let host: String
     public let sshPort: Int
@@ -60,11 +60,9 @@ public enum BootstrapPairingCommitResult: Equatable, Sendable {
     /// The local record no longer matches the frozen target. Nothing was
     /// promoted; only this attempt's staged credential may be cleaned up.
     case staleTarget
-    /// Identity matched but the local state file could not be written. The token
-    /// must not be promoted on top of a receipt that does not exist.
+    /// The promoted credential carries the pending receipt for recovery.
     case receiptPersistenceFailed(String)
-    /// Receipt and identity were committed, but the staged token could not be
-    /// written as the active one; this attempt's staging is cleaned up.
+    /// The active credential and paired receipt were not changed.
     case tokenPromotionFailed
 }
 
@@ -86,34 +84,5 @@ public enum BootstrapInstallCommitPolicy {
             return existing == committedAdaptorHostId
         }
         return true
-    }
-}
-
-public enum BootstrapInstallCommitCoordinator {
-    /// The one controlled commit point for a successful install:
-    /// 1. re-check the frozen target identity and write the install receipt exactly once;
-    /// 2. only then promote the staged device token;
-    /// 3. on every failure clean up only this attempt's staging.
-    ///
-    /// `writeReceipt` must not mutate the record when it returns `.staleTarget`;
-    /// `cleanupAttempt` must never touch the active device token.
-    @discardableResult
-    public static func commit(
-        writeReceipt: () async -> BootstrapPairingCommitResult,
-        promoteStaged: () async -> Bool,
-        cleanupAttempt: () async -> Void
-    ) async -> BootstrapPairingCommitResult {
-        let receipt = await writeReceipt()
-        switch receipt {
-        case .committed:
-            guard await promoteStaged() else {
-                await cleanupAttempt()
-                return .tokenPromotionFailed
-            }
-            return .committed
-        case .staleTarget, .receiptPersistenceFailed, .tokenPromotionFailed:
-            await cleanupAttempt()
-            return receipt
-        }
     }
 }

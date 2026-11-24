@@ -23,6 +23,10 @@ final class VisualReviewUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["PI_IOS_VISUAL_REVIEW"] == "1",
+            "运行 bash scripts/pi-test.sh PI-IOSUITests/VisualReviewUITests 生成视觉证据"
+        )
     }
 
     override func tearDownWithError() throws {
@@ -155,24 +159,7 @@ final class VisualReviewUITests: XCTestCase {
         capture("11-conversation-approval")
     }
 
-    // MARK: - 12 会话页 · 工具卡折叠
-
-    func test12ConversationToolsCollapsed() throws {
-        launch("online-tool-batch")
-        try tap("sidebar.session.S1", screen: "12-conversation-tools-collapsed")
-        try require("toolGroup.batch_tool_1.toggle", screen: "12-conversation-tools-collapsed")
-        capture("12-conversation-tools-collapsed")
-    }
-
-    // MARK: - 13 会话页 · 工具卡展开
-
-    func test13ConversationToolsExpanded() throws {
-        launch("online-tool-batch")
-        try tap("sidebar.session.S1", screen: "13-conversation-tools-expanded")
-        try tap("toolGroup.batch_tool_1.toggle", screen: "13-conversation-tools-expanded")
-        try require("toolCard.batch_tool_1.toggle", screen: "13-conversation-tools-expanded")
-        capture("13-conversation-tools-expanded")
-    }
+    // 工具卡折叠和展开的截图随 ToolBatchGroupUITests 一起生成。
 
     // MARK: - 14 会话页 · Markdown
 
@@ -183,29 +170,18 @@ final class VisualReviewUITests: XCTestCase {
         capture("14-conversation-markdown")
     }
 
-    // MARK: - 15 设置页 · 四变体颜色证据
+    // MARK: - 15 设置页 · 标准浅色和深色
 
     func test15SettingsLightStandard() throws {
-        try captureSettingsVariant(appearance: "light", contrast: "standard")
+        try captureSettingsVariant(appearance: "light")
     }
 
     func test15SettingsDarkStandard() throws {
-        try captureSettingsVariant(appearance: "dark", contrast: "standard")
+        try captureSettingsVariant(appearance: "dark")
     }
 
-    func test15SettingsLightIncreasedContrast() throws {
-        try captureSettingsVariant(appearance: "light", contrast: "increased")
-    }
-
-    func test15SettingsDarkIncreasedContrast() throws {
-        try captureSettingsVariant(appearance: "dark", contrast: "increased")
-    }
-
-    private func captureSettingsVariant(appearance: String, contrast: String) throws {
-        if contrast == "increased" {
-            throw XCTSkip("当前模拟器未能稳定开启 Increase Contrast；该变体需真机或可用环境手工验收")
-        }
-        launch("online-two-hosts", appearance: appearance, contrast: contrast)
+    private func captureSettingsVariant(appearance: String) throws {
+        launch("online-two-hosts", appearance: appearance)
         try tap("sidebar.root.settings", screen: "15-settings-colors", allowsSkip: false)
         try require("settings.appearance", screen: "15-settings-colors", scrollIfNeeded: true, allowsSkip: false)
 
@@ -226,12 +202,11 @@ final class VisualReviewUITests: XCTestCase {
 
     // MARK: - 基础设施
 
-    private var variant = "light-standard"
+    private var variant = "light"
 
     /// 每次用例独立启动，避免「上一条用例的抽屉/根页」污染这一屏。
-    /// 外观由 App 偏好注入；增强对比度由系统辅助功能设置驱动。
-    private func launch(_ scenario: String, appearance: String = "light", contrast: String = "standard") {
-        variant = contrast == "standard" ? appearance : "\(appearance)-\(contrast)"
+    private func launch(_ scenario: String, appearance: String = "light") {
+        variant = appearance
         let app = XCUIApplication()
         app.launchEnvironment["PI_IOS_UI_FIXTURE_SCENARIO"] = scenario
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]

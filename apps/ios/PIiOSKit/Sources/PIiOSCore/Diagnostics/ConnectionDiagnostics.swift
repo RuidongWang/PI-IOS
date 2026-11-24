@@ -141,6 +141,7 @@ public enum ConnectionFailureClassifier {
         case .notFound: return "内容已不存在，列表已刷新"
         case .methodNotFound: return "这台服务器不支持该操作"
         case .agentBusy: return "PI-adaptor 正忙"
+        case .sessionReadOnly: return "会话暂时只读，请检查 Host 上的会话文件后重新打开"
         case .conflict: return "状态已变化：重新加载后再试"
         case .idempotencyConflict: return "这次提交与上次不同：确认后再发"
         case .cursorExpired: return "内容有缺口：已重新加载"

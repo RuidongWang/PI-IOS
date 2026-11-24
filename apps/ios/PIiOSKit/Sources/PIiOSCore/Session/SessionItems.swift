@@ -76,8 +76,14 @@ public struct RACPItem: Equatable, Sendable {
             ?? payload.value(at: ["kind"])?.stringValue
     }
     public var kind: String? { itemType }
+    public var historyItemID: String {
+        payload.value(at: ["historyItemId"])?.stringValue
+            ?? contentObject?.value(at: ["result", "historyItemId"])?.stringValue
+            ?? id
+    }
     public var historyTextByteLength: Int? {
         payload.value(at: ["textByteLength"])?.intValue
+            ?? contentObject?.value(at: ["result", "textByteLength"])?.intValue
     }
     public var role: String? {
         payload.value(at: ["role"])?.stringValue
@@ -139,6 +145,9 @@ public struct RACPItem: Equatable, Sendable {
         if object["text"] == nil, text == nil, let previousText = previous.text, !previousText.isEmpty {
             object["text"] = .string(previousText)
         }
+        if historyTextByteLength == nil, let length = previous.historyTextByteLength {
+            object["textByteLength"] = .number(Double(length))
+        }
         return RACPItem(id: id, payload: .object(object))
     }
     public var turnId: String? { payload.value(at: ["turnId"])?.stringValue }
@@ -199,6 +208,7 @@ public struct RACPApprovalRequest: Equatable, Sendable {
     }
 
     public var revision: Int? { payload.value(at: ["revision"])?.intValue }
+    public var inputByteLength: Int? { payload.value(at: ["inputByteLength"])?.intValue }
     public var status: String? { payload.value(at: ["status"])?.stringValue }
     /// 工具名等摘要字段——未冻结，读不到返回 `nil`。
     public var toolName: String? { payload.value(at: ["toolName"])?.stringValue }

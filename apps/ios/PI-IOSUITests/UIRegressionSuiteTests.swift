@@ -72,8 +72,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         snapshot("G-02", step: 1)
     }
 
-    /// 覆盖 SET-01/02/03/05/06/07；原方法名误用 G-03，和下面真正验证
-    /// 返回闭合的 `testG03BackClosure` 撞了编号，此处按实际用例集重命名。
+    /// 覆盖 SET-01/02/03/05/06/07。
     func testSettingsCases() {
         launch("online-host-unit-active")
         openSettings()
@@ -187,31 +186,6 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("SET-03", app.staticTexts["100 轮"].waitForExistence(timeout: 5), "缓存上限已更新")
         snapshot("SET-03", step: 1)
 
-    }
-
-    func testG03BackClosure() {
-        launch("offline-two-hosts")
-        openSettings()
-        let models = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "模型服务")).firstMatch
-        expect("G-03", models.waitForExistence(timeout: 5), "模型入口")
-        models.tap()
-        expect("G-03", app.navigationBars["模型服务"].waitForExistence(timeout: 5), "进入模型服务")
-        goBack()
-        expect("G-03", app.navigationBars["设置"].waitForExistence(timeout: 5), "模型服务可返回设置")
-        for _ in 0..<8 { app.swipeDown() }
-        let host = hostRow("Fixture PI-adaptor B")
-        expect("G-03", host.waitForExistence(timeout: 5), "服务器行")
-        host.tap()
-        expect("G-03", app.navigationBars["服务器"].waitForExistence(timeout: 5), "进入服务器页")
-        let install = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "安装或修复 PI-adaptor")).firstMatch
-        scrollUntilHittable(install)
-        install.tap()
-        expect("G-03", app.navigationBars["安装 PI-adaptor"].waitForExistence(timeout: 5), "进入安装页")
-        goBack()
-        expect("G-03", app.navigationBars["服务器"].waitForExistence(timeout: 5), "安装页返回服务器")
-        goBack()
-        expect("G-03", app.navigationBars["设置"].waitForExistence(timeout: 5), "服务器返回设置")
-        snapshot("G-03", step: 1)
     }
 
     func testSettingsRevokePairing() {
@@ -403,6 +377,12 @@ final class UIRegressionSuiteTests: XCTestCase {
         app.buttons["完成"].firstMatch.tap()
         expect("INS-05", app.navigationBars["安装 PI-adaptor"].waitForExistence(timeout: 5), "关闭后安装页")
 
+        goBack()
+        expect("G-03", app.navigationBars["服务器"].waitForExistence(timeout: 5), "安装页返回服务器")
+        goBack()
+        expect("G-03", app.navigationBars["设置"].waitForExistence(timeout: 5), "服务器返回设置")
+        snapshot("G-03", step: 1)
+
         // INS-02/03/04 的失败页断言由 `InstallRecoveryUITests` 独占维护：
         // 同一夹具、同一页面，原先在这里再启动三次 App 属于纯重复。
     }
@@ -413,20 +393,30 @@ final class UIRegressionSuiteTests: XCTestCase {
         launch("online-model-update")
         openSettings()
         openListRow("模型服务", requireExact: false)
-        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Alpha Models")).firstMatch.tap()
+        let provider = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Alpha Models")).firstMatch
+        expect("MDL-08", provider.waitForExistence(timeout: 5), "Alpha Models 服务行")
+        provider.tap()
         expect("MDL-08", app.navigationBars["模型服务详情"].waitForExistence(timeout: 5), "已配置服务详情")
         expect("MDL-08", textContaining("2 个模型"), "详情模型计数")
         expect("MDL-08", text("Alpha Pro") && text("Alpha Mini"), "每个模型独立成行")
 
-        // 单个模型编辑：只改这一个模型，模型 ID 不可改。
         let editMini = app.buttons["models.provider.editModel.alpha-mini"]
+        let setMiniDefault = app.buttons["models.provider.setDefault.alpha-mini"]
+        let setProDefault = app.buttons["models.provider.setDefault.alpha-pro"]
+        expect("MDL-08", editMini.exists && editMini.label == "编辑模型", "编辑按钮文案")
+        expect("MDL-08", setMiniDefault.exists && setMiniDefault.label == "设为默认", "默认按钮文案")
+        expect("MDL-08", !setProDefault.exists, "编辑前默认模型为 Alpha Pro")
+        expect("MDL-08", !textContaining("只改这一个模型") && !textContaining("本机记录"), "详情省略重复说明")
+        expect("MDL-08", app.descendants(matching: .any)["models.provider.delete"].waitForExistence(timeout: 5), "删除入口标识")
+
         scrollUntilHittable(editMini)
         editMini.tap()
         expect("MDL-08", app.navigationBars["编辑模型"].waitForExistence(timeout: 5), "单模型编辑表单")
         expect("MDL-08", text("alpha-mini"), "模型 ID 只读展示")
+        let updatedName = "Alpha Mini Next"
         let displayName = app.textFields["模型显示名"].firstMatch
         expect("MDL-08", displayName.waitForExistence(timeout: 5), "显示名字段")
-        replaceText(displayName, with: "Alpha Mini Next")
+        replaceText(displayName, with: updatedName)
         let contextWindow = app.textFields["models.provider.contextWindow"]
         replaceText(contextWindow, with: "64000")
         app.buttons["models.provider.thinkingLevels"].tap()
@@ -437,22 +427,30 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("MDL-08", app.alerts["模型服务已更新"].waitForExistence(timeout: 8), "更新成功提示")
         app.alerts["模型服务已更新"].buttons["知道了"].tap()
         snapshot("MDL-08", step: 1)
-        expect("MDL-08", text("Alpha Mini Next"), "只更新被编辑的模型")
+        expect("MDL-08", text(updatedName), "只更新被编辑的模型")
         expect("MDL-08", textContaining("64K ctx"), "上下文上限写入")
+        expect("MDL-08", setMiniDefault.exists && !setProDefault.exists, "编辑后默认模型仍是 Alpha Pro")
 
-        // 设为模型：默认标记从 alpha-pro 切到 alpha-mini。
-        // 与 `ModelConfigChipUITests` 的独立持久化场景不同，这里验证“编辑后再设默认”的连续操作。
-        let setDefault = app.buttons["models.provider.setDefault.alpha-mini"]
-        scrollUntilHittable(setDefault)
-        setDefault.tap()
-        expect("MDL-08", app.alerts["模型服务已更新"].waitForExistence(timeout: 8), "设为模型成功提示")
+        scrollUntilHittable(setMiniDefault)
+        setMiniDefault.tap()
+        expect("MDL-08", app.alerts["模型服务已更新"].waitForExistence(timeout: 8), "设为默认成功提示")
         app.alerts["模型服务已更新"].buttons["知道了"].tap()
-        expect(
-            "MDL-08",
-            app.buttons["models.provider.setDefault.alpha-pro"].waitForExistence(timeout: 5)
-                && !app.buttons["models.provider.setDefault.alpha-mini"].exists,
-            "默认模型切换后按钮随之切换"
-        )
+        expect("MDL-08", setProDefault.waitForExistence(timeout: 5) && !setMiniDefault.exists, "默认模型切到 Alpha Mini")
+
+        app.buttons["完成"].tap()
+        expect("MDL-08", app.navigationBars["模型服务"].waitForExistence(timeout: 5), "关闭详情后回到模型服务")
+        expect("MDL-08", provider.waitForExistence(timeout: 5), "更新后仍可打开服务详情")
+        provider.tap()
+        expect("MDL-08", app.navigationBars["模型服务详情"].waitForExistence(timeout: 5), "重新打开详情")
+        expect("MDL-08", setProDefault.waitForExistence(timeout: 5) && !setMiniDefault.exists, "重开详情后默认模型仍为 Alpha Mini")
+        app.buttons["完成"].tap()
+        expect("MDL-08", app.navigationBars["模型服务"].waitForExistence(timeout: 5), "关闭详情")
+        goBack()
+        expect("MDL-08", app.navigationBars["设置"].waitForExistence(timeout: 5), "回到设置查看默认模型")
+        let defaultModelRow = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@ AND label CONTAINS %@", "默认模型", updatedName
+        )).firstMatch
+        expect("MDL-08", defaultModelRow.waitForExistence(timeout: 6), "设置页显示更新后的默认模型")
     }
 
     func testModelsProvidersAndSkills() {
@@ -461,9 +459,13 @@ final class UIRegressionSuiteTests: XCTestCase {
         openListRow("模型服务", requireExact: false)
         expect("MDL-01", app.navigationBars["模型服务"].waitForExistence(timeout: 5), "模型服务页")
         expect("MDL-01", text("本机模型清单"), "本机模型清单分组")
-        expect("MDL-01", app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Alpha Models")).firstMatch.exists, "Alpha Models 行")
-        expect("MDL-01", textContaining("1 个模型 · https://alpha.invalid"), "服务副标题")
-        expect("MDL-01", !textContaining("点一条服务可查看详情并删除"), "清单 footer 已删除")
+        expect("MDL-01", !text("还没有模型服务"), "有服务时隐藏空态")
+        let alphaRow = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Alpha Models")).firstMatch
+        expect("MDL-01", alphaRow.waitForExistence(timeout: 5), "Alpha Models 行")
+        expect("MDL-01", alphaRow.label.contains("1 个模型 · https://alpha.invalid"), "服务副标题含模型数和地址")
+        for removedCopy in ["点一条服务可查看详情并删除", "Base URL 填模型请求根地址", "四种线路协议", "用于模型选择器分组"] {
+            expect("MDL-01", !textContaining(removedCopy), "省略重复说明 \(removedCopy)")
+        }
         snapshot("MDL-01", step: 1)
 
         let nameField = app.textFields["models.serviceName"]
@@ -473,7 +475,11 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("MDL-02", nameField.value as? String == "localhost", "服务名默认 localhost")
         expect("MDL-02", baseField.value as? String == "http://localhost:8080", "Base URL 默认指向本机")
         expect("MDL-02", baseField.isEnabled && keyField.isEnabled, "API Key 与 Base URL 始终可编辑")
-        expect("MDL-02", !app.buttons["获取模型"].isEnabled, "空 Key 禁用获取")
+        let apiKeyNote = app.staticTexts["models.apiKeyNote"]
+        expect("MDL-02", apiKeyNote.exists && apiKeyNote.label.contains("只存本机") && apiKeyNote.label.contains("不落盘"), "密钥归属说明")
+        let fetchModels = app.buttons["models.fetchModels"]
+        expect("MDL-02", fetchModels.exists && !fetchModels.isEnabled, "空 Key 禁用获取")
+        expect("MDL-02", !app.buttons["models.selectAll"].exists, "获取前隐藏全选按钮")
 
         // MDL-03：只保留四种线路协议，没有订阅登录入口。
         expect("MDL-03", !segmentedButton("订阅账号登录").exists, "订阅账号登录已移除")
@@ -493,7 +499,6 @@ final class UIRegressionSuiteTests: XCTestCase {
         }
 
         for _ in 0..<8 { app.swipeDown() }
-        let alphaRow = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Alpha Models")).firstMatch
         expect("MDL-04", alphaRow.waitForExistence(timeout: 5), "Alpha Models 可详情")
         alphaRow.tap()
         if !app.navigationBars["模型服务详情"].waitForExistence(timeout: 2) {
@@ -522,15 +527,6 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("MDL-05", app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Alpha Models")).firstMatch.exists, "夹具无传输时 alpha 仍在")
         snapshot("MDL-05", step: 1)
 
-        // HPR-01：v2 记录不再是设置页的并列入口，而是「模型服务」里的「服务器记录」。
-        // 离线时这条门不出现——记录在服务器上，点开只能是失败。
-        launch("offline-two-hosts")
-        openSettings()
-        openListRow("模型服务", requireExact: false)
-        expect("HPR-01", app.navigationBars["模型服务"].waitForExistence(timeout: 8), "模型服务页")
-        expect("HPR-01", !app.descendants(matching: .any)["models.serverRecords"].exists, "离线不提供服务器记录入口")
-        goBack()
-
         launch("online-model-update")
         openSettings()
         openListRow("模型服务", requireExact: false)
@@ -553,10 +549,12 @@ final class UIRegressionSuiteTests: XCTestCase {
         goBack()
         goBack()
 
-        // MDL-07：导入依赖在线隧道，离线时必须提前说明，而不是等点导入才报协议错。
+        // 在同一次离线启动中检查服务器记录、导入提示和 Skill 安装门禁。
         launch("offline-two-hosts")
         openSettings()
         openListRow("模型服务", requireExact: false)
+        expect("HPR-01", app.navigationBars["模型服务"].waitForExistence(timeout: 8), "离线模型服务页")
+        expect("HPR-01", !app.descendants(matching: .any)["models.serverRecords"].exists, "离线不提供服务器记录入口")
         expect(
             "MDL-07",
             app.descendants(matching: .any)["models.importBlocked"].waitForExistence(timeout: 5),
@@ -565,6 +563,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("MDL-07", textContaining("无法导入模型服务"), "添加模型服务表单内离线导入提示")
         expect("MDL-07", textContaining("PI-adaptor 当前离线"), "离线导入原因")
         goBack()
+        expect("G-03", app.navigationBars["设置"].waitForExistence(timeout: 5), "模型服务可返回设置")
 
         expect(
             "SKL-01",
@@ -748,6 +747,14 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("CNV-01", app.navigationBars["项目"].waitForExistence(timeout: 5), "跳到项目根页")
         snapshot("CNV-01", step: 1)
 
+        openSession("S1", title: "Fixture S1 Alpha")
+        expect("CNV-10", text("模型暂不可用") && text("选择其他模型"), "模型不可用只有一个出口")
+        expect("CNV-10", !app.buttons["发送"].isEnabled, "模型不可用禁用发送")
+        app.buttons["选择其他模型"].tap()
+        expect("CNV-10", app.navigationBars["模型服务"].waitForExistence(timeout: 8), "恢复入口直达模型服务")
+        goBack()
+        snapshot("CNV-10", step: 1)
+
         launch("online-reading-two-sessions")
         openSession("S1", title: "Fixture S1 Alpha")
         expect("CNV-02", app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Reading S1 item 040")).firstMatch.exists, "打开落在最新")
@@ -794,6 +801,41 @@ final class UIRegressionSuiteTests: XCTestCase {
         )
         snapshot("CNV-04", step: 1)
 
+        openSession("S1", title: "Alpha One")
+        // CNV-11 的绑定与配置覆盖在 ModelConfigChipUITests。
+        app.buttons["会话操作"].tap()
+        app.buttons["重命名会话"].tap()
+        expect("CNV-12", app.alerts["重命名会话"].waitForExistence(timeout: 5), "重命名弹窗")
+        let title = app.textFields["会话标题"]
+        replace(title, with: "")
+        // alert 内的 TextField 写回 @State 有延迟，立刻保存会拿到旧值。
+        sleep(1)
+        app.buttons["保存"].tap()
+        // 拒绝提示是顶部 toast；它同时会盖住工具栏按钮，必须等它自己消失再继续，
+        // 否则下一次「会话操作」点到的其实是 toast。
+        let emptyToast = app.staticTexts["会话标题不能为空"]
+        expect("CNV-12", emptyToast.waitForExistence(timeout: 5), "空标题给出提示")
+        _ = emptyToast.waitForNonExistence(timeout: 6)
+        expect("CNV-12", app.navigationBars["Alpha One"].waitForExistence(timeout: 5), "空标题被拒绝，标题不变")
+        // 合法重命名、归档和恢复共用 ProjectSessionLifecycleUITests 的会话夹具。
+        snapshot("CNV-12", step: 1)
+
+        let composer = app.textFields["conversation.composer"].exists
+            ? app.textFields["conversation.composer"]
+            : app.textFields["给 Agent 的指令"]
+        expect("CNV-15", !app.buttons["发送"].isEnabled, "空输入禁用发送")
+        replace(composer, with: "   ")
+        expect("CNV-15", !app.buttons["发送"].isEnabled, "空格禁用发送")
+        replace(composer, with: "hi")
+        expect("CNV-15", app.buttons["发送"].isEnabled, "有文本可发送")
+        expect(
+            "CNV-16",
+            app.buttons["添加图片附件"].exists
+                && app.buttons["添加图片附件"].isEnabled,
+            "附件入口可点"
+        )
+        snapshot("CNV-16", step: 1)
+
         launch("online-long-history-pending-approval")
         openSession("S1", title: "Fixture S1 Alpha")
         let card = app.descendants(matching: .any)["conversation.approval.approval-bash-1"]
@@ -821,65 +863,6 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("CNV-05", window.intersects(allowOnce.frame) && allowOnce.isHittable && deny.isHittable, "翻历史后审批卡仍可点")
         expect("CNV-05", deny.frame.minY > allowOnce.frame.minY + 1, "危险操作不与安全操作共位")
         snapshot("CNV-05", step: 1)
-
-        launch("online-two-sessions")
-        openSession("S1", title: "Fixture S1 Alpha")
-        expect("CNV-10", text("模型暂不可用") && text("选择其他模型"), "模型不可用只有一个出口")
-        expect("CNV-10", !app.buttons["发送"].isEnabled, "模型不可用禁用发送")
-        app.buttons["选择其他模型"].tap()
-        // quiet-v2 §0.2：恢复入口必须闭环——直接落到模型服务页，不是设置根页，也不是再开一层浮层。
-        expect("CNV-10", app.navigationBars["模型服务"].waitForExistence(timeout: 8), "恢复入口直达模型服务")
-        goBack()
-        snapshot("CNV-10", step: 1)
-
-        // CNV-11 由 `ModelConfigChipUITests` 独占覆盖：同一夹具下还额外验证
-        // Beta 模型绑定、无思考档位和运行中禁用，避免在这里重复启动。
-
-        launch("online-model-config")
-        openSession("S1", title: "Alpha One")
-        app.buttons["会话操作"].tap()
-        app.buttons["重命名会话"].tap()
-        expect("CNV-12", app.alerts["重命名会话"].waitForExistence(timeout: 5), "重命名弹窗")
-        let title = app.textFields["会话标题"]
-        replace(title, with: "")
-        // alert 内的 TextField 写回 @State 有延迟，立刻保存会拿到旧值。
-        sleep(1)
-        app.buttons["保存"].tap()
-        // 拒绝提示是顶部 toast；它同时会盖住工具栏按钮，必须等它自己消失再继续，
-        // 否则下一次「会话操作」点到的其实是 toast。
-        let emptyToast = app.staticTexts["会话标题不能为空"]
-        expect("CNV-12", emptyToast.waitForExistence(timeout: 5), "空标题给出提示")
-        _ = emptyToast.waitForNonExistence(timeout: 6)
-        expect("CNV-12", app.navigationBars["Alpha One"].waitForExistence(timeout: 5), "空标题被拒绝，标题不变")
-        // 合法重命名及侧栏同步由 ProjectSessionLifecycleUITests 覆盖；这里只保留空标题边界。
-        snapshot("CNV-12", step: 1)
-
-        launch("online-two-sessions")
-        openSession("S1", title: "Fixture S1 Alpha")
-        app.buttons["会话操作"].tap()
-        app.buttons["归档会话"].tap()
-        expect("CNV-13", app.navigationBars["Fixture S2 Beta"].waitForExistence(timeout: 8) || text("已归档项目「Fixture S1 Alpha」"), "归档切下一条")
-        app.buttons["打开侧边栏"].tap()
-        expect("CNV-13", !app.buttons["sidebar.session.S1"].exists, "S1 从侧栏消失")
-        snapshot("CNV-13", step: 1)
-
-        launch("online-model-config")
-        openSession("S1", title: "Alpha One")
-        let composer = app.textFields["conversation.composer"].exists
-            ? app.textFields["conversation.composer"]
-            : app.textFields["给 Agent 的指令"]
-        expect("CNV-15", !app.buttons["发送"].isEnabled, "空输入禁用发送")
-        replace(composer, with: "   ")
-        expect("CNV-15", !app.buttons["发送"].isEnabled, "空格禁用发送")
-        replace(composer, with: "hi")
-        expect("CNV-15", app.buttons["发送"].isEnabled, "有文本可发送")
-        expect(
-            "CNV-16",
-            app.buttons["添加图片附件"].exists
-                && app.buttons["添加图片附件"].isEnabled,
-            "附件入口可点"
-        )
-        snapshot("CNV-16", step: 1)
     }
 
     func testOfflineCases() {
@@ -932,12 +915,25 @@ final class UIRegressionSuiteTests: XCTestCase {
             format: "identifier BEGINSWITH %@", "conversation.offlineMessage."
         )).count
         expect("OFF-02", mounted > 0 && mounted < 400, "离线历史惰性挂载，不能同时布局全部 400 条消息")
+        let timeline = app.scrollViews["conversation.timeline"]
+        expect("OFF-02", timeline.exists, "可定位离线时间线")
+        let replies = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Cache reply "))
+        let lastUser = app.staticTexts["Cache item 205"]
         let lastReply = app.staticTexts["Cache reply 205"]
-        for _ in 0..<120 {
-            if lastReply.exists, lastReply.isHittable { break }
-            app.scrollViews.firstMatch.swipeUp(velocity: .fast)
+        let deadline = Date().addingTimeInterval(180)
+        var lastMountedRound = 6
+        var stalledBatches = 0
+        while Date() < deadline, stalledBatches < 4 {
+            if lastMountedRound == 205, lastUser.isHittable, lastReply.isHittable { break }
+            for _ in 0..<4 {
+                timeline.swipeUp(velocity: .fast)
+            }
+            let mountedRound = replies.allElementsBoundByIndex.last.flatMap { Int($0.label.suffix(3)) } ?? lastMountedRound
+            stalledBatches = mountedRound > lastMountedRound ? 0 : stalledBatches + 1
+            lastMountedRound = max(lastMountedRound, mountedRound)
         }
-        expect("OFF-02", app.staticTexts["Cache item 205"].isHittable && lastReply.isHittable, "205 user+assistant 整轮可滚动到达")
+        expect("OFF-02", lastUser.exists && lastReply.exists && lastUser.isHittable && lastReply.isHittable,
+               "205 user+assistant 整轮可滚动到达（已挂载至第 \(lastMountedRound) 轮）")
         snapshot("OFF-02", step: 1)
     }
 
@@ -1190,6 +1186,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         let host = hostRow("Fixture PI-adaptor B")
         expect("NAV", host.waitForExistence(timeout: 5), "安装夹具 host")
         host.tap()
+        expect("NAV", app.navigationBars["服务器"].waitForExistence(timeout: 5), "进入服务器页")
         let install = app.buttons
             .matching(NSPredicate(format: "label CONTAINS %@", "安装或修复 PI-adaptor"))
             .firstMatch
@@ -1417,10 +1414,10 @@ final class UIRegressionSuiteTests: XCTestCase {
             atPath: evidenceDirectory,
             withIntermediateDirectories: true
         )
-        let data = XCUIScreen.main.screenshot().pngRepresentation
+        let screenshot = XCUIScreen.main.screenshot()
         let path = "\(evidenceDirectory)/\(id)-\(String(format: "%02d", step))-01-20261101.png"
-        try? data.write(to: URL(fileURLWithPath: path))
-        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        try? screenshot.pngRepresentation.write(to: URL(fileURLWithPath: path))
+        let attachment = XCTAttachment(screenshot: screenshot)
         attachment.name = "\(id)-step-\(step)"
         attachment.lifetime = .keepAlways
         add(attachment)

@@ -78,7 +78,7 @@ public enum AdaptorReleaseResolutionSource: Equatable, Sendable {
     public var displayName: String {
         switch self {
         case .latest:
-            return "最新发布"
+            return "最新兼容发布"
         case let .fallback(reason):
             return "内置版本（\(reason)）"
         }
@@ -121,26 +121,31 @@ public protocol AdaptorReleaseResolving: Sendable {
 /// 1. `https://api.github.com/repos/<repo>/releases?per_page=20`
 /// 2. 仅当发布列表没给出资产 `digest` 时，读取选中发布里的 `<artifact>.sha256`
 ///
-/// 任何一步失败都回退到内置发布并附固定原因，绝不把远端文本拼进提示，
-/// 也绝不因为解析失败而阻止安装。
+/// 查询失败时回退到兼容的内置发布，提示使用固定文案。
 public actor AdaptorReleaseCatalog: AdaptorReleaseResolving {
     public static let defaultRepository = PIAdaptorRelease.releaseRepository
     public static let releasesPageSize = 20
     public static let listCacheLifetime: TimeInterval = 600
     public static let maximumListBytes = 512 * 1_024
     public static let maximumChecksumBytes = 4 * 1_024
+    private static let bundledMinimumKey = "PIAdaptor.bundledMinimumClient.\(PIAdaptorRelease.releaseTag)"
 
     private struct ListCacheEntry {
-        let data: Data
+        let entries: [GitHubReleaseListEntry]
         let storedAt: Date
+        let requestID: UInt64
     }
 
     private let http: any AdaptorReleaseHTTP
     private let repository: String
+    private let clientVersion: String
     private let listCacheLifetime: TimeInterval
     private let now: @Sendable () -> Date
+    private let compatibilityDefaults: UserDefaults?
 
-    private var listCache: [String: ListCacheEntry] = [:]
+    private var listCache: ListCacheEntry?
+    private var publishedBundledMinimum: String?
+    private var nextListRequestID: UInt64 = 0
 
     private enum HTTPStatusError: Error {
         case status(Int)
@@ -149,13 +154,20 @@ public actor AdaptorReleaseCatalog: AdaptorReleaseResolving {
     public init(
         http: any AdaptorReleaseHTTP = URLSessionAdaptorReleaseHTTP(),
         repository: String = AdaptorReleaseCatalog.defaultRepository,
+        clientVersion: String = PIAdaptorRelease.releaseVersion,
         listCacheLifetime: TimeInterval = AdaptorReleaseCatalog.listCacheLifetime,
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        compatibilityDefaults: UserDefaults? = nil
     ) {
         self.http = http
         self.repository = repository
+        self.clientVersion = clientVersion
         self.listCacheLifetime = listCacheLifetime
         self.now = now
+        self.compatibilityDefaults = compatibilityDefaults
+        if repository == Self.defaultRepository {
+            self.publishedBundledMinimum = compatibilityDefaults?.string(forKey: Self.bundledMinimumKey)
+        }
     }
 
     public func resolve(
@@ -181,16 +193,17 @@ public actor AdaptorReleaseCatalog: AdaptorReleaseResolving {
         target: BootstrapArtifactTarget,
         fallbackBaseURL: String
     ) async throws -> AdaptorReleaseResolution? {
-        let listData = try await releasesList()
+        let entries = try await releasesList()
         guard let candidate = AdaptorReleaseSelection.latest(
-            from: listData,
+            from: entries,
             target: target,
-            repository: repository
+            repository: repository,
+            clientVersion: clientVersion
         ) else {
             return fallback(
                 target: target,
                 baseURL: fallbackBaseURL,
-                reason: Self.noCandidateReason(in: listData, target: target, repository: repository)
+                reason: noCandidateReason(in: entries, target: target)
             )
         }
 
@@ -221,6 +234,8 @@ public actor AdaptorReleaseCatalog: AdaptorReleaseResolving {
             digest = parsed
         }
 
+        if repository == Self.defaultRepository, candidate.releaseTag == PIAdaptorRelease.releaseTag,
+           !acceptsBundledRelease { return nil }
         guard let release = PIAdaptorRelease(
             version: candidate.version,
             target: target,
@@ -232,10 +247,10 @@ public actor AdaptorReleaseCatalog: AdaptorReleaseResolving {
         return AdaptorReleaseResolution(release: release, source: .latest)
     }
 
-    private func releasesList() async throws -> Data {
-        if let cached = listCache[repository],
+    private func releasesList() async throws -> [GitHubReleaseListEntry] {
+        if let cached = listCache,
            now().timeIntervalSince(cached.storedAt) < listCacheLifetime {
-            return cached.data
+            return cached.entries
         }
 
         guard let url = URL(
@@ -243,25 +258,45 @@ public actor AdaptorReleaseCatalog: AdaptorReleaseResolving {
         ) else {
             throw AdaptorReleaseHTTPError.invalidResponse
         }
+        nextListRequestID += 1
+        let requestID = nextListRequestID
         let (data, status) = try await http.data(for: url)
+        if let cached = listCache, cached.requestID > requestID { return cached.entries }
         guard status == 200 else {
             throw HTTPStatusError.status(status)
         }
-        guard data.count <= Self.maximumListBytes else {
+        guard data.count <= Self.maximumListBytes,
+              let entries = try? JSONDecoder().decode([GitHubReleaseListEntry].self, from: data) else {
             throw AdaptorReleaseHTTPError.invalidResponse
         }
-        listCache[repository] = ListCacheEntry(data: data, storedAt: now())
-        return data
+        listCache = ListCacheEntry(entries: entries, storedAt: now(), requestID: requestID)
+        if repository == Self.defaultRepository,
+           let bundled = entries.first(where: { !$0.draft && !$0.prerelease && $0.tagName == PIAdaptorRelease.releaseTag }) {
+            // An explicit malformed declaration blocks the bundled release as well.
+            let minimum = AdaptorReleaseSelection.minimumClientVersion(for: bundled, hostVersion: PIAdaptorRelease.releaseVersion) ?? ""
+            publishedBundledMinimum = minimum
+            compatibilityDefaults?.set(minimum, forKey: Self.bundledMinimumKey)
+        }
+        return entries
     }
 
     // MARK: 回退
+
+    private var acceptsBundledRelease: Bool {
+        guard AdaptorReleaseSelection.meetsMinimum(
+            version: clientVersion, minimum: PIAdaptorRelease.minimumBundledClientVersion
+        ) else { return false }
+        guard let minimum = publishedBundledMinimum else { return true }
+        return AdaptorReleaseSelection.meetsMinimum(version: clientVersion, minimum: minimum)
+    }
 
     private func fallback(
         target: BootstrapArtifactTarget,
         baseURL: String,
         reason: String
     ) -> AdaptorReleaseResolution? {
-        guard let release = PIAdaptorRelease.patched(target: target, baseURL: baseURL) else {
+        guard acceptsBundledRelease,
+              let release = PIAdaptorRelease.patched(target: target, baseURL: baseURL) else {
             return nil
         }
         return AdaptorReleaseResolution(release: release, source: .fallback(reason: reason))
@@ -295,16 +330,10 @@ public actor AdaptorReleaseCatalog: AdaptorReleaseResolving {
     }
 
     /// 列表能解析但没有可用发布时，尽量给出更具体的原因。
-    private static func noCandidateReason(
-        in data: Data,
-        target: BootstrapArtifactTarget,
-        repository: String
-    ) -> String {
-        guard let entries = try? JSONDecoder().decode([GitHubReleaseListEntry].self, from: data) else {
-            return "GitHub 返回的信息无法识别"
-        }
+    private func noCandidateReason(in entries: [GitHubReleaseListEntry], target: BootstrapArtifactTarget) -> String {
         var sawStableTag = false
         var sawArtifact = false
+        var sawIncompatible = false
         for entry in entries where !entry.draft && !entry.prerelease {
             guard entry.tagName.hasPrefix(AdaptorReleaseSelection.tagPrefix) else { continue }
             let rawVersion = String(entry.tagName.dropFirst(AdaptorReleaseSelection.tagPrefix.count))
@@ -318,7 +347,14 @@ public actor AdaptorReleaseCatalog: AdaptorReleaseResolving {
             let assetNames = Set(entry.assets.map(\.name))
             if assetNames.contains(release.artifactName) {
                 sawArtifact = true
+                if assetNames.contains(release.artifactName + ".sha256"),
+                   !AdaptorReleaseSelection.isCompatible(entry, hostVersion: rawVersion, clientVersion: clientVersion) {
+                    sawIncompatible = true
+                }
             }
+        }
+        if sawIncompatible {
+            return "没有与当前 PI-IOS 兼容的发布"
         }
         if sawArtifact {
             return "发布缺少校验文件"

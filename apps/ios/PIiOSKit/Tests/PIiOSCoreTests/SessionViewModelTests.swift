@@ -81,6 +81,21 @@ final class SessionViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.cursor, RACPCursor(epoch: "ep_7f", sequence: 317))
     }
 
+    func testAssistantCompletionKeepsTheNativeCopyReference() throws {
+        let model = SessionViewModel()
+        let frames = [
+            #"{"kind":"item.delta","epoch":"fixture","sequence":1,"payload":{"itemId":"stream","itemType":"message","delta":"streamed text"}}"#,
+            #"{"kind":"item.completed","epoch":"fixture","sequence":2,"payload":{"item":{"id":"stream","itemType":"message","role":"assistant","text":"preview","historyItemId":"native","textByteLength":300000}}}"#,
+        ]
+        model.applyEvents(try frames.map { try JSONDecoder().decode(RACPEvent.self, from: Data($0.utf8)) })
+
+        XCTAssertEqual(model.items.map(\.id), ["stream"])
+        let item = try XCTUnwrap(model.item(id: "stream"))
+        XCTAssertEqual(item.text, "preview")
+        XCTAssertEqual(item.historyItemID, "native")
+        XCTAssertEqual(item.historyTextByteLength, 300_000)
+    }
+
     func testAC14_1_ignoresStaleAndDuplicateSequences() {
         let viewModel = SessionViewModel()
         viewModel.applySnapshot(

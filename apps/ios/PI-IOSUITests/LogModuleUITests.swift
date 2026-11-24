@@ -108,8 +108,7 @@ final class LogModuleUITests: XCTestCase {
             || anySheet.waitForExistence(timeout: 3)
         XCTAssertTrue(appeared, "导出后必须弹出系统分享面板")
 
-        // 关闭分享面板：系统分享面板右上角固定是 header.closeButton（label 随语言变化），
-        // 点它并等待远程视图退出；只靠点外部不会关闭全屏 sheet。
+        // iOS 27 模拟器有时不会处理远程分享视图的关闭按钮。外层 sheet 也支持下拖关闭。
         let shareClose = app.buttons["header.closeButton"].firstMatch
         let shareCloseByLabel = app.buttons["关闭"].firstMatch
         if shareClose.waitForExistence(timeout: 10) {
@@ -117,7 +116,13 @@ final class LogModuleUITests: XCTestCase {
         } else if shareCloseByLabel.waitForExistence(timeout: 3) {
             shareCloseByLabel.tap()
         }
-        XCTAssertTrue(activityList.waitForNonExistence(timeout: 10), "分享面板应能关闭")
+        if !activityList.waitForNonExistence(timeout: 3) || anySheet.exists {
+            let top = app.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.09))
+            let bottom = app.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.75))
+            top.press(forDuration: 0.05, thenDragTo: bottom)
+        }
+        XCTAssertTrue(activityList.waitForNonExistence(timeout: 8), "分享面板应能关闭")
+        XCTAssertTrue(anySheet.waitForNonExistence(timeout: 4), "外层面板应已关闭")
         XCTAssertTrue(app.navigationBars["运行日志"].waitForExistence(timeout: 8), "关闭分享面板后回到日志页")
 
         // 清空：先取消，页面仍在；不清空是 AC-L7 的一部分。
@@ -136,61 +141,8 @@ final class LogModuleUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["运行日志"].waitForExistence(timeout: 5), "取消清空后仍在日志页")
     }
 
-    /// 关闭日志后设置页副标题变「已关闭」；确认清空后页面回到空态（AC-L1/L7）。
-    func testDisablingShowsClosedSubtitleAndConfirmedClearEmptiesPreview() {
-        XCTAssertTrue(app.navigationBars["设置"].waitForExistence(timeout: 15), "空夹具首屏为设置")
-        let entry = app.buttons["settings.logs"]
-        scrollUntilHittable(entry)
-        XCTAssertTrue(entry.label.contains("记录中"), "默认开启时副标题应显示记录中：\(entry.label)")
-        entry.tap()
-        XCTAssertTrue(app.navigationBars["运行日志"].waitForExistence(timeout: 8), "进入运行日志页")
-
-        // 关闭日志：开关落到 0，副标题随后应显示「已关闭」。
-        let toggle = app.descendants(matching: .any)
-            .matching(identifier: "logs.toggleEnabled")
-            .firstMatch
-        XCTAssertTrue(toggle.waitForExistence(timeout: 5), "日志开关")
-        toggle.tap()
-        XCTAssertTrue(
-            waitForToggleValue(toggle, expected: "0"),
-            "关闭后开关应为关：\(String(describing: toggle.value))"
-        )
-
-        goBack()
-        let closedEntry = app.buttons["settings.logs"]
-        scrollUntilHittable(closedEntry)
-        XCTAssertTrue(
-            waitUntilLabelContains(closedEntry, "已关闭"),
-            "关闭日志后副标题应显示已关闭：\(closedEntry.label)"
-        )
-
-        // 重新进入并打开，再走「确认清空」路径：清空后页面必须回到空态。
-        closedEntry.tap()
-        XCTAssertTrue(app.navigationBars["运行日志"].waitForExistence(timeout: 8), "再次进入运行日志页")
-        let reopen = app.descendants(matching: .any)
-            .matching(identifier: "logs.toggleEnabled")
-            .firstMatch
-        XCTAssertTrue(reopen.waitForExistence(timeout: 5), "日志开关")
-        reopen.tap()
-        XCTAssertTrue(waitForToggleValue(reopen, expected: "1"), "重新开启后开关应为开")
-
-        let clear = app.buttons["logs.clear"].firstMatch
-        scrollUntilHittable(clear)
-        XCTAssertTrue(clear.exists, "清空日志行")
-        clear.tap()
-        let confirmButton = app.buttons["清空"].firstMatch
-        XCTAssertTrue(confirmButton.waitForExistence(timeout: 5), "清空二次确认的确认按钮")
-        confirmButton.tap()
-
-        let empty = app.descendants(matching: .any)
-            .matching(identifier: "logs.emptyState")
-            .firstMatch
-        XCTAssertTrue(empty.waitForExistence(timeout: 8), "确认清空后应显示空态")
-    }
-
-    /// 关闭日志后已有记录不能被内存空缓冲覆盖成「暂无日志」（用户原话：关闭后记录丢失），
-    /// 必须出现关闭提示；重新开启后继续追加，历史不清空。
-    func testDisabledLoggingKeepsPreviewAndReenableAppendsRecords() {
+    /// 关闭后保留历史，重新开启后继续追加，确认清空才回到空态。
+    func testLoggingDisableReenableAndConfirmedClear() {
         openLogsPage()
         // 先清空历史，让「记录条数」在本用例内可确定地增长，避免模拟器残留记录
         // 影响追加判断；当前列表不再按 50 条截断。
@@ -229,6 +181,15 @@ final class LogModuleUITests: XCTestCase {
         XCTAssertNotNil(stableCount, "应读到记录条数")
         XCTAssertGreaterThan(stableCount ?? 0, 0, "关闭日志不能把已有记录清空")
 
+        goBack()
+        XCTAssertTrue(app.navigationBars["设置"].waitForExistence(timeout: 5), "关闭后回到设置")
+        let closedEntry = app.buttons["settings.logs"]
+        scrollUntilHittable(closedEntry)
+        XCTAssertTrue(waitUntilLabelContains(closedEntry, "已关闭"), "设置页副标题应显示已关闭")
+        closedEntry.tap()
+        XCTAssertTrue(app.navigationBars["运行日志"].waitForExistence(timeout: 8), "再次进入运行日志页")
+        XCTAssertTrue(waitForToggleValue(toggle, expected: "0"), "重新进入后开关仍为关")
+
         // 重新开启：提示消失，且继续追加记录，历史仍在。
         scrollUntilHittable(toggle)
         toggle.tap()
@@ -239,6 +200,7 @@ final class LogModuleUITests: XCTestCase {
             "重新开启后应继续记录（条数增加），而不是清空重来"
         )
         XCTAssertTrue(preview.exists, "重新开启后历史记录仍在预览中")
+        clearAllLogs()
     }
 
     /// 只通过真实设置动作制造 54 条记录，验证预览与复制都不受旧 50 条上限影响。

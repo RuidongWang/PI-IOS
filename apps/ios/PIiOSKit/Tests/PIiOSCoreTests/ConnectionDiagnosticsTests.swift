@@ -4,38 +4,21 @@ import XCTest
 final class ConnectionDiagnosticsTests: XCTestCase {
     // MARK: - systemd unit 状态
 
-    func testParsesActiveUnit() throws {
-        let snapshot = try AdaptorUnitSnapshotParser.parse(
-            """
-            LoadState=loaded
-            ActiveState=active
-            UnitFileState=enabled
-            """
-        )
-
-        XCTAssertEqual(snapshot.loadState, "loaded")
-        XCTAssertEqual(snapshot.activeState, "active")
-        XCTAssertEqual(snapshot.unitFileState, "enabled")
-        XCTAssertTrue(snapshot.isActive)
-    }
-
-    func testParsesInactiveUnit() throws {
-        let snapshot = try AdaptorUnitSnapshotParser.parse(
-            "LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled"
-        )
-
-        XCTAssertEqual(snapshot.activeState, "inactive")
-        XCTAssertEqual(snapshot.unitFileState, "disabled")
-        XCTAssertFalse(snapshot.isActive)
-    }
-
-    func testParsesFailedUnit() throws {
-        let snapshot = try AdaptorUnitSnapshotParser.parse(
-            "LoadState=loaded\nActiveState=failed\nUnitFileState=enabled"
-        )
-
-        XCTAssertEqual(snapshot.activeState, "failed")
-        XCTAssertFalse(snapshot.isActive)
+    func testParsesUnitStates() throws {
+        let cases: [(activeState: String, unitFileState: String, isActive: Bool)] = [
+            ("active", "enabled", true),
+            ("inactive", "disabled", false),
+            ("failed", "enabled", false),
+        ]
+        for (activeState, unitFileState, isActive) in cases {
+            let snapshot = try AdaptorUnitSnapshotParser.parse(
+                "LoadState=loaded\nActiveState=\(activeState)\nUnitFileState=\(unitFileState)"
+            )
+            XCTAssertEqual(snapshot.loadState, "loaded", activeState)
+            XCTAssertEqual(snapshot.activeState, activeState, activeState)
+            XCTAssertEqual(snapshot.unitFileState, unitFileState, activeState)
+            XCTAssertEqual(snapshot.isActive, isActive, activeState)
+        }
     }
 
     func testParsesFieldsInAnyOrderAndIgnoresExtraLines() throws {

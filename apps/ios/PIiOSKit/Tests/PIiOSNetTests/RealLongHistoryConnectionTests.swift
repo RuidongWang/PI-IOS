@@ -58,6 +58,9 @@ final class RealLongHistoryConnectionTests: XCTestCase {
     }
 
     func testRealLongHistoryBeforeFixClosesWith1009() async throws {
+        guard ProcessInfo.processInfo.environment["PI_HISTORY_REPRODUCE_LEGACY_1009"] == "1" else {
+            throw XCTSkip("仅在显式启用 PI_HISTORY_REPRODUCE_LEGACY_1009=1 时复现旧版 1009")
+        }
         let (credentials, client) = try configuredClient()
         guard ProcessInfo.processInfo.environment["PI_HOST_PORT"] == "19451",
               credentials.expectedCount > 100 else {

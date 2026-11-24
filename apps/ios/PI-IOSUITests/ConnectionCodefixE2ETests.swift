@@ -9,7 +9,7 @@ import XCTest
 final class ConnectionCodefixE2ETests: XCTestCase {
     private var app: XCUIApplication!
 
-    private let marker = "PI-E2E-CODEFIX"
+    private let marker = "PI-E2E-\(UUID().uuidString.prefix(8))"
 
     /// 门禁必须在 `launch()` 之前：应用启动会读取真实状态并自动连接已配对 host，
     /// 放到测试方法里再跳过已经产生了真实网络访问。
@@ -19,6 +19,7 @@ final class ConnectionCodefixE2ETests: XCTestCase {
             throw XCTSkip("Set PI_IOS_CODE_FIX_E2E=1 to run the live connection E2E.")
         }
         app = XCUIApplication()
+        app.launchEnvironment["PI_IOS_UI_TEST_TURN_OUTCOME"] = "1"
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         app.launch()
     }
@@ -38,17 +39,14 @@ final class ConnectionCodefixE2ETests: XCTestCase {
         XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 10))
     }
 
-    /// 打开一台已经在线的会话（列表行标签形如「测试、… · 17 条 · Agent · …、rev 8」）。
-    @discardableResult
-    private func openLiveSession() -> XCUIElement {
+    private func openLiveSession() {
         showRoot("项目")
         let session = app.buttons
-            .matching(NSPredicate(format: "label CONTAINS[c] %@", "rev "))
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "projects.session."))
             .firstMatch
         for _ in 0..<4 where !session.exists { app.swipeUp() }
         XCTAssertTrue(session.waitForExistence(timeout: 15), "必须在项目页看到至少一条会话")
         session.tap()
-        let composer = composerField()
         // 打开会话后先等会话页就绪；失败时留下屏幕与元素快照，便于区分「隧道未建立」与「定位器失效」。
         if !composerField().waitForExistence(timeout: 40) {
             attach("08-open-session-failed")
@@ -57,32 +55,36 @@ final class ConnectionCodefixE2ETests: XCTestCase {
                 .joined(separator: " | ")
             XCTFail("会话页未出现指令输入框。屏幕文本：\(texts)")
         }
-        return composer
     }
 
-    /// 交接单 §3 第 3 条（已知未修）：会话未显式绑定模型时 `canSend` 判定为不可发送。
-    /// 真实链路的正常做法是走 AC-14 的会话配置显式选定模型，这里照做并留证。
     private func ensureModelBound() {
-        let send = app.buttons["发送"]
+        let send = app.buttons["conversation.send"]
         if send.exists && send.isEnabled { return }
         let chip = app.buttons["composer.modelChip"]
         XCTAssertTrue(chip.waitForExistence(timeout: 10), "会话配置入口（模型 chip）必须存在")
         chip.tap()
         XCTAssertTrue(app.navigationBars["会话配置"].waitForExistence(timeout: 10))
-        // 具体模型名由已导入的 provider 决定；这里只要求清单里至少有一个可选项，
-        // 不能用「未绑定模型」这类说明行代替。
-        let model = app.buttons
-            .matching(NSPredicate(format: "NOT (label CONTAINS %@) AND NOT (label CONTAINS %@)", "未绑定", "选择模型"))
-            .firstMatch
+        let model = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "conversation.config.model."
+        )).firstMatch
         let hasModel = model.waitForExistence(timeout: 10)
         attach("05-session-config")
         XCTAssertTrue(hasModel, "本机模型清单必须至少含一个可选模型")
+        for _ in 0..<6 where !model.isHittable { app.swipeUp() }
         model.tap()
-        if app.buttons["完成"].exists { app.buttons["完成"].tap() }
-        _ = app.navigationBars["会话配置"].waitForNonExistence(timeout: 10)
+        let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "当前"), object: model)
+        XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 10), .completed, "模型绑定未生效")
+        app.buttons["完成"].tap()
+        XCTAssertTrue(app.navigationBars["会话配置"].waitForNonExistence(timeout: 10))
     }
 
     private func send(_ text: String) {
+        let interrupt = app.buttons["conversation.interrupt"]
+        let streaming = app.staticTexts["conversation.streamingCount"]
+        XCTAssertTrue(
+            interrupt.waitForNonExistence(timeout: 10) && streaming.waitForNonExistence(timeout: 10),
+            "测试会话开始时应空闲"
+        )
         let composer = composerField()
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
         composer.tap()
@@ -94,11 +96,11 @@ final class ConnectionCodefixE2ETests: XCTestCase {
         composer.typeText(text)
         let typed = (composer.value as? String) ?? ""
         attach("06-typed-draft")
-        XCTAssertTrue(typed.contains(text), "输入必须真正进入指令框，实际读到：\(typed)")
+        XCTAssertEqual(typed, text, "提示词应完整进入输入框")
 
         ensureModelBound()
 
-        let send = app.buttons["发送"]
+        let send = app.buttons["conversation.send"]
         XCTAssertTrue(send.waitForExistence(timeout: 5))
         attach("07-before-send")
         XCTAssertTrue(send.isEnabled, "在线、已绑定模型且草稿非空时发送必须可用")
@@ -127,6 +129,14 @@ final class ConnectionCodefixE2ETests: XCTestCase {
         add(shot)
     }
 
+    private func terminalTurn(status: String) -> XCUIElement {
+        let submitted = app.staticTexts["conversation.debugSubmittedTurn"]
+        XCTAssertTrue(submitted.waitForExistence(timeout: 10), "本次发送应取得 turn/start 回执")
+        return app.staticTexts.matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "conversation.debugTerminalTurn", "\(submitted.label):\(status)"
+        )).firstMatch
+    }
+
     // MARK: - AC-08
 
     func testAC08StreamingThenRunStateClearedOnCompletion() throws {
@@ -135,17 +145,36 @@ final class ConnectionCodefixE2ETests: XCTestCase {
         let streaming = app.staticTexts["conversation.streamingCount"]
         let interrupt = app.buttons["conversation.interrupt"]
 
-        send("\(marker) 请只回复一句：收到。")
+        let prompt = "Reply with exactly this code and no punctuation: \(marker)"
+        send(prompt)
 
         // 流式进行中：空输入 + 运行中必须出现中止按钮，或至少出现流式计数
         //（`turn/start` 解码 + 归约生效）。顶部运行文案已移除。
-        let sawRunning = interrupt.waitForExistence(timeout: 90) || streaming.waitForExistence(timeout: 5)
+        let running = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            interrupt.exists || streaming.exists
+        }, object: nil)
+        let sawRunning = XCTWaiter.wait(for: [running], timeout: 90) == .completed
         attach("01-streaming")
         XCTAssertTrue(sawRunning, "发送后应出现中止按钮/流式指示")
         XCTAssertFalse(app.staticTexts["conversation.runningTurn"].exists)
 
-        // 终态：`turn.completed` 之后运行态与流式计数都必须清除（turnId 回退相关）。
-        let cleared = streaming.waitForNonExistence(timeout: 180)
+        let userMessage = app.staticTexts.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label == %@", "conversation.userMessage.", prompt
+        )).firstMatch
+        let latest = app.buttons["conversation.scrollToLatest"]
+        if latest.exists { latest.tap() }
+        XCTAssertTrue(userMessage.waitForExistence(timeout: 10), "应显示本次发送的请求")
+        XCTAssertTrue(terminalTurn(status: "completed").waitForExistence(timeout: 180), "同一轮次须收到 Host 的 completed 终态")
+        let assistantMessages = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "conversation.agentMessage."
+        ))
+        let label = NSPredicate(format: "label == %@", marker)
+        let reply = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            assistantMessages.matching(label).firstMatch.exists || assistantMessages.containing(label).firstMatch.exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [reply], timeout: 10), .completed, "Agent 回复须显示本次请求独有的标记")
+
+        let cleared = streaming.waitForNonExistence(timeout: 10)
             && interrupt.waitForNonExistence(timeout: 10)
         attach("02-completed")
         XCTAssertTrue(cleared, "turn 终态后流式计数与中止入口都必须消失")
@@ -156,13 +185,15 @@ final class ConnectionCodefixE2ETests: XCTestCase {
     func testAC09InterruptStopsTurnAndClearsRunningState() throws {
         openLiveSession()
 
-        send("\(marker) 请写一篇大约八百字的中文说明文，介绍远程协作的优缺点，不要使用工具。")
+        send("\(marker) Write about 800 words on the benefits and drawbacks of remote collaboration. Do not use tools.")
 
         let interrupt = app.buttons["conversation.interrupt"]
         XCTAssertTrue(interrupt.waitForExistence(timeout: 90), "运行中必须出现中止入口")
+        let interrupted = terminalTurn(status: "interrupted")
         attach("03-running-before-interrupt")
         interrupt.tap()
 
+        XCTAssertTrue(interrupted.waitForExistence(timeout: 30), "被提交的轮次应收到中止终态")
         let terminal = app.staticTexts["已中止"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 30), "中止后必须显示「已中止」终态")
         XCTAssertTrue(app.buttons["conversation.interrupt"].waitForNonExistence(timeout: 30),

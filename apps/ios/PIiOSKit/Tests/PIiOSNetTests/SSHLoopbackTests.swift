@@ -17,29 +17,7 @@ import NIOSSH
 /// 仍由 App 的真实使用验证。
 final class SSHLoopbackTests: XCTestCase {
     func testRSAHostKeyAndRSAUserAuthOverLoopback() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
-        let serverKey = try makeHostKey()
-        let serverChannel = try await ServerBootstrap(group: group)
-            .serverChannelOption(ChannelOptions.backlog, value: 4)
-            .childChannelInitializer { channel in
-                channel.pipeline.addHandler(
-                    NIOSSHHandler(
-                        role: .server(
-                            SSHServerConfiguration(
-                                hostKeys: [serverKey],
-                                userAuthDelegate: AcceptAnyPublicKey()
-                            )
-                        ),
-                        allocator: channel.allocator,
-                        inboundChildChannelInitializer: nil
-                    )
-                )
-            }
-            .bind(host: "127.0.0.1", port: 0)
-            .get()
-
-        do {
-            let port = try XCTUnwrap(serverChannel.localAddress?.port)
+        try await withSSHServer { port in
             let keyText = try SSHFixture.text("rsa2048_none.key")
             let confirmer = RecordingHostKeyConfirmer()
             let transport = try await SSHTransport.connect(
@@ -69,6 +47,64 @@ final class SSHLoopbackTests: XCTestCase {
             XCTAssertEqual(prompts.first?.key.fingerprint, expected.fingerprint)
 
             await transport.close()
+        }
+    }
+
+    func testRejectingHostKeyFailsBeforeHandshakeDeadline() async throws {
+        try await withSSHServer { port in
+            let expected = try SSHHostKey(openSSHPublicKey: try SSHFixture.publicKeyLine("rsa2048_none"))
+            let clock = ContinuousClock()
+            let start = clock.now
+            do {
+                let transport = try await SSHTransport.connect(
+                    SSHConnectionRequest(
+                        host: "127.0.0.1",
+                        port: port,
+                        username: "pi-test",
+                        credential: .password("fixture"),
+                        pinnedHostKey: nil
+                    ),
+                    confirmer: RejectHostKey(),
+                    timeout: 10
+                )
+                await transport.close()
+                XCTFail("A rejected host key cannot complete SSH authentication")
+            } catch {
+                XCTAssertEqual(error as? SSHTransportError, .hostKeyRejected(fingerprint: expected.fingerprint))
+                XCTAssertLessThan(clock.now - start, .seconds(8))
+            }
+        }
+    }
+
+    private func withSSHServer(_ run: (Int) async throws -> Void) async throws {
+        let serverKey = try makeHostKey()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        let serverChannel: Channel
+        do {
+            serverChannel = try await ServerBootstrap(group: group)
+                .serverChannelOption(ChannelOptions.backlog, value: 4)
+                .childChannelInitializer { channel in
+                    channel.pipeline.addHandler(
+                        NIOSSHHandler(
+                            role: .server(
+                                SSHServerConfiguration(
+                                    hostKeys: [serverKey],
+                                    userAuthDelegate: AcceptAnyPublicKey()
+                                )
+                            ),
+                            allocator: channel.allocator,
+                            inboundChildChannelInitializer: nil
+                        )
+                    )
+                }
+                .bind(host: "127.0.0.1", port: 0)
+                .get()
+        } catch {
+            try? await group.shutdownGracefully()
+            throw error
+        }
+        do {
+            try await run(try XCTUnwrap(serverChannel.localAddress?.port))
         } catch {
             try? await serverChannel.close().get()
             try? await group.shutdownGracefully()
@@ -90,6 +126,10 @@ final class SSHLoopbackTests: XCTestCase {
         )
         return NIOSSHPrivateKey(rsaKey: privateKey)
     }
+}
+
+private struct RejectHostKey: HostKeyConfirming {
+    func confirmHostKey(_ key: SSHHostKey, status: HostKeyTrustStatus) async -> HostKeyConfirmation { .reject }
 }
 
 /// 服务器侧：接受任何公钥（只用于本机环回测试，不代表生产行为）。

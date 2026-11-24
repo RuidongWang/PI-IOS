@@ -5,6 +5,92 @@ import XCTest
 @testable import PIiOSNet
 
 final class RACPTurnLifecycleTests: XCTestCase {
+    func testReadOnlySessionRejectsSendingUntilAValidatedReopen() async throws {
+        let socket = DeferredTurnSocket()
+        let client = RACPClient(testingSocket: socket, subscriptionId: nil, subscribedSessionId: "session_2")
+        let pump = Task {
+            for await data in socket.inbound { await client.receiveForTesting(data) }
+        }
+        defer { pump.cancel() }
+        socket.setReadOnlyReason("append_unverified")
+        _ = try await client.attach(sessionId: "session_2", subscribe: false)
+        do {
+            _ = try await client.startTurn(sessionId: "session_2", text: "draft", admission: nil, idempotencyKey: "draft", timeout: 1)
+            XCTFail("A read-only session accepted the draft")
+        } catch let error as RACPClientError {
+            XCTAssertEqual(error, .server(code: .sessionReadOnly, message: "append_unverified"))
+        }
+
+        socket.setReadOnlyReason(nil)
+        _ = try await client.attach(sessionId: "session_2", subscribe: false)
+        let start = Task {
+            try await client.startTurn(sessionId: "session_2", text: "draft", admission: nil, idempotencyKey: "draft")
+        }
+        await fulfillment(of: [socket.startReceived], timeout: 2)
+        socket.finishTurn(status: "completed")
+        let result = try await start.value
+        XCTAssertEqual(result.turn.status, "completed")
+        await socket.close()
+    }
+
+    func testLateQueuedResponseDoesNotEnterReplacementSession() async throws {
+        let socket = DeferredTurnSocket()
+        let client = RACPClient(testingSocket: socket, subscriptionId: nil, subscribedSessionId: "session_1")
+        let pump = Task {
+            for await data in socket.inbound { await client.receiveForTesting(data) }
+        }
+        defer { pump.cancel() }
+        let start = Task {
+            try await client.startTurn(sessionId: "session_1", text: "old draft", admission: .queue, idempotencyKey: "old-attempt")
+        }
+        await fulfillment(of: [socket.startReceived], timeout: 2)
+        _ = try await client.attach(sessionId: "session_2", subscribe: false)
+        socket.finishTurn(status: "queued")
+
+        let result = try await start.value
+        XCTAssertEqual(result.turn.id, "turn_fast")
+        let current = await client.sessionView()
+        XCTAssertEqual(current.sessionId, "session_2")
+        XCTAssertTrue(current.queuedTurns.isEmpty)
+        XCTAssertNil(current.runningTurnId)
+        await socket.close()
+    }
+
+    func testRetriedQueuedReceiptUsesCurrentUncertainTurn() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("requests.json")
+        let request = SessionRequestIdentity(hostID: "host", sessionID: "session_1", action: .turn(text: "draft"))
+        let first = try SessionRequestKeyStore(fileURL: file).prepareSubmission(request, admission: .queue)
+        let retry = try SessionRequestKeyStore(fileURL: file).prepareSubmission(request)
+        XCTAssertFalse(first.isRetry)
+        XCTAssertTrue(retry.isRetry)
+        XCTAssertEqual(first.attempt, retry.attempt)
+
+        let socket = DeferredTurnSocket(statusForGet: "uncertain")
+        let client = RACPClient(testingSocket: socket, subscriptionId: nil, subscribedSessionId: "session_1")
+        let pump = Task {
+            for await data in socket.inbound { await client.receiveForTesting(data) }
+        }
+        defer { pump.cancel() }
+        let send = Task {
+            try await client.startTurn(
+                sessionId: "session_1", text: "draft", admission: retry.attempt.admission,
+                idempotencyKey: retry.attempt.idempotencyKey, isRetry: retry.isRetry, timeout: 3
+            )
+        }
+        await fulfillment(of: [socket.startReceived], timeout: 2)
+        socket.finishTurn(status: "queued")
+        let reconciled = try await send.value
+
+        XCTAssertEqual(reconciled.turn.status, "uncertain")
+        let view = await client.sessionView()
+        XCTAssertTrue(view.queuedTurns.isEmpty)
+        XCTAssertNil(view.runningTurnId)
+        await socket.close()
+    }
+
     func testLateRunningStartResponseDoesNotReviveCompletedTurn() async throws {
         let socket = DeferredTurnSocket()
         let client = RACPClient(
@@ -105,6 +191,8 @@ private final class DeferredTurnSocket: RACPSocket, @unchecked Sendable {
     private let lock = NSLock()
     private var requestID: Any?
     private var sawCompletion = false
+    private var readOnlyReason: String?
+    private let statusForGet: String?
 
     private func withLock<T>(_ work: () -> T) -> T {
         lock.lock()
@@ -113,7 +201,8 @@ private final class DeferredTurnSocket: RACPSocket, @unchecked Sendable {
     }
 
 
-    init() {
+    init(statusForGet: String? = nil) {
+        self.statusForGet = statusForGet
         var sink: AsyncStream<Data>.Continuation!
         inbound = AsyncStream { sink = $0 }
         continuation = sink
@@ -143,6 +232,10 @@ private final class DeferredTurnSocket: RACPSocket, @unchecked Sendable {
         continuation.yield(response)
     }
 
+    func setReadOnlyReason(_ reason: String?) {
+        withLock { readOnlyReason = reason }
+    }
+
     func send(text: String) async throws {
         guard let object = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
               let method = object["method"] as? String
@@ -151,6 +244,26 @@ private final class DeferredTurnSocket: RACPSocket, @unchecked Sendable {
         case "turn/start":
             withLock { requestID = object["id"] }
             startReceived.fulfill()
+        case "turn/get":
+            if let id = object["id"], let statusForGet,
+               let params = object["params"] as? [String: Any],
+               params["turnId"] as? String == "turn_fast" {
+                let response = try JSONSerialization.data(withJSONObject: [
+                    "jsonrpc": "2.0", "id": id,
+                    "result": ["turn": ["id": "turn_fast", "sessionId": "session_1", "status": statusForGet]],
+                ])
+                continuation.yield(response)
+            }
+        case "session/attach":
+            if let id = object["id"] {
+                var summary = ["id": "session_2"]
+                summary["readOnlyReason"] = withLock { readOnlyReason }
+                let response = try JSONSerialization.data(withJSONObject: [
+                    "jsonrpc": "2.0", "id": id,
+                    "result": ["session": summary, "replayComplete": true],
+                ])
+                continuation.yield(response)
+            }
         case "events/ack":
             let shouldFulfill = withLock { () -> Bool in
                 defer { if sawCompletion { sawCompletion = false } }

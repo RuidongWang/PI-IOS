@@ -445,20 +445,7 @@ final class SessionCacheWorker: @unchecked Sendable {
 
     private func hydrate() {
         do {
-            if let fileURL {
-                try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                if fileURL.pathExtension.lowercased() == "json" {
-                    snapshot = try OfflineSessionCacheFile.load(from: fileURL)?.snapshot ?? .init()
-                } else {
-                    if !FileManager.default.fileExists(atPath: fileURL.path) {
-                        _ = try OfflineSessionCacheSQLite.migrateLegacyJSON(from: SessionCacheStore.legacyJSONURL(for: fileURL), to: fileURL)
-                    }
-                    database = try OfflineSessionCacheSQLite(url: fileURL)
-                    snapshot = try database!.loadSnapshot()
-                }
-            }
-            durableSnapshot = snapshot
-            snapshot = pruned(snapshot)
+            try loadFromDisk()
             hydrateHook?()
             setFailure(nil)
             lock.lock(); hydrated = true; lock.unlock()
@@ -475,6 +462,36 @@ final class SessionCacheWorker: @unchecked Sendable {
         endOperation()
     }
 
+    private func loadFromDisk() throws {
+        guard let fileURL else { return }
+        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if fileURL.pathExtension.lowercased() == "json" {
+            durableSnapshot = try OfflineSessionCacheFile.load(from: fileURL)?.snapshot ?? .init()
+        } else {
+            if !FileManager.default.fileExists(atPath: fileURL.path) {
+                _ = try OfflineSessionCacheSQLite.migrateLegacyJSON(from: SessionCacheStore.legacyJSONURL(for: fileURL), to: fileURL)
+            }
+            let loaded = try OfflineSessionCacheSQLite(url: fileURL)
+            durableSnapshot = try loaded.loadSnapshot()
+            database = loaded
+        }
+        snapshot = pruned(durableSnapshot)
+    }
+
+    private func retryEncryptedCacheLoad() {
+        guard let loadFailure else { return }
+        switch loadFailure {
+        case OfflineCacheEncryptionError.unavailable, OfflineSessionCacheSQLiteError.decryptionFailed:
+            // Re-read the durable state before accepting a write after Keychain recovery.
+            guard (try? loadFromDisk()) != nil else { return }
+            self.loadFailure = nil
+            setFailure(nil)
+            lock.lock(); mirrorPublishPending = true; lock.unlock()
+        default:
+            break
+        }
+    }
+
     private func commit(permit: Permit? = nil, queuedAt: ContinuousClock.Instant, valid: () -> Bool,
                         mutation: (inout OfflineSessionCacheSnapshot) -> Void,
                         completion: (Outcome) -> Void) {
@@ -486,6 +503,7 @@ final class SessionCacheWorker: @unchecked Sendable {
         defer {
             operation.finish(outcome: outcome, fields: "entries=\(snapshot.entries.count) inserted=\(writeStatistics?.insertedRows ?? 0) deleted=\(writeStatistics?.deletedRows ?? 0) transactions=\(writeStatistics?.transactionCount ?? 0)")
         }
+        retryEncryptedCacheLoad()
         guard let failure = loadFailure else {
             var next = snapshot
 #if DEBUG

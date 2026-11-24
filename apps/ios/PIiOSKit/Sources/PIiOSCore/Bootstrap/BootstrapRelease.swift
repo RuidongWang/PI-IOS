@@ -9,6 +9,7 @@ public struct PIAdaptorRelease: Equatable, Sendable {
     public static let releaseRepository = "RuidongWang/PI-adaptor"
     public static let releaseVersion = "0.0.6"
     public static let releaseTag = "pi-adaptor-v0.0.6"
+    public static let minimumBundledClientVersion = "0.0.6"
     public static let runtimeServerName = "pi-adaptor"
     public static let installHomeName = ".pi-adaptor"
     public static let unitName = "pi-adaptor.service"

@@ -3,11 +3,12 @@ import XCTest
 @testable import PIiOSCore
 
 final class GitHubReleaseListTests: XCTestCase {
+    private let exampleClientVersion = "3.0.0"
     // MARK: - 选中最新稳定发布
 
     func testSelectsNewestStableReleaseForTargetArchitecture() throws {
         let candidate = try XCTUnwrap(
-            AdaptorReleaseSelection.latest(from: Data(Self.json.utf8), target: .linuxArm64)
+            AdaptorReleaseSelection.latest(from: Data(Self.json.utf8), target: .linuxArm64, clientVersion: exampleClientVersion)
         )
         XCTAssertEqual(candidate.version, "1.4.2")
         XCTAssertEqual(candidate.releaseTag, "pi-adaptor-v1.4.2")
@@ -22,10 +23,19 @@ final class GitHubReleaseListTests: XCTestCase {
         )
 
         let x64 = try XCTUnwrap(
-            AdaptorReleaseSelection.latest(from: Data(Self.json.utf8), target: .linuxX64)
+            AdaptorReleaseSelection.latest(from: Data(Self.json.utf8), target: .linuxX64, clientVersion: exampleClientVersion)
         )
         XCTAssertEqual(x64.version, "1.4.2")
         XCTAssertEqual(x64.artifactName, "pi-adaptor-1.4.2-linux-x64.tar.gz")
+    }
+
+    func testChoosesHighestCompatibleVersionFromUnsortedReleases() {
+        let entries = ["0.0.9", "0.0.12", "0.0.11"].map { version in
+            let archive = "pi-adaptor-\(version)-linux-arm64.tar.gz"
+            return Self.entry(tag: "pi-adaptor-v\(version)", assets: [archive, archive + ".sha256"])
+        }
+        XCTAssertEqual(AdaptorReleaseSelection.latest(from: entries, target: .linuxArm64, clientVersion: "0.0.11")?.version, "0.0.11")
+        XCTAssertEqual(AdaptorReleaseSelection.latest(from: entries, target: .linuxArm64, clientVersion: "0.0.12")?.version, "0.0.12")
     }
 
     func testRepositoryAppearsInDownloadURLs() throws {
@@ -33,7 +43,8 @@ final class GitHubReleaseListTests: XCTestCase {
             AdaptorReleaseSelection.latest(
                 from: Data(Self.json.utf8),
                 target: .linuxX64,
-                repository: "Example/Other"
+                repository: "Example/Other",
+                clientVersion: exampleClientVersion
             )
         )
         XCTAssertEqual(
@@ -52,7 +63,7 @@ final class GitHubReleaseListTests: XCTestCase {
             Self.entry(tag: "pi-adaptor-v6.6.6-beta.1", assets: ["pi-adaptor-6.6.6-beta.1-linux-arm64.tar.gz"]),
             Self.entry(tag: "pi-adaptor-v5.5.5+build", assets: ["pi-adaptor-5.5.5+build-linux-arm64.tar.gz"]),
         ]
-        XCTAssertNil(AdaptorReleaseSelection.latest(from: entries, target: .linuxArm64))
+        XCTAssertNil(AdaptorReleaseSelection.latest(from: entries, target: .linuxArm64, clientVersion: "10.0.0"))
     }
 
     func testSkipsReleaseMissingTargetArtifactOrChecksum() {
@@ -66,9 +77,9 @@ final class GitHubReleaseListTests: XCTestCase {
                 assets: ["pi-adaptor-2.0.0-linux-x64.tar.gz", "pi-adaptor-2.0.0-linux-x64.tar.gz.sha256"]
             ),
         ]
-        XCTAssertNil(AdaptorReleaseSelection.latest(from: entries, target: .linuxArm64))
+        XCTAssertNil(AdaptorReleaseSelection.latest(from: entries, target: .linuxArm64, clientVersion: exampleClientVersion))
         XCTAssertEqual(
-            AdaptorReleaseSelection.latest(from: entries, target: .linuxX64)?.version,
+            AdaptorReleaseSelection.latest(from: entries, target: .linuxX64, clientVersion: exampleClientVersion)?.version,
             "2.0.0",
             "缺 .sha256 的发布要跳过，继续找可用的旧发布"
         )
@@ -87,8 +98,31 @@ final class GitHubReleaseListTests: XCTestCase {
                 ]
             ),
         ]
-        XCTAssertEqual(AdaptorReleaseSelection.latest(from: entries, target: .linuxArm64)?.version, "1.9.0")
-        XCTAssertEqual(AdaptorReleaseSelection.latest(from: entries, target: .linuxX64)?.version, "2.0.0")
+        XCTAssertEqual(AdaptorReleaseSelection.latest(from: entries, target: .linuxArm64, clientVersion: exampleClientVersion)?.version, "1.9.0")
+        XCTAssertEqual(AdaptorReleaseSelection.latest(from: entries, target: .linuxX64, clientVersion: exampleClientVersion)?.version, "2.0.0")
+    }
+
+    func testSelectsOnlyReleasesCompatibleWithTheClient() {
+        func release(_ version: String, body: String? = nil) -> GitHubReleaseListEntry {
+            let artifact = BootstrapPlatformProbe.artifactName(version: version, target: .linuxArm64)
+            return GitHubReleaseListEntry(
+                tagName: "pi-adaptor-v\(version)", draft: false, prerelease: false,
+                assets: [.init(name: artifact), .init(name: artifact + ".sha256")], body: body
+            )
+        }
+        let entries = [
+            release("0.0.11", body: "<!-- pi-ios-min-version: invalid -->"),
+            release("0.0.10", body: "说明\n<!-- pi-ios-min-version: 0.0.6 -->"),
+            release("0.0.6", body: "<!-- pi-ios-min-version: 0.0.5 -->"),
+            release("0.0.5"),
+        ]
+        XCTAssertEqual(AdaptorReleaseSelection.latest(
+            from: entries, target: .linuxArm64, clientVersion: "0.0.5", minimumHostVersion: "0.0.5"
+        )?.version, "0.0.5")
+        XCTAssertEqual(AdaptorReleaseSelection.latest(
+            from: entries, target: .linuxArm64, clientVersion: "0.0.6"
+        )?.version, "0.0.10")
+        XCTAssertNil(AdaptorReleaseSelection.latest(from: [release("0.0.5")], target: .linuxArm64))
     }
 
     // MARK: - 解析容错
@@ -114,7 +148,7 @@ final class GitHubReleaseListTests: XCTestCase {
         }]
         """
         let candidate = try XCTUnwrap(
-            AdaptorReleaseSelection.latest(from: Data(json.utf8), target: .linuxArm64)
+            AdaptorReleaseSelection.latest(from: Data(json.utf8), target: .linuxArm64, clientVersion: exampleClientVersion)
         )
         XCTAssertEqual(candidate.version, "1.0.0")
     }
@@ -135,7 +169,7 @@ final class GitHubReleaseListTests: XCTestCase {
         }]
         """
         let candidate = try XCTUnwrap(
-            AdaptorReleaseSelection.latest(from: Data(json.utf8), target: .linuxArm64)
+            AdaptorReleaseSelection.latest(from: Data(json.utf8), target: .linuxArm64, clientVersion: exampleClientVersion)
         )
         XCTAssertEqual(candidate.pinnedChecksum, digest, "应规范化成裸小写摘要")
     }
@@ -154,7 +188,7 @@ final class GitHubReleaseListTests: XCTestCase {
             }]
             """
             let candidate = try XCTUnwrap(
-                AdaptorReleaseSelection.latest(from: Data(json.utf8), target: .linuxArm64)
+                AdaptorReleaseSelection.latest(from: Data(json.utf8), target: .linuxArm64, clientVersion: exampleClientVersion)
             )
             XCTAssertNil(candidate.pinnedChecksum, digest)
         }

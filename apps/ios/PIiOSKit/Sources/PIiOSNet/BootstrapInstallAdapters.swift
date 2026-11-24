@@ -159,8 +159,15 @@ public enum BootstrapInstallDiagnostics {
     /// Bootstrap stdout/stderr are redirected to an owner-only file by the
     /// remote launcher. The pairing token travels through a FIFO and is removed
     /// before this file is exposed.
-    public static let logCommand =
-        #"tail -n 240 "$HOME/.pi-adaptor/.bootstrap/bootstrap.log" 2>/dev/null || true"#
+    public static let logCommand = #"""
+    work="$HOME/.pi-adaptor/.bootstrap"
+    latest=$(cat "$work/latest-attempt" 2>/dev/null) || latest=
+    case "$latest" in
+      ''|.|..|*[!A-Za-z0-9._-]*) ;;
+      *) tail -n 240 "$work/attempts/$latest/bootstrap.log" 2>/dev/null && exit 0 ;;
+    esac
+    tail -n 240 "$HOME/.pi-adaptor/.bootstrap/bootstrap.log" 2>/dev/null || true
+    """#
 
     /// Enables lingering for the current Linux account. The sudo password is
     /// supplied only through SSH stdin and never appears in this command.

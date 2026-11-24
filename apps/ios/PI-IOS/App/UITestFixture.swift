@@ -72,7 +72,9 @@ struct UITestFixture {
                 id: "preview-S2", sessionId: "S2", hostID: hostID,
                 text: "Cached S2 history", createdAt: Date(timeIntervalSince1970: 1_704_164_640)
             )]
-            fixture.sessionOpenBehavior = (4_000, ProcessInfo.processInfo.environment["PI_IOS_UI_FAIL_OPEN"])
+            let environment = ProcessInfo.processInfo.environment
+            let delay = environment["PI_IOS_UI_OPEN_DELAY_MS"].flatMap(Int.init) ?? 4_000
+            fixture.sessionOpenBehavior = (delay, environment["PI_IOS_UI_FAIL_OPEN"])
             return fixture
         case "interaction-cache-render":
             var fixture = onlineReadingTwoSessions()

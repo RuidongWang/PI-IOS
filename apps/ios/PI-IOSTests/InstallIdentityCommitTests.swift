@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import XCTest
 import PIiOSCore
@@ -5,10 +6,7 @@ import PIiOSNet
 
 @testable import PI_IOS
 
-/// U15: the install must commit its receipt and token in exactly one controlled
-/// section, after re-checking the frozen target identity. These tests pin the
-/// decision policy and the commit order (`receipt -> promote`, never the reverse,
-/// and never promote on a stale target).
+/// U15: the installation must re-check the frozen target before promoting its token.
 final class InstallIdentityCommitTests: XCTestCase {
     func testSnapshotMatchesEveryFrozenIdentityField() {
         let base = makeTarget()
@@ -64,86 +62,6 @@ final class InstallIdentityCommitTests: XCTestCase {
         )
     }
 
-    func testStaleTargetNeverWritesReceiptNorPromotesToken() async {
-        let log = CommitLog()
-        let result = await BootstrapInstallCommitCoordinator.commit(
-            writeReceipt: {
-                await log.append("receipt")
-                return .staleTarget
-            },
-            promoteStaged: {
-                await log.append("promote")
-                return true
-            },
-            cleanupAttempt: {
-                await log.append("cleanup")
-            }
-        )
-        XCTAssertEqual(result, .staleTarget)
-        let events = await log.events
-        XCTAssertEqual(events, ["receipt", "cleanup"])
-    }
-
-    func testCommittedReceiptIsWrittenBeforeTokenPromotion() async {
-        let log = CommitLog()
-        let result = await BootstrapInstallCommitCoordinator.commit(
-            writeReceipt: {
-                await log.append("receipt")
-                return .committed
-            },
-            promoteStaged: {
-                await log.append("promote")
-                return true
-            },
-            cleanupAttempt: {
-                await log.append("cleanup")
-            }
-        )
-        XCTAssertEqual(result, .committed)
-        let events = await log.events
-        XCTAssertEqual(events, ["receipt", "promote"])
-    }
-
-    func testReceiptPersistenceFailureDoesNotPromote() async {
-        let log = CommitLog()
-        let result = await BootstrapInstallCommitCoordinator.commit(
-            writeReceipt: {
-                await log.append("receipt")
-                return .receiptPersistenceFailed("disk full")
-            },
-            promoteStaged: {
-                await log.append("promote")
-                return true
-            },
-            cleanupAttempt: {
-                await log.append("cleanup")
-            }
-        )
-        XCTAssertEqual(result, .receiptPersistenceFailed("disk full"))
-        let events = await log.events
-        XCTAssertEqual(events, ["receipt", "cleanup"])
-    }
-
-    func testTokenPromotionFailureCleansOnlyTheAttempt() async {
-        let log = CommitLog()
-        let result = await BootstrapInstallCommitCoordinator.commit(
-            writeReceipt: {
-                await log.append("receipt")
-                return .committed
-            },
-            promoteStaged: {
-                await log.append("promote")
-                return false
-            },
-            cleanupAttempt: {
-                await log.append("cleanup")
-            }
-        )
-        XCTAssertEqual(result, .tokenPromotionFailed)
-        let events = await log.events
-        XCTAssertEqual(events, ["receipt", "promote", "cleanup"])
-    }
-
     private func makeTarget(
         hostID: UUID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
         host: String = "pi.example",
@@ -170,7 +88,13 @@ final class AppModelInstallCommitTests: XCTestCase {
     func testMatchingTargetCommitsReceiptOnceAndExposesInstallState() throws {
         let host = makeHost()
         let model = AppModel(seed: PersistedState(hosts: [host]))
-        model.persistenceOverrideForTesting = { true }
+        var promoted = false
+        var persisted = 0
+        model.persistenceOverrideForTesting = {
+            XCTAssertTrue(promoted)
+            persisted += 1
+            return true
+        }
         let target = try XCTUnwrap(model.hosts.first.map(model.installTargetSnapshot(for:)))
         let commit = BootstrapPairingCommit(
             target: target,
@@ -182,7 +106,13 @@ final class AppModelInstallCommitTests: XCTestCase {
             directEndpoint: "wss://pi.example:9443/v1/racp/ws"
         )
 
-        XCTAssertEqual(model.completeAdaptorInstallation(commit), .committed)
+        XCTAssertEqual(model.completeAdaptorInstallation(commit, promoteStaged: {
+            XCTAssertNil(model.hosts[0].pairedAt)
+            XCTAssertNil(model.hosts[0].installReceipt)
+            promoted = true
+            return true
+        }), .committed)
+        XCTAssertEqual(persisted, 1)
         XCTAssertEqual(model.hosts[0].hostPort, 44_271)
         XCTAssertEqual(model.hosts[0].adaptorHostId, "host_new")
         XCTAssertNotNil(model.hosts[0].pairedAt)
@@ -220,7 +150,10 @@ final class AppModelInstallCommitTests: XCTestCase {
             directEndpoint: nil
         )
 
-        XCTAssertEqual(model.completeAdaptorInstallation(commit), .staleTarget)
+        XCTAssertEqual(model.completeAdaptorInstallation(commit, promoteStaged: {
+            XCTFail("a stale install must not promote its credential")
+            return true
+        }), .staleTarget)
         XCTAssertNil(model.hosts[0].hostPort)
         XCTAssertNil(model.hosts[0].pairedAt)
         XCTAssertNil(model.hosts[0].installReceipt)
@@ -278,7 +211,7 @@ final class AppModelInstallCommitTests: XCTestCase {
             releaseSource: nil,
             directEndpoint: nil
         )
-        XCTAssertEqual(model.completeAdaptorInstallation(commit), .committed)
+        XCTAssertEqual(model.completeAdaptorInstallation(commit, promoteStaged: { true }), .committed)
         XCTAssertEqual(model.hosts[0].installReceipt?.hostPort, 44_271)
     }
 
@@ -297,7 +230,7 @@ final class AppModelInstallCommitTests: XCTestCase {
             releaseSource: nil,
             directEndpoint: endpoint
         )
-        XCTAssertEqual(model.completeAdaptorInstallation(commit), .committed)
+        XCTAssertEqual(model.completeAdaptorInstallation(commit, promoteStaged: { true }), .committed)
         XCTAssertEqual(model.hosts[0].connectionPreference, .sshOnly)
 
         // Register cleanup before the first write; a partial failure must not
@@ -357,7 +290,7 @@ final class AppModelInstallCommitTests: XCTestCase {
             releaseSource: nil,
             directEndpoint: endpoint
         )
-        XCTAssertEqual(model.completeAdaptorInstallation(commit), .committed)
+        XCTAssertEqual(model.completeAdaptorInstallation(commit, promoteStaged: { true }), .committed)
 
         // Direct failed before saving a pin: the preference must stay sshOnly and
         // the endpoint/diagnostic fields remain available for the retry view.
@@ -385,10 +318,256 @@ final class AppModelInstallCommitTests: XCTestCase {
             directEndpoint: "wss://pi.example:9443/v1/racp/ws"
         )
 
-        guard case .receiptPersistenceFailed = model.completeAdaptorInstallation(commit) else {
+        guard case .receiptPersistenceFailed = model.completeAdaptorInstallation(commit, promoteStaged: { true }) else {
             return XCTFail("expected receipt persistence failure")
         }
         XCTAssertEqual(model.hosts[0].connectionPreference, .sshOnly)
+    }
+
+    func testFailedKeychainPromotionDoesNotRecordPairing() throws {
+        let host = makeHost()
+        let model = AppModel(seed: PersistedState(hosts: [host]))
+        var writes = 0
+        model.persistenceOverrideForTesting = {
+            writes += 1
+            return true
+        }
+        let commit = BootstrapPairingCommit(
+            target: model.installTargetSnapshot(for: host), adaptorHostId: "host_new",
+            port: 44_271, version: "0.0.6", attemptId: "attempt-a", releaseSource: .latest, directEndpoint: nil
+        )
+        XCTAssertEqual(model.completeAdaptorInstallation(commit, promoteStaged: { false }), .tokenPromotionFailed)
+        XCTAssertEqual(model.hosts[0], host)
+        XCTAssertEqual(model.hosts[0].pairingText, "未配对")
+        XCTAssertEqual(writes, 0)
+    }
+
+    func testPromotedCredentialRecoversReceiptOnReload() throws {
+        let host = makeHost()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let stateURL = directory.appendingPathComponent("state-v1.json")
+        let initial = PersistedState(hosts: [host])
+        let attempt = "receipt-recovery"
+        let token = "pdt2." + "test-receipt-recovery"
+        defer {
+            KeychainStore.clearStagedPairing(hostID: host.id, attemptId: attempt)
+            KeychainStore.deleteDeviceToken(
+                hostID: host.id, legacyAccount: host.address, deleteLegacy: false
+            )
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try StateFile.save(initial, to: stateURL)
+        let model = AppModel(seed: initial, stateFileURL: stateURL)
+        model.persistenceOverrideForTesting = { false }
+        let commit = BootstrapPairingCommit(
+            target: model.installTargetSnapshot(for: host), adaptorHostId: "host_new",
+            port: 44_271, version: "0.0.6", attemptId: attempt, releaseSource: .fallback, directEndpoint: nil
+        )
+        XCTAssertTrue(KeychainStore.saveStagedPairing(
+            deviceId: "dev_install", deviceToken: token, hostID: host.id, attemptId: attempt, targetPort: commit.port
+        ))
+        guard case .receiptPersistenceFailed = model.completeAdaptorInstallation(commit) else {
+            return XCTFail("expected receipt persistence failure")
+        }
+        XCTAssertNil(model.hosts[0].pairedAt)
+        XCTAssertNil(StateFile.load(from: stateURL).state.hosts[0].installReceipt)
+        XCTAssertEqual(KeychainStore.pendingInstall(hostID: host.id)?.attemptId, attempt)
+
+        let recovered = AppModel(stateFileURL: stateURL)
+        XCTAssertNotNil(recovered.hosts[0].pairedAt)
+        XCTAssertEqual(recovered.hosts[0].hostPort, commit.port)
+        XCTAssertEqual(recovered.hosts[0].installReceipt?.releaseSource, .fallback)
+        XCTAssertEqual(StateFile.load(from: stateURL).state.hosts[0].installReceipt?.attemptId, attempt)
+        XCTAssertEqual(KeychainStore.loadDeviceToken(hostID: host.id), token)
+        XCTAssertNil(KeychainStore.pendingInstall(hostID: host.id))
+    }
+
+    func testReconnectWaitsForThePromotedCredentialAndNewPortToMatch() async throws {
+        var host = makeHost()
+        host.hostPort = 19_445
+        host.pairedAt = Date()
+        host.adaptorHostId = "host_reinstall"
+        let model = AppModel(seed: PersistedState(hosts: [host]))
+        var canSave = false
+        model.persistenceOverrideForTesting = { canSave }
+        let commit = BootstrapPairingCommit(
+            target: model.installTargetSnapshot(for: host), adaptorHostId: "host_reinstall",
+            port: 44_271, version: "0.0.6", attemptId: "receipt-reconnect", releaseSource: .latest, directEndpoint: nil
+        )
+        defer {
+            KeychainStore.deleteDeviceToken(hostID: host.id, legacyAccount: host.address, deleteLegacy: false)
+        }
+        XCTAssertTrue(KeychainStore.savePairing(deviceId: "dev_old", deviceToken: "pdt2.old-token", hostID: host.id))
+        XCTAssertTrue(KeychainStore.saveStagedPairing(
+            deviceId: "dev_new", deviceToken: "pdt2.new-token", hostID: host.id,
+            attemptId: commit.attemptId, targetPort: commit.port
+        ))
+        guard case .receiptPersistenceFailed = model.completeAdaptorInstallation(commit) else {
+            return XCTFail("expected receipt persistence failure")
+        }
+
+        let recoveryRequired = RACPTunnelState.offline(reason: "配对记录待恢复：请重新连接以重试保存。")
+        let pending = expectation(description: "connection stops until the pending receipt can be saved")
+        let observation = model.connection.$state.filter { $0 == recoveryRequired }.prefix(1).sink { _ in pending.fulfill() }
+        defer { observation.cancel() }
+        await model.setCurrentHost(id: host.id, waitForOnline: false)
+        await fulfillment(of: [pending], timeout: 3)
+        XCTAssertEqual(model.connection.state, recoveryRequired)
+        XCTAssertEqual(model.currentHost?.hostPort, host.hostPort)
+        XCTAssertEqual(KeychainStore.pendingInstall(hostID: host.id)?.attemptId, commit.attemptId)
+
+        canSave = true
+        await model.setCurrentHost(id: host.id, waitForOnline: false)
+        XCTAssertEqual(model.currentHost?.hostPort, commit.port)
+        XCTAssertEqual(model.currentHost?.installReceipt?.attemptId, commit.attemptId)
+        XCTAssertEqual(KeychainStore.loadDeviceToken(hostID: host.id), "pdt2.new-token")
+        XCTAssertNil(KeychainStore.pendingInstall(hostID: host.id))
+    }
+
+    func testReplacedPairingRevocationWaitsForReceiptAndRetriesOnFailure() async throws {
+        let host = makeHost()
+        let hostID = host.id
+        let connection = ConnectionModel()
+        let target = InstallTargetSnapshot(
+            hostID: host.id, host: host.host, sshPort: host.port, username: host.username,
+            hostPort: 19_445, directEndpoint: nil, identityGeneration: 0
+        )
+        let commit = BootstrapPairingCommit(
+            target: target, adaptorHostId: "host_reinstall", port: 44_271, version: "0.0.6",
+            attemptId: "revoke-after-receipt", releaseSource: .latest, directEndpoint: nil
+        )
+        let previousToken = "pdt2." + "retired-fixture"
+        let replacementToken = "pdt2." + "replacement-fixture"
+        defer {
+            KeychainStore.clearStagedPairing(hostID: hostID, attemptId: commit.attemptId)
+            KeychainStore.deleteDeviceToken(hostID: hostID, legacyAccount: host.address, deleteLegacy: false)
+        }
+        XCTAssertTrue(KeychainStore.savePairing(deviceId: "dev_old", deviceToken: previousToken, hostID: hostID))
+        XCTAssertTrue(KeychainStore.saveStagedPairing(
+            deviceId: "dev_new", deviceToken: replacementToken, hostID: hostID,
+            attemptId: commit.attemptId, targetPort: commit.port
+        ))
+        XCTAssertTrue(KeychainStore.promoteStagedPairing(
+            hostID: hostID, attemptId: commit.attemptId, pendingInstall: commit
+        ))
+        var calls = 0
+        connection.bootstrapRevocationHandlerForTesting = { port, deviceID, token, expectedHostID in
+            XCTAssertEqual(port, commit.port)
+            XCTAssertEqual(deviceID, "dev_old")
+            XCTAssertEqual(token, replacementToken)
+            XCTAssertEqual(expectedHostID, commit.adaptorHostId)
+            calls += 1
+            return calls == 1 ? .unknown : .revoked
+        }
+
+        await connection.recoverReplacedPairings(record: host, port: commit.port, adaptorHostId: commit.adaptorHostId)
+        XCTAssertEqual(calls, 0)
+        KeychainStore.clearPendingInstall(hostID: hostID, attemptId: commit.attemptId)
+        await connection.recoverReplacedPairings(record: host, port: commit.port, adaptorHostId: "different_host")
+        XCTAssertEqual(calls, 0)
+        await connection.recoverReplacedPairings(record: host, port: commit.port, adaptorHostId: commit.adaptorHostId)
+        XCTAssertEqual(KeychainStore.pendingPairingRevocations(hostID: hostID, activeToken: replacementToken).map(\.deviceId), ["dev_old"])
+        await connection.recoverReplacedPairings(record: host, port: commit.port, adaptorHostId: commit.adaptorHostId)
+        XCTAssertEqual(calls, 2)
+        XCTAssertTrue(KeychainStore.pendingPairingRevocations(hostID: hostID, activeToken: replacementToken).isEmpty)
+        XCTAssertEqual(KeychainStore.loadDeviceId(hostID: hostID), "dev_new")
+    }
+
+    func testAbandonedPairingCredentialSurvivesUnconfirmedRevocation() async {
+        let host = makeHost()
+        let connection = ConnectionModel()
+        let attempt = "abandoned-attempt"
+        let activeToken = "pdt2." + "active-fixture"
+        let stagedToken = "pdt2." + "abandoned-fixture"
+        defer {
+            KeychainStore.clearStagedPairing(hostID: host.id, attemptId: attempt)
+            KeychainStore.deleteDeviceToken(hostID: host.id, legacyAccount: host.address, deleteLegacy: false)
+        }
+        XCTAssertTrue(KeychainStore.savePairing(deviceId: "dev_active", deviceToken: activeToken, hostID: host.id))
+        XCTAssertTrue(KeychainStore.saveStagedPairing(
+            deviceId: "dev_abandoned", deviceToken: stagedToken, hostID: host.id,
+            attemptId: attempt, targetPort: 44_271
+        ))
+        var calls = 0
+        connection.bootstrapRevocationHandlerForTesting = { port, deviceID, token, _ in
+            XCTAssertEqual(port, 44_271)
+            XCTAssertEqual(deviceID, "dev_abandoned")
+            XCTAssertEqual(token, stagedToken)
+            calls += 1
+            return calls == 1 ? .failed : .revoked
+        }
+        await connection.recoverStagedPairings(record: host)
+        XCTAssertEqual(KeychainStore.loadStagedPairing(hostID: host.id, attemptId: attempt)?.deviceId, "dev_abandoned")
+        await connection.recoverStagedPairings(record: host)
+        XCTAssertEqual(calls, 2)
+        XCTAssertNil(KeychainStore.loadStagedPairing(hostID: host.id, attemptId: attempt))
+        XCTAssertEqual(KeychainStore.loadDeviceId(hostID: host.id), "dev_active")
+    }
+
+    func testPromotionDoesNotRetireCredentialBoundToDifferentAdaptor() {
+        let hostID = UUID()
+        let firstAttempt = "already-paired"
+        let secondAttempt = "different-adaptor"
+        let firstToken = "pdt2." + "first-fixture"
+        let secondToken = "pdt2." + "second-fixture"
+        defer {
+            KeychainStore.clearStagedPairing(hostID: hostID, attemptId: firstAttempt)
+            KeychainStore.clearStagedPairing(hostID: hostID, attemptId: secondAttempt)
+            KeychainStore.deleteDeviceToken(hostID: hostID, legacyAccount: "fixture", deleteLegacy: false)
+        }
+        XCTAssertTrue(KeychainStore.saveStagedPairing(
+            deviceId: "dev_first", deviceToken: firstToken, hostID: hostID, attemptId: firstAttempt, targetPort: 19_445
+        ))
+        XCTAssertTrue(KeychainStore.promoteStagedPairing(
+            hostID: hostID, attemptId: firstAttempt, verifiedAdaptorHostId: "host_first"
+        ))
+        XCTAssertTrue(KeychainStore.saveStagedPairing(
+            deviceId: "dev_second", deviceToken: secondToken, hostID: hostID, attemptId: secondAttempt, targetPort: 44_271
+        ))
+        XCTAssertTrue(KeychainStore.promoteStagedPairing(
+            hostID: hostID, attemptId: secondAttempt, verifiedAdaptorHostId: "host_second"
+        ))
+        XCTAssertTrue(KeychainStore.pendingPairingRevocations(hostID: hostID, activeToken: secondToken).isEmpty)
+        XCTAssertEqual(KeychainStore.loadDeviceId(hostID: hostID), "dev_second")
+    }
+
+    func testLeavingInstallationResolvesPendingDirectAuthorization() async throws {
+        let coordinator = InstallAdaptorCoordinator()
+        let json = """
+        {"schemaVersion":1,"attemptId":"audit-direct","hostId":"host_reinstall",
+         "certificateSha256":"\(String(repeating: "a", count: 64))",
+         "notBefore":"2026-01-01T00:00:00Z","notAfter":"2099-01-01T00:00:00Z"}
+        """
+        let trust = try BootstrapDirectTrust.parse(data: Data(json.utf8), expectedAttemptId: "audit-direct")
+        let finished = expectation(description: "authorization caller unblocked after leaving the page")
+        Task { @MainActor in
+            let authorized = await coordinator.requestDirectAuthorization(trust)
+            XCTAssertFalse(authorized)
+            finished.fulfill()
+        }
+        await Task.yield()
+        XCTAssertEqual(coordinator.pendingDirectTrust, trust)
+
+        coordinator.cancel()
+        await fulfillment(of: [finished], timeout: 1)
+        XCTAssertNil(coordinator.pendingDirectTrust)
+    }
+
+    func testSSHOnlyReinstallClearsThePreviouslyVerifiedDirectRoute() {
+        var host = makeHost()
+        host.directEndpoint = "wss://pi.example:9443/v1/racp/ws"
+        host.connectionPreference = .directPreferred
+        host.adaptorHostId = "host_reinstall"
+        let model = AppModel(seed: PersistedState(hosts: [host]))
+        model.persistenceOverrideForTesting = { true }
+        let commit = BootstrapPairingCommit(
+            target: model.installTargetSnapshot(for: host), adaptorHostId: "host_reinstall",
+            port: 44_271, version: "0.0.6", attemptId: "ssh-only", releaseSource: .latest, directEndpoint: nil
+        )
+
+        XCTAssertEqual(model.completeAdaptorInstallation(commit, promoteStaged: { true }), .committed)
+        XCTAssertNil(model.currentHost?.directEndpoint)
+        XCTAssertEqual(model.currentHost?.connectionPreference, .sshOnly)
     }
 
     private func makeHost() -> HostRecord {
@@ -402,13 +581,5 @@ final class AppModelInstallCommitTests: XCTestCase {
             createdAt: Date(timeIntervalSince1970: 1_800_000_000),
             isCurrent: true
         )
-    }
-}
-
-private actor CommitLog {
-    private(set) var events: [String] = []
-
-    func append(_ event: String) {
-        events.append(event)
     }
 }

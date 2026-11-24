@@ -190,7 +190,6 @@ public final class SSHTransport {
             username: request.username,
             credential: request.credential
         )
-
         let bootstrap = ClientBootstrap(group: group)
             .connectTimeout(.milliseconds(Int64(remainingBudget() * 1_000)))
             .channelInitializer { channel in
@@ -206,6 +205,7 @@ public final class SSHTransport {
                         inboundChildChannelInitializer: nil
                     )
                     try channel.pipeline.syncOperations.addHandler(ssh)
+                    try channel.pipeline.syncOperations.addHandler(SSHHandshakeErrors())
                 }
             }
 
@@ -221,6 +221,7 @@ public final class SSHTransport {
 
         do {
             let handler = try await channel.pipeline.handler(type: NIOSSHHandler.self).get()
+            let handshakeErrors = try await channel.pipeline.handler(type: SSHHandshakeErrors.self).get()
             let transport = SSHTransport(
                 channel: channel,
                 group: group,
@@ -231,8 +232,10 @@ public final class SSHTransport {
             // 通道再立刻关闭，作为「已可认证并可用」的探针；随后 createChannel 都不会再等握手。
             try await transport.probeActivation(
                 timeout: remainingBudget(),
+                handshakeErrors: handshakeErrors,
                 awaitingUserConfirmation: { verifier.isAwaitingUserConfirmation }
             )
+            try await channel.pipeline.removeHandler(handshakeErrors).get()
             transport.presentedHostKey = presentedBox.value
             return transport
         } catch {
@@ -378,13 +381,22 @@ public final class SSHTransport {
 
     private func createChannel(
         channelType: SSHChannelType,
+        handshakeErrors: SSHHandshakeErrors? = nil,
         initializer: @escaping (Channel) -> EventLoopFuture<Void>
     ) async throws -> Channel {
         guard let handler else { throw SSHTransportError.channelClosed }
         return try await withCheckedThrowingContinuation { continuation in
             let accepted = lifecycle.execute {
                 let promise = self.channel.eventLoop.makePromise(of: Channel.self)
-                promise.futureResult.whenComplete { continuation.resume(with: $0) }
+                promise.futureResult.whenComplete { result in
+                    if handshakeErrors?.pendingProbe == promise { handshakeErrors?.pendingProbe = nil }
+                    continuation.resume(with: result)
+                }
+                if let error = handshakeErrors?.failure {
+                    promise.fail(error)
+                    return
+                }
+                handshakeErrors?.pendingProbe = promise
                 handler.createChannel(promise, channelType: channelType) { childChannel, _ in
                     initializer(childChannel)
                 }
@@ -402,6 +414,7 @@ public final class SSHTransport {
     /// 纯网络问题仍按原 `timeout` 报超时。
     private func probeActivation(
         timeout: TimeInterval,
+        handshakeErrors: SSHHandshakeErrors,
         awaitingUserConfirmation: @escaping @Sendable () -> Bool
     ) async throws {
         let clock = ContinuousClock()
@@ -412,7 +425,7 @@ public final class SSHTransport {
             attempts += 1
             do {
                 let probe = try await withTimeout(seconds: budget, phase: "SSH 握手与认证") {
-                    try await self.createChannel(channelType: .session) { channel in
+                    try await self.createChannel(channelType: .session, handshakeErrors: handshakeErrors) { channel in
                         channel.eventLoop.makeSucceededVoidFuture()
                     }
                 }
@@ -462,6 +475,22 @@ public final class SSHTransport {
 }
 
 // MARK: - 握手期的主机指纹判定
+
+/// NIOSSH forwards key exchange failures to the parent pipeline while the
+/// pending activation probe still waits for authentication to complete.
+private final class SSHHandshakeErrors: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+
+    // Accessed exclusively on the parent channel's event loop.
+    var failure: Error?
+    var pendingProbe: EventLoopPromise<Channel>?
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        guard failure == nil else { return }
+        failure = error
+        pendingProbe?.fail(error)
+    }
+}
 
 /// 线程安全的一次性布尔标记（握手回调用）。
 private final class LockedFlag: @unchecked Sendable {
@@ -529,11 +558,9 @@ private final class HostKeyVerifier: NIOSSHClientServerAuthenticationDelegate, @
         let status = HostKeyTrust.evaluate(presented: presented, pinned: pinned)
         let confirmer = self.confirmer
         let awaiting = awaitingConfirmation
+        if status != .matches { awaiting.set(true) }
         Task {
-            let needsUser = status != .matches
-            if needsUser { awaiting.set(true) }
             let confirmation = await confirmer.confirmHostKey(presented, status: status)
-            awaiting.set(false)
             switch confirmation {
             case .trust:
                 validationCompletePromise.succeed(())
@@ -542,6 +569,7 @@ private final class HostKeyVerifier: NIOSSHClientServerAuthenticationDelegate, @
                     SSHTransportError.hostKeyRejected(fingerprint: presented.fingerprint)
                 )
             }
+            awaiting.set(false)
         }
     }
 }

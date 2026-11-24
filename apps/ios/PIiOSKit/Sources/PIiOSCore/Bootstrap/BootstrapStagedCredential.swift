@@ -16,6 +16,8 @@ public struct BootstrapStagedCredential: Codable, Equatable, Sendable {
     public let deviceId: String
     public let deviceToken: String
     public let createdAt: Date
+    public let sshAccount: String?
+    public let sshFingerprint: String?
 
     public init?(
         hostID: UUID,
@@ -23,7 +25,9 @@ public struct BootstrapStagedCredential: Codable, Equatable, Sendable {
         targetPort: Int,
         deviceId: String,
         deviceToken: String,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        sshAccount: String? = nil,
+        sshFingerprint: String? = nil
     ) {
         guard Self.isValidAttemptId(attemptId),
               (1...65_535).contains(targetPort),
@@ -38,6 +42,8 @@ public struct BootstrapStagedCredential: Codable, Equatable, Sendable {
         self.deviceId = deviceId
         self.deviceToken = deviceToken
         self.createdAt = createdAt
+        self.sshAccount = sshAccount
+        self.sshFingerprint = sshFingerprint
     }
 
     public static func account(hostID: UUID, attemptId: String) -> String {

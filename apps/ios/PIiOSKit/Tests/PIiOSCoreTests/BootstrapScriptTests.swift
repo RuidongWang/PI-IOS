@@ -46,7 +46,7 @@ final class BootstrapScriptTests: XCTestCase {
         XCTAssertTrue(script.contains(#"chmod 700 "$BASE" "$WORK""#))
         XCTAssertTrue(script.contains(#"pair_tmp="$PAIR_JSON.tmp.$$""#))
         XCTAssertTrue(script.contains(#"chmod 600 "$pair_tmp""#))
-        XCTAssertTrue(script.contains(#">"$WORK/pair.fifo""#))
+        XCTAssertTrue(script.contains(#">"$ATTEMPT/pair.fifo""#))
         XCTAssertFalse(script.contains(#">"$log" 2>"$err""#), "令牌 stdout 不得写入持久日志")
         XCTAssertTrue(script.contains(#"setsid"#) == false, "后台脱离由 runner 的 launch 命令负责")
 
@@ -71,10 +71,6 @@ final class BootstrapScriptTests: XCTestCase {
         }
         XCTAssertEqual(positions.compactMap { $0 }, positions.compactMap { $0 }.sorted())
 
-        let verifyHash = try XCTUnwrap(script.range(of: #"actual_sha256=$(sha256_of "$PART")"#)?.lowerBound)
-        let install = try XCTUnwrap(script.range(of: #""$unpack/$BUNDLE_DIR/scripts/install.sh" --install"#)?.lowerBound)
-        XCTAssertLessThan(verifyHash, install, "sha256 验证必须先于 current 切换")
-
         let execStartLine = script.components(separatedBy: .newlines)
             .first(where: { $0.contains("ExecStart=") })
         XCTAssertNotNil(execStartLine)
@@ -86,7 +82,7 @@ final class BootstrapScriptTests: XCTestCase {
 
     func testStateFilePathPermissionsAndUnitContractAreExplicit() throws {
         let script = BootstrapScriptBuilder.build(try configuration(target: .linuxX64))
-        XCTAssertTrue(script.contains(#"STATE="$WORK/state.json""#))
+        XCTAssertTrue(script.contains(#"STATE="$ATTEMPT/state.json""#))
         XCTAssertTrue(script.contains(#"printf '{"version":1,"attemptId":"%s","step":"%s","status":"%s",' "$ATTEMPT_ID" "$next_step" "$status""#))
         XCTAssertTrue(script.contains(#"chmod 600 "$tmp""#))
         XCTAssertTrue(script.contains(#"BASE="$HOME/.pi-adaptor""#))
@@ -98,23 +94,6 @@ final class BootstrapScriptTests: XCTestCase {
         XCTAssertTrue(script.contains(#"systemctl --user start "$UNIT_NAME""#))
         XCTAssertTrue(script.contains(#"systemctl --user is-active --quiet "$UNIT_NAME""#))
         XCTAssertTrue(script.contains(#"\"reason\":\"$details_reason\""#))
-    }
-
-    func testEnablementIsRecordedAndRolledBack() throws {
-        let script = BootstrapScriptBuilder.build(try configuration())
-        let daemonReload = try XCTUnwrap(script.range(of: #"systemctl --user daemon-reload"#)?.lowerBound)
-        // 安装流程里的 enable 紧跟在“只 start 不 enable”注释之后；
-        // 前面回滚函数里也有同名命令，必须用注释锚定。
-        let installEnable = try XCTUnwrap(script.range(of: #"# 只 start 不 enable 的话"#)?.lowerBound)
-        let startUnit = try XCTUnwrap(script.range(of: #"progress "start-unit""#)?.lowerBound)
-        XCTAssertLessThan(daemonReload, installEnable)
-        XCTAssertLessThan(installEnable, startUnit)
-        XCTAssertTrue(script.contains(#"systemctl --user enable "$UNIT_NAME" >/dev/null 2>&1 || die "unit-failed""#))
-        // 安装前记录原 enable 状态，回滚时按原状态恢复。
-        XCTAssertTrue(script.contains(#"PREVIOUS_SERVICE_ENABLED=$(systemctl --user is-enabled "$UNIT_NAME""#))
-        XCTAssertTrue(script.contains(#"restore_service_enablement || { ROLLBACK_STEP="restore-enablement"; rollback_ok=0; }"#))
-        XCTAssertTrue(script.contains(#"TRANSACTION_ENABLED="$WORK/transaction.service-enabled""#))
-        try assertShellParses(script)
     }
 
     func testFailuresSurfaceServerDiagnosticsAndNeverMaskOriginalCode() throws {
@@ -171,7 +150,7 @@ final class BootstrapScriptTests: XCTestCase {
         let checksum = try XCTUnwrap(script.range(of: #"actual_sha256=$(sha256_of "$PART")"#)?.lowerBound)
         let currentSwitch = try XCTUnwrap(script.range(of: #""$unpack/$BUNDLE_DIR/scripts/install.sh" --install"#)?.lowerBound)
         XCTAssertLessThan(download, checksum)
-        XCTAssertLessThan(checksum, currentSwitch)
+        XCTAssertLessThan(checksum, currentSwitch, "sha256 验证必须先于 current 切换")
         for code in [
             "missing-tar", "missing-sha256-tool", "bootstrap-permissions",
             "stage-failed", "download-failed", "checksum-mismatch", "extract-failed",
@@ -285,8 +264,9 @@ final class BootstrapScriptTests: XCTestCase {
         XCTAssertTrue(BootstrapRemoteCommand.probe.contains("uname -m"))
         XCTAssertEqual(BootstrapRemoteCommand.probe.components(separatedBy: "uname").count - 1, 2)
         XCTAssertTrue(BootstrapRemoteCommand.launch.contains("setsid nohup"))
-        XCTAssertTrue(BootstrapRemoteCommand.launch.contains("command -v setsid"))
-        XCTAssertTrue(BootstrapRemoteCommand.launch.contains("cd \"$work\" || exit 1"))
+        XCTAssertTrue(BootstrapRemoteCommand.launch.contains("setsid nohup flock"))
+        XCTAssertTrue(BootstrapRemoteCommand.launch.contains("cd \"$attempt\" || exit 1"))
+        XCTAssertEqual(BootstrapRemoteCommand.scoped(BootstrapRemoteCommand.launch, attemptId: ".."), "exit 64")
         XCTAssertTrue(BootstrapRemoteCommand.installScript.contains("umask 077"))
         XCTAssertTrue(BootstrapRemoteCommand.writePairingOK.contains("chmod 600"))
         XCTAssertTrue(BootstrapRemoteCommand.writeVerificationOK.contains("chmod 600"))

@@ -131,10 +131,11 @@ public enum SendAdmission: Equatable, Sendable {
     case queue(runningTurnId: String?)
     /// 不在线：禁止发送（AC-15.2 / AC-G1）。
     case blockedOffline
+    case blockedReadOnly
 
     public var turnAdmission: RACPTurnAdmission? {
         switch self {
-        case .start, .blockedOffline: return nil
+        case .start, .blockedOffline, .blockedReadOnly: return nil
         case .queue: return .queue
         }
     }
@@ -145,7 +146,7 @@ public enum SendAdmission: Equatable, Sendable {
         return false
     }
 
-    public var isAllowed: Bool { self != .blockedOffline }
+    public var isAllowed: Bool { self != .blockedOffline && self != .blockedReadOnly }
 }
 
 public enum TurnQueuePolicy {

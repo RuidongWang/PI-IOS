@@ -92,6 +92,7 @@ struct ConversationScreen: View {
     /// authoritative until the user scrolls or a later correction applies.
     @State private var readingPositionHoldAnchorID: String?
     @State private var approvalFullInput: ApprovalFullInput?
+    @State private var reviewedApprovalDigests: [String: (revision: Int?, digest: String)] = [:]
     /// 选图批次的读取/上传仍在进行时禁止发送，避免用户看不到尚未完成的图片。
     @State private var isReadingPhotos = false
     @State private var photoReadCompletedCount = 0
@@ -182,6 +183,7 @@ struct ConversationScreen: View {
                             }
                         }
                         .coordinateSpace(name: "conversation-scroll")
+                        .accessibilityIdentifier("conversation.timeline")
                         .scrollPosition(id: trackedScrollPosition, anchor: .top)
                         .scrollDismissesKeyboard(.immediately)
                         // 点消息区任意空白处收起键盘；输入框在滚动区之外，不受影响。
@@ -344,6 +346,17 @@ struct ConversationScreen: View {
             }
             .environment(\.conversationHistoryTextLoader, historyTextLoader)
             .piPageBackground()
+            .sheet(item: $approvalFullInput) { item in
+                ApprovalInputSheet(item: item, load: session.loadApprovalInput) { digest in
+                    if let digest {
+                        reviewedApprovalDigests[item.id] = (item.revision, digest)
+                    }
+                    approvalFullInput = nil
+                }
+            }
+            .onChange(of: session.pendingApprovals.map(\.id)) { _, ids in
+                reviewedApprovalDigests = reviewedApprovalDigests.filter { ids.contains($0.key) }
+            }
             .overlay(alignment: .topLeading) {
 #if DEBUG
                 Text(topVisibleItemID ?? "none")
@@ -369,6 +382,21 @@ struct ConversationScreen: View {
                     .font(.system(size: 1)).frame(width: 1, height: 1).clipped()
                     .accessibilityIdentifier("conversation.debugBottomFollowState")
                     .allowsHitTesting(false)
+                if SessionController.observesUITestTurnOutcome {
+                    if let turnID = session.uiTestSubmittedTurnID {
+                        Text(verbatim: turnID)
+                            .font(.system(size: 1)).frame(width: 1, height: 1).clipped()
+                            .accessibilityIdentifier("conversation.debugSubmittedTurn")
+                            .allowsHitTesting(false)
+                    }
+                    if let turn = connection.uiTestTerminalTurn, turn.sessionId == session.attachedSessionId,
+                       let status = turn.status {
+                        Text(verbatim: "\(turn.id):\(status)")
+                            .font(.system(size: 1)).frame(width: 1, height: 1).clipped()
+                            .accessibilityIdentifier("conversation.debugTerminalTurn")
+                            .allowsHitTesting(false)
+                    }
+                }
 #endif
             }
             // 会话页内容自带常驻状态区，用 inline 标题：大标题会跟着内嵌滚动视图
@@ -556,6 +584,10 @@ struct ConversationScreen: View {
                 tint: PIColor.text2
             ))
         }
+        if let error = connection.offlineCacheLoadError,
+           error == OfflineCacheEncryptionError.unavailable.localizedDescription {
+            lines.append(StatusLine(id: "conversation.cacheEncryptionError", text: error, tint: PIColor.danger))
+        }
         if let error = session.lastError, !duplicatesModelAvailabilityWarning(error) {
             lines.append(StatusLine(
                 id: "conversation.errorNotice",
@@ -563,6 +595,8 @@ struct ConversationScreen: View {
                 tint: PIColor.danger,
                 dismiss: { session.clearError() }
             ))
+        } else if session.sendAdmission == .blockedReadOnly {
+            lines.append(StatusLine(id: "conversation.readOnly", text: RACPErrorCode.sessionReadOnly.userMessage, tint: PIColor.text2))
         } else if let notice = session.notice {
             // 完成提示是中性事实（「已中止」不是成功），用状态色只在失败时出现。
             lines.append(StatusLine(
@@ -1551,6 +1585,8 @@ struct ConversationScreen: View {
             let availability = session.availability(for: card.id)
             let isContract = SessionController.isContract(card)
             let canDecide = !(session.isBusy || !connection.state.isOnline)
+            let reviewedDigest = reviewedApprovalDigests[card.id].flatMap { $0.revision == card.revision ? $0.digest : nil }
+            let canAllow = canDecide && (card.inputByteLength == nil || reviewedDigest != nil)
             PICard {
                 VStack(alignment: .leading, spacing: PISpacing.s12) {
                     HStack(spacing: PISpacing.s8) {
@@ -1571,7 +1607,13 @@ struct ConversationScreen: View {
                         .foregroundStyle(PIColor.text)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
-                    if let full = ApprovalInputPreview.fullText(from: card.payload) {
+                    if card.inputByteLength != nil {
+                        Button("查看完整参数") {
+                            approvalFullInput = ApprovalFullInput(id: card.id, title: card.toolName ?? "审批参数", revision: card.revision, card: card)
+                        }
+                        .font(PIFont.captionStrong)
+                        .accessibilityIdentifier("conversation.approval.\(card.id).showFullInput")
+                    } else if let full = ApprovalInputPreview.fullText(from: card.payload) {
                         Button("查看完整参数") {
                             approvalFullInput = ApprovalFullInput(
                                 id: card.id,
@@ -1598,23 +1640,23 @@ struct ConversationScreen: View {
                             VStack(alignment: .leading, spacing: PISpacing.s8) {
                                 if dynamicTypeSize.isAccessibilitySize {
                                     VStack(spacing: PISpacing.s8) {
-                                        PIApprovalPrimaryButton(title: "允许一次", isEnabled: canDecide) {
-                                            Task { await session.decide(approvalId: card.id, decision: .allowOnce) }
+                                        PIApprovalPrimaryButton(title: "允许一次", isEnabled: canAllow) {
+                                            Task { await session.decide(approvalId: card.id, decision: .allowOnce, reviewedInputDigest: reviewedDigest) }
                                         }
                                         .accessibilityIdentifier("conversation.approval.\(card.id).allowOnce")
-                                        PIApprovalSecondaryButton(title: "本会话允许", isEnabled: canDecide) {
-                                            Task { await session.decide(approvalId: card.id, decision: .allowSession) }
+                                        PIApprovalSecondaryButton(title: "本会话允许", isEnabled: canAllow) {
+                                            Task { await session.decide(approvalId: card.id, decision: .allowSession, reviewedInputDigest: reviewedDigest) }
                                         }
                                         .accessibilityIdentifier("conversation.approval.\(card.id).allowSession")
                                     }
                                 } else {
                                     HStack(spacing: PISpacing.s8) {
-                                        PIApprovalPrimaryButton(title: "允许一次", isEnabled: canDecide) {
-                                            Task { await session.decide(approvalId: card.id, decision: .allowOnce) }
+                                        PIApprovalPrimaryButton(title: "允许一次", isEnabled: canAllow) {
+                                            Task { await session.decide(approvalId: card.id, decision: .allowOnce, reviewedInputDigest: reviewedDigest) }
                                         }
                                         .accessibilityIdentifier("conversation.approval.\(card.id).allowOnce")
-                                        PIApprovalSecondaryButton(title: "本会话允许", isEnabled: canDecide) {
-                                            Task { await session.decide(approvalId: card.id, decision: .allowSession) }
+                                        PIApprovalSecondaryButton(title: "本会话允许", isEnabled: canAllow) {
+                                            Task { await session.decide(approvalId: card.id, decision: .allowSession, reviewedInputDigest: reviewedDigest) }
                                         }
                                         .accessibilityIdentifier("conversation.approval.\(card.id).allowSession")
                                     }
@@ -1635,24 +1677,6 @@ struct ConversationScreen: View {
             }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("conversation.approval.\(card.id)")
-            .sheet(item: $approvalFullInput) { item in
-                NavigationStack {
-                    ScrollView {
-                        Text(item.text)
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(PISpacing.s16)
-                            .accessibilityIdentifier("conversation.approval.fullInput")
-                    }
-                    .navigationTitle(item.title)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("完成") { approvalFullInput = nil }
-                        }
-                    }
-                }
-            }
         }
         ForEach(Array(session.view.expiredApprovalIds).sorted(), id: \.self) { expiredId in
             if session.availability(for: expiredId) == .expired {
@@ -3830,5 +3854,71 @@ private struct AttachmentImageDetail: View {
 private struct ApprovalFullInput: Identifiable {
     let id: String
     let title: String
-    let text: String
+    var text: String? = nil
+    var revision: Int? = nil
+    var card: RACPApprovalRequest? = nil
+}
+
+private struct ApprovalInputSheet: View {
+    let item: ApprovalFullInput
+    let load: (RACPApprovalRequest) async throws -> (text: String, digest: String)
+    let finish: (String?) -> Void
+    @State private var loaded: (pages: [Substring], digest: String)?
+    @State private var failure: String?
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                if let text = item.text {
+                    Text(text)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(PISpacing.s16)
+                        .accessibilityIdentifier("conversation.approval.fullInput")
+                } else if let loaded {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(loaded.pages.indices, id: \.self) { index in
+                            Text(loaded.pages[index])
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(PISpacing.s16)
+                    .accessibilityIdentifier("conversation.approval.fullInput")
+                } else if let failure {
+                    PIInlineMessage(kind: .danger, text: failure).padding(PISpacing.s16)
+                } else {
+                    ProgressView("正在读取完整参数…").padding(PISpacing.s16)
+                }
+            }
+            .navigationTitle(item.title)
+            .toolbar {
+                if let loaded {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("已审阅") { finish(loaded.digest) }
+                    }
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(item.card == nil ? "完成" : "关闭") { finish(nil) }
+                }
+            }
+        }
+        .task {
+            guard let card = item.card else { return }
+            do {
+                let result = try await load(card)
+                var pages: [Substring] = []
+                var start = result.text.startIndex
+                while start < result.text.endIndex {
+                    let end = result.text.index(start, offsetBy: 4_096, limitedBy: result.text.endIndex) ?? result.text.endIndex
+                    pages.append(result.text[start..<end])
+                    start = end
+                }
+                loaded = (pages, result.digest)
+            }
+            catch { failure = ConnectionErrorText.describe(error) }
+        }
+    }
 }

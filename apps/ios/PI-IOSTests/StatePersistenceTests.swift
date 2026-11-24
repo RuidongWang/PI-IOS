@@ -250,6 +250,94 @@ final class StatePersistenceTests: XCTestCase {
     /// This is App-layer restart/offline evidence with real SQLite + state JSON.
     /// The disconnected transport is synthetic; it is not an iPhone/SSH test.
     @MainActor
+    func testFailedHostRecordWritePreservesPairingProjectionAndOfflineDraft() async throws {
+        let target = try XCTUnwrap(stateURL)
+        let host = HostRecord(id: UUID(), name: "Saved Host", host: "localhost", port: 22,
+                              username: "fixture", authKind: .password, createdAt: Date(),
+                              isCurrent: true, pairedAt: Date(), hostPort: 19_445)
+        let sessionID = "saved-session"
+        let state = PersistedState(hosts: [host], lastSessionId: sessionID,
+                                   lastSessionByHost: [host.id.uuidString: sessionID])
+        try StateFile.save(state, to: target)
+        let cache = OfflineSessionCacheSnapshot(drafts: [
+            .init(hostID: host.id, sessionId: sessionID, text: "local draft", idempotencyKey: "key", updatedAt: .now)
+        ])
+        let fixture = UITestFixture(state: state, cache: cache, connectionState: .offline(reason: "fixture"))
+        let store = SessionCacheStore(offlineCacheLimit: 100, inMemory: cache)
+        let connection = ConnectionModel(fixture: fixture, cacheStoreOverride: store)
+        let app = AppModel(seed: state, stateFileURL: target, connectionOverride: connection)
+        var edited = HostDraft(record: host)
+        edited.hostPort = "19446"
+        StateFile.setBeforeWriteHookForTesting { url in
+            if url == target { throw CocoaError(.fileWriteNoPermission) }
+        }
+        defer { StateFile.setBeforeWriteHookForTesting(nil) }
+
+        XCTAssertFalse(app.updateHost(id: host.id, with: edited))
+        let deleted = await app.deleteHost(id: host.id)
+        XCTAssertFalse(deleted)
+        XCTAssertEqual(app.hosts, [host])
+        XCTAssertEqual(app.lastSessionID(for: host.id), sessionID)
+        XCTAssertEqual(connection.cachedSession(sessionId: sessionID)?.draft?.text, "local draft")
+        XCTAssertEqual(StateFile.load(from: target).state.hosts.first?.hostPort, 19_445)
+        XCTAssertNotNil(app.saveError)
+    }
+
+    @MainActor
+    func testProjectDeletionCommitsStateBeforeRemovingOnlyItsHostDraft() async throws {
+        let target = try XCTUnwrap(stateURL)
+        let host = HostRecord(id: UUID(), name: "Saved Host", host: "localhost", port: 22,
+                              username: "fixture", authKind: .password, createdAt: Date(), isCurrent: true)
+        var other = host
+        other.id = UUID()
+        other.isCurrent = false
+        let sessionID = "shared-session-id"
+        let projectID = "project"
+        let state = PersistedState(
+            hosts: [host, other], lastSessionId: sessionID, lastProjectId: projectID,
+            projectBindings: [.init(hostID: host.id, projectID: projectID, path: nil, name: "Project")],
+            sessionBindings: [.init(hostID: host.id, sessionID: sessionID, projectID: projectID, isPinned: true)],
+            lastSessionByHost: [host.id.uuidString: sessionID], lastProjectByHost: [host.id.uuidString: projectID]
+        )
+        try StateFile.save(state, to: target)
+        let originalBytes = try Data(contentsOf: target)
+        let cacheURL = root.appendingPathComponent("session-cache.sqlite")
+        let database = try OfflineSessionCacheSQLite(url: cacheURL)
+        try database.save(.init(drafts: [
+            .init(hostID: host.id, sessionId: sessionID, text: "local draft", idempotencyKey: "key", updatedAt: .now),
+            .init(hostID: other.id, sessionId: sessionID, text: "different host", idempotencyKey: "other", updatedAt: .now)
+        ]))
+        let store = SessionCacheStore(offlineCacheLimit: 100, fileURL: cacheURL)
+        let fixture = UITestFixture(state: state, cache: .init(), connectionState: .offline(reason: "fixture"))
+        let connection = ConnectionModel(fixture: fixture, cacheStoreOverride: store)
+        let app = AppModel(seed: state, stateFileURL: target, connectionOverride: connection)
+        await connection.waitForOfflineCacheReady()
+        connection.setCacheHostID(other.id)
+
+        StateFile.setBeforeWriteHookForTesting { url in
+            if url == target { throw CocoaError(.fileWriteNoPermission) }
+        }
+        defer { StateFile.setBeforeWriteHookForTesting(nil) }
+        XCTAssertFalse(app.deleteProjectLocally(hostID: host.id, projectID: projectID, name: "Project"))
+        await connection.flushPendingCacheWrites()
+        XCTAssertEqual(try Data(contentsOf: target), originalBytes)
+        XCTAssertFalse(app.isProjectDeleted(hostID: host.id, projectID: projectID))
+        XCTAssertEqual(app.lastSessionID(for: host.id), sessionID)
+        XCTAssertEqual(Set(try database.loadSnapshot().drafts.map(\.hostID)), [host.id, other.id])
+
+        StateFile.setBeforeWriteHookForTesting(nil)
+        XCTAssertTrue(app.deleteProjectLocally(hostID: host.id, projectID: projectID, name: "Project"))
+        await connection.flushPendingCacheWrites()
+        let saved = StateFile.load(from: target).state
+        XCTAssertEqual(saved.projectBindings.first?.isDeleted, true)
+        XCTAssertEqual(saved.sessionBindings.first?.isDeleted, true)
+        XCTAssertEqual(saved.sessionBindings.first?.isPinned, false)
+        XCTAssertNil(saved.lastSessionId)
+        XCTAssertNil(saved.lastProjectId)
+        XCTAssertEqual(try database.loadSnapshot().drafts.map(\.hostID), [other.id])
+    }
+
+    @MainActor
     func testRealStateAndSQLiteRestartRecoverOfflineTablesAndRetention() async throws {
         let cacheURL = root.appendingPathComponent("session-cache.sqlite")
         let target = try XCTUnwrap(stateURL)

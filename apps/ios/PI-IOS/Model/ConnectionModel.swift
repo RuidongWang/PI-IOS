@@ -47,13 +47,14 @@ enum AdaptorUnitProbeError: LocalizedError {
 
 enum AdaptorInstallError: LocalizedError {
     case invalidReleaseVersion
+    case noCompatibleRelease
     case probeFailed(String)
     case malformedProbe
     case emptySudoPassword
     case sudoFailed(String)
     /// U15: the current local record no longer matches the frozen install target.
     case installationSuperseded
-    /// Identity matched and the receipt could not be persisted; the token was not promoted.
+    /// The pending receipt is kept with the promoted credential for recovery.
     case receiptPersistenceFailed(String)
     /// Runtime verification completed without an adaptor hostId; nothing was promoted.
     case adaptorIdentityMissing
@@ -62,6 +63,8 @@ enum AdaptorInstallError: LocalizedError {
         switch self {
         case .invalidReleaseVersion:
             return "内置的 PI-adaptor Release 版本、资产或仓库配置不合法"
+        case .noCompatibleRelease:
+            return "找不到与当前 PI-IOS 兼容的 PI-adaptor 安装包。更新 App 后重试。"
         case .probeFailed(let detail):
             return detail.isEmpty ? "无法探测服务器平台" : detail
         case .malformedProbe:
@@ -74,20 +77,20 @@ enum AdaptorInstallError: LocalizedError {
             return "旧安装结果已过期，请到原服务器核对。"
                 + "这台服务器在本机记录中的身份已变化，本次安装回执未写入，暂存的设备令牌也未提升为活跃令牌。"
         case .receiptPersistenceFailed(let detail):
-            return "远端安装与运行验证已通过，但无法提交本机服务器记录：\(detail)"
+            return "远端安装与运行验证已通过。本机安装回执将在下次启动时补写。\(detail)"
         case .adaptorIdentityMissing:
             return "运行验证未取得 PI-adaptor 身份（hostId），已丢弃本次安装结果，未提升设备令牌。"
         }
     }
 }
 
-struct BootstrapPairingCommit {
+struct BootstrapPairingCommit: Codable {
     let target: InstallTargetSnapshot
     let adaptorHostId: String
     let port: Int
     let version: String
     let attemptId: String
-    let releaseSource: AdaptorReleaseResolutionSource?
+    let releaseSource: AdaptorInstallReleaseSource?
     let directEndpoint: String?
 
     var hostID: UUID { target.hostID }
@@ -227,7 +230,10 @@ final class ConnectionModel: ObservableObject {
     /// (AppModel) can persist it onto the host record.
     var onResolvedHostPort: ((UUID, Int) -> Void)?
     var onDirectVerified: ((UUID, String, String) -> Void)?
-    var onBootstrapPairingCommit: ((BootstrapPairingCommit) async -> BootstrapPairingCommitResult)?
+    var onBootstrapPairingCommit: ((BootstrapPairingCommit) -> BootstrapPairingCommitResult)?
+    var onPrepareHostConnection: ((UUID) -> HostRecord?)?
+    private var activeAdaptorInstalls: Set<UUID> = []
+    private var activePiCLIAccounts: Set<String> = []
     @Published private(set) var hasLoadedCatalog = false
     @Published private(set) var isRefreshingCatalog = false
     @Published private(set) var catalogError: String?
@@ -295,6 +301,7 @@ final class ConnectionModel: ObservableObject {
     /// result, used to publish a real newer revision from the real save path.
     var afterCacheFlushBarrierHookForTesting: (() async -> Void)?
     var beforeCacheFlushHookForTesting: (() -> Void)?
+    var bootstrapRevocationHandlerForTesting: ((Int, String, String, String?) async -> BootstrapStagingRevokeResult)?
 #endif
     var currentCatalogHostID: UUID? { cacheHostID }
     /// 当前选中的 HostRecord id（由 AppModel 的 setCacheHostID 保持同步）。
@@ -302,6 +309,9 @@ final class ConnectionModel: ObservableObject {
     var currentHostID: UUID? { cacheHostID }
     /// 会话内的读写（发送、审批、排队、配置）全部走它。
     let session: SessionController
+#if DEBUG
+    @Published private(set) var uiTestTerminalTurn: RACPTurnRef?
+#endif
     private let requestKeys: SessionRequestKeyStore
     let extensions = ExtensionCatalogModel()
     private var extensionSnapshotGeneration: UInt64?
@@ -329,34 +339,8 @@ final class ConnectionModel: ObservableObject {
         return outcome
     }
 
-    /// Explicit user choice after a direct failure. Only now may bootstrap SSH close.
     func completeInstallSSHOnly(hostID: UUID, attemptId: String) async {
-        guard let pending = pendingBootstrapTransports[hostID], pending.attemptId == attemptId else { return }
-        pendingBootstrapTransports.removeValue(forKey: hostID)
-#if DEBUG
-        if let clearDirectTrustExecutorForTesting {
-            await clearDirectTrustExecutorForTesting(attemptId)
-        } else if let transport = pending.transport {
-            _ = try? await transport.exec(
-                BootstrapRemoteCommand.clearDirectTrust(attemptId: attemptId),
-                stdin: nil,
-                timeout: 15
-            )
-            await transport.close()
-        }
-        if pending.transport == nil {
-            await transportCloseExecutorForTesting?()
-        }
-#else
-        if let transport = pending.transport {
-            _ = try? await transport.exec(
-                BootstrapRemoteCommand.clearDirectTrust(attemptId: attemptId),
-                stdin: nil,
-                timeout: 15
-            )
-            await transport.close()
-        }
-#endif
+        guard await discardBootstrapDirect(hostID: hostID, attemptId: attemptId) else { return }
         if let old = installOutcomes[hostID], old.attemptId == attemptId {
             installOutcomes[hostID] = AdaptorInstallRunOutcome(
                 result: old.result,
@@ -370,6 +354,29 @@ final class ConnectionModel: ObservableObject {
                 requiresSSHOnlyConfirmation: false
             )
         }
+    }
+
+    @discardableResult
+    func discardBootstrapDirect(hostID: UUID, attemptId: String) async -> Bool {
+        guard let pending = pendingBootstrapTransports[hostID], pending.attemptId == attemptId else { return false }
+        pendingBootstrapTransports.removeValue(forKey: hostID)
+#if DEBUG
+        if let clearDirectTrustExecutorForTesting {
+            await clearDirectTrustExecutorForTesting(attemptId)
+        }
+        if pending.transport == nil {
+            await transportCloseExecutorForTesting?()
+        }
+#endif
+        if let transport = pending.transport {
+            _ = try? await transport.exec(
+                BootstrapRemoteCommand.clearDirectTrust(attemptId: attemptId),
+                stdin: nil,
+                timeout: 15
+            )
+            await transport.close()
+        }
+        return true
     }
 
     /// Retries only the direct socket validation, never install/pair/revoke/staging.
@@ -391,7 +398,8 @@ final class ConnectionModel: ObservableObject {
                 record: record,
                 endpoint: endpoint,
                 trust: pending.trust,
-                expectedHostId: adaptorHostId
+                expectedHostId: adaptorHostId,
+                retryAttemptId: attemptId
             )
         }
 #else
@@ -399,9 +407,11 @@ final class ConnectionModel: ObservableObject {
             record: record,
             endpoint: endpoint,
             trust: pending.trust,
-            expectedHostId: adaptorHostId
+            expectedHostId: adaptorHostId,
+            retryAttemptId: attemptId
         )
 #endif
+        guard pendingBootstrapTransports[record.id]?.attemptId == attemptId else { return nil }
         let requiresConfirmation = !verification.verified && verification.error != nil
         let outcome = AdaptorInstallRunOutcome(
             result: old.result,
@@ -416,34 +426,8 @@ final class ConnectionModel: ObservableObject {
         )
         installOutcomes[record.id] = outcome
         if verification.verified {
-            pendingBootstrapTransports.removeValue(forKey: record.id)
-#if DEBUG
-            if let clearDirectTrustExecutorForTesting {
-                await clearDirectTrustExecutorForTesting(attemptId)
-            } else if let transport = pending.transport {
-                _ = try? await transport.exec(
-                    BootstrapRemoteCommand.clearDirectTrust(attemptId: attemptId),
-                    stdin: nil,
-                    timeout: 15
-                )
-                await transport.close()
-            }
-            if pending.transport == nil {
-                await transportCloseExecutorForTesting?()
-            }
-#else
-            if let transport = pending.transport {
-                _ = try? await transport.exec(
-                    BootstrapRemoteCommand.clearDirectTrust(attemptId: attemptId),
-                    stdin: nil,
-                    timeout: 15
-                )
-                await transport.close()
-            }
-#endif
             onDirectVerified?(record.id, endpoint, adaptorHostId)
-        } else {
-            pendingBootstrapTransports[record.id] = (attemptId, pending.transport, pending.trust)
+            await discardBootstrapDirect(hostID: record.id, attemptId: attemptId)
         }
         return outcome
     }
@@ -521,8 +505,10 @@ final class ConnectionModel: ObservableObject {
 
     init(fixture: UITestFixture? = nil, releaseCatalog: (any AdaptorReleaseResolving)? = nil,
          cacheStoreOverride: SessionCacheStore? = nil) {
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? PIAdaptorRelease.releaseVersion
         self.releaseCatalog = releaseCatalog
-            ?? (fixture == nil ? AdaptorReleaseCatalog() : FixtureAdaptorReleaseCatalog())
+            ?? (fixture == nil ? AdaptorReleaseCatalog(clientVersion: appVersion, compatibilityDefaults: .standard) : FixtureAdaptorReleaseCatalog())
         requestKeys = SessionRequestKeyStore(fileURL: fixture == nil ? SessionCacheStore.defaultRequestKeyURL() : nil)
         usesUITestFixture = fixture != nil
         if let fixture {
@@ -741,6 +727,10 @@ final class ConnectionModel: ObservableObject {
         installAdaptorCallCountForTesting += 1
 #endif
         let record = request.record
+        guard activeAdaptorInstalls.insert(record.id).inserted else {
+            throw BootstrapRunnerError.installationBusy
+        }
+        defer { activeAdaptorInstalls.remove(record.id) }
         let port = request.adaptorPort
         let releaseVersion = request.releaseVersion
         let force = request.force
@@ -758,10 +748,11 @@ final class ConnectionModel: ObservableObject {
         ) else {
             throw AdaptorInstallError.installationSuperseded
         }
-        if let previous = pendingBootstrapTransports.removeValue(forKey: record.id) {
-            await previous.transport?.close()
+        if let previous = pendingBootstrapTransports[record.id] {
+            await discardBootstrapDirect(hostID: record.id, attemptId: previous.attemptId)
         }
-        await recoverStagedPairings(record: record)
+        await recoverStagedPairings(record: record, attemptId: nil)
+        try Task.checkCancellation()
         let account = KeychainStore.account(
             username: record.username,
             host: record.host,
@@ -836,7 +827,7 @@ final class ConnectionModel: ObservableObject {
                 fallbackBaseURL: ConnectionModel.defaultAdaptorInstallReleaseBaseURL
             ) else {
                 await transport.close()
-                throw AdaptorInstallError.invalidReleaseVersion
+                throw AdaptorInstallError.noCompatibleRelease
             }
             resolution = resolved
         }
@@ -860,6 +851,7 @@ final class ConnectionModel: ObservableObject {
         // Keep the newly issued token in memory until runtime identity and
         // version have been proven. A failed reinstall therefore cannot
         // overwrite the previous PI-adaptor's working token.
+        let sshFingerprint = KeychainStore.loadHostKey(account: account)?.fingerprint
         let pairingAdapter = BootstrapInstallPairingAdapter(
             persist: { device in
                 guard KeychainStore.saveStagedPairing(
@@ -867,7 +859,9 @@ final class ConnectionModel: ObservableObject {
                     deviceToken: device.deviceToken,
                     hostID: record.id,
                     attemptId: attemptId,
-                    targetPort: port
+                    targetPort: port,
+                    sshAccount: account,
+                    sshFingerprint: sshFingerprint
                 ) else {
                     throw BootstrapInstallAdapterError.persistenceFailed
                 }
@@ -929,23 +923,13 @@ final class ConnectionModel: ObservableObject {
                 keepTransportOpen: true
             )
         } catch {
-            await revokeStagedPairingBestEffort(
-                record: record,
-                port: port,
-                attemptId: attemptId
-            )
-            KeychainStore.clearStagedPairing(hostID: record.id, attemptId: attemptId)
+            await recoverStagedPairings(record: record, attemptId: attemptId)
             throw error
         }
         let identityState = attemptState.current
         if case .succeeded = result {
             guard let adaptorHostId = identityState.hostId, !adaptorHostId.isEmpty else {
-                await revokeStagedPairingBestEffort(
-                    record: record,
-                    port: port,
-                    attemptId: attemptId
-                )
-                KeychainStore.clearStagedPairing(hostID: record.id, attemptId: attemptId)
+                await recoverStagedPairings(record: record, attemptId: attemptId)
                 throw AdaptorInstallError.adaptorIdentityMissing
             }
             let canonicalEndpoint = directEndpoint.flatMap {
@@ -957,57 +941,32 @@ final class ConnectionModel: ObservableObject {
                 port: port,
                 version: release.version,
                 attemptId: attemptId,
-                releaseSource: resolution.source,
+                releaseSource: resolution.usedFallback ? .fallback : .latest,
                 directEndpoint: canonicalEndpoint
             )
             let commitResult: BootstrapPairingCommitResult
             if let onBootstrapPairingCommit {
-                // The one controlled commit point (U15): re-check the frozen identity
-                // and write the receipt once, then promote the staged token.
-                commitResult = await BootstrapInstallCommitCoordinator.commit(
-                    writeReceipt: { await onBootstrapPairingCommit(commit) },
-                    promoteStaged: {
-                        KeychainStore.promoteStagedPairing(
-                            hostID: record.id,
-                            attemptId: attemptId
-                        )
-                    },
-                    cleanupAttempt: {
-                        await self.revokeStagedPairingBestEffort(
-                            record: record,
-                            port: port,
-                            attemptId: attemptId
-                        )
-                        KeychainStore.clearStagedPairing(
-                            hostID: record.id,
-                            attemptId: attemptId
-                        )
-                    }
-                )
+                commitResult = onBootstrapPairingCommit(commit)
             } else {
                 // No app-level owner (tests/previews): still promote only after the
                 // remote verification succeeded, and clean up this attempt on failure.
                 if KeychainStore.promoteStagedPairing(
                     hostID: record.id,
-                    attemptId: attemptId
+                    attemptId: attemptId,
+                    verifiedAdaptorHostId: adaptorHostId,
+                    previousAdaptorHostId: record.adaptorHostId
                 ) {
                     commitResult = .committed
                 } else {
                     commitResult = .tokenPromotionFailed
-                    await revokeStagedPairingBestEffort(
-                        record: record,
-                        port: port,
-                        attemptId: attemptId
-                    )
-                    KeychainStore.clearStagedPairing(
-                        hostID: record.id,
-                        attemptId: attemptId
-                    )
                 }
+            }
+            if commitResult == .staleTarget || commitResult == .tokenPromotionFailed {
+                await recoverStagedPairings(record: record, attemptId: attemptId)
             }
             switch commitResult {
             case .committed:
-                break
+                await recoverReplacedPairings(record: record, port: port, adaptorHostId: adaptorHostId)
             case .staleTarget:
                 throw AdaptorInstallError.installationSuperseded
             case .receiptPersistenceFailed(let reason):
@@ -1016,12 +975,7 @@ final class ConnectionModel: ObservableObject {
                 throw ConnectionPairingError.keychainWriteFailed
             }
         } else {
-            await revokeStagedPairingBestEffort(
-                record: record,
-                port: port,
-                attemptId: attemptId
-            )
-            KeychainStore.clearStagedPairing(hostID: record.id, attemptId: attemptId)
+            await recoverStagedPairings(record: record, attemptId: attemptId)
         }
         var directVerified = false
         var directError = identityState.error
@@ -1030,7 +984,9 @@ final class ConnectionModel: ObservableObject {
             directError = "direct endpoint 不合法"
         }
         var didRejectDirect = false
-        let wantsDirect = canonicalEndpoint != nil
+        let installSucceeded: Bool
+        if case .succeeded = result { installSucceeded = true } else { installSucceeded = false }
+        let wantsDirect = installSucceeded && !Task.isCancelled && canonicalEndpoint != nil
             && (authorizeDirectPin || directTrustAuthorizer != nil)
         var directAuthorized = authorizeDirectPin
         if wantsDirect, let trust = identityState.trust, let directTrustAuthorizer {
@@ -1041,8 +997,8 @@ final class ConnectionModel: ObservableObject {
         if wantsDirect, identityState.trust == nil, !didRejectDirect {
             directError = "DIRECT_TRUST_INVALID"
         }
-        let shouldAttemptDirect = wantsDirect && directAuthorized && identityState.trust != nil
-        if case .succeeded = result, shouldAttemptDirect, let canonicalEndpoint {
+        let shouldAttemptDirect = wantsDirect && !Task.isCancelled && directAuthorized && identityState.trust != nil
+        if shouldAttemptDirect, let canonicalEndpoint {
             let verification = await attemptBootstrapDirect(
                 record: record,
                 endpoint: canonicalEndpoint,
@@ -1058,19 +1014,16 @@ final class ConnectionModel: ObservableObject {
                 onDirectVerified?(record.id, canonicalEndpoint, adaptorHostId)
             }
         }
-        if !shouldAttemptDirect || directVerified {
+        let requiresConfirmation = wantsDirect && !Task.isCancelled && !didRejectDirect && directError != nil
+        if requiresConfirmation {
+            pendingBootstrapTransports[record.id] = (attemptId, transport, identityState.trust)
+            preserveBootstrapTransport = true
+        } else {
             _ = try? await transport.exec(
                 BootstrapRemoteCommand.clearDirectTrust(attemptId: attemptId),
                 stdin: nil,
                 timeout: 15
             )
-        }
-        var installSucceeded = false
-        if case .succeeded = result { installSucceeded = true }
-        let requiresConfirmation = wantsDirect && installSucceeded && !didRejectDirect && directError != nil
-        if requiresConfirmation {
-            pendingBootstrapTransports[record.id] = (attemptId, transport, identityState.trust)
-            preserveBootstrapTransport = true
         }
         let outcome = AdaptorInstallRunOutcome(
             result: result,
@@ -1091,7 +1044,8 @@ final class ConnectionModel: ObservableObject {
         record: HostRecord,
         endpoint: String,
         trust: BootstrapDirectTrust?,
-        expectedHostId: String?
+        expectedHostId: String?,
+        retryAttemptId: String? = nil
     ) async -> (verified: Bool, error: String?) {
         guard let trust else { return (false, "DIRECT_TRUST_INVALID") }
         guard let expectedHostId, trust.hostId == expectedHostId else {
@@ -1110,13 +1064,26 @@ final class ConnectionModel: ObservableObject {
             certificateSHA256: trust.certificateSHA256,
             authorizedAt: now
         )
+        func savePin() -> String? {
+            guard !Task.isCancelled, KeychainStore.loadDeviceToken(hostID: record.id) == token,
+                  retryAttemptId == nil || pendingBootstrapTransports[record.id]?.attemptId == retryAttemptId else {
+                return "直连验证已结束或服务器配对已变化"
+            }
+            if let onPrepareHostConnection {
+                guard let current = onPrepareHostConnection(record.id),
+                      current.adaptorHostId == expectedHostId,
+                      current.directEndpoint == endpoint,
+                      current.installReceipt?.attemptId == trust.attemptId else {
+                    return "直连配置已变化，请重新验证"
+                }
+            }
+            return KeychainStore.saveDirectTLSTrustPin(pin, hostID: record.id) ? nil : "direct pin 未能写入 Keychain"
+        }
 #if DEBUG
         if let bootstrapDirectValidationHandlerForTesting {
             let result = await bootstrapDirectValidationHandlerForTesting()
-            if result.verified {
-                guard KeychainStore.saveDirectTLSTrustPin(pin, hostID: record.id) else {
-                    return (false, "direct pin 未能写入 Keychain")
-                }
+            if result.verified, let error = savePin() {
+                return (false, error)
             }
             return result
         }
@@ -1143,11 +1110,8 @@ final class ConnectionModel: ObservableObject {
             let updates = await client.start()
             for await update in updates {
                 if case .state(.online) = update {
-                    guard KeychainStore.saveDirectTLSTrustPin(pin, hostID: record.id) else {
-                        _ = await client.stopBestEffort(timeout: 1)
-                        return (false, "direct pin 未能写入 Keychain")
-                    }
                     _ = await client.stopBestEffort(timeout: 1)
+                    if let error = savePin() { return (false, error) }
                     return (true, nil)
                 }
                 if case .state(.offline(let reason)) = update {
@@ -1161,42 +1125,32 @@ final class ConnectionModel: ObservableObject {
         }
     }
 
-    /// Best-effort cleanup for a failed install. The active PI-adaptor token is never
-    /// touched; only the attempt-scoped token is used and then deleted locally.
-    private func revokeStagedPairingBestEffort(
-        record: HostRecord,
-        port: Int,
-        attemptId: String
-    ) async {
-        guard let staged = KeychainStore.loadStagedPairing(
-            hostID: record.id,
-            attemptId: attemptId
-        ) else { return }
-        await revokePairingBestEffort(
-            record: record,
-            port: port,
-            deviceId: staged.deviceId,
-            deviceToken: staged.deviceToken
-        )
+    /// Recover abandoned pairing attempts at launch. Installation holds the same
+    /// gate so recovery cannot revoke an in-progress attempt.
+    func recoverStagedPairings(record: HostRecord) async {
+        guard activeAdaptorInstalls.insert(record.id).inserted else { return }
+        defer { activeAdaptorInstalls.remove(record.id) }
+        await recoverStagedPairings(record: record, attemptId: nil)
     }
 
-    /// Recover attempt credentials abandoned by a crash, force close, or prior
-    /// app launch. Promotion may have committed the primary token while staging
-    /// deletion failed, so recovery compares both exact values first. Matching
-    /// records are cleared without revoking the live token; a different staged
-    /// token gets bounded revocation. The primary record is never modified.
-    func recoverStagedPairings(record: HostRecord) async {
+    private func recoverStagedPairings(record: HostRecord, attemptId: String?) async {
         let active = KeychainStore.loadActivePairing(hostID: record.id)
+        let staging = KeychainStore.loadAllStagedPairings(hostID: record.id).filter {
+            attemptId == nil || $0.attemptId == attemptId
+        }
         _ = await BootstrapStagingRecoveryCoordinator.recover(
-            staging: KeychainStore.loadAllStagedPairings(hostID: record.id),
+            staging: staging,
             activeDeviceId: active?.deviceId,
             activeDeviceToken: active?.deviceToken,
             revoke: { [self] attempt in
-                await revokePairingBestEffort(
+                guard KeychainStore.loadDeviceId(hostID: record.id) != attempt.deviceId else { return .failed }
+                return await revokePairingBestEffort(
                     record: record,
                     port: attempt.targetPort,
                     deviceId: attempt.deviceId,
-                    deviceToken: attempt.deviceToken
+                    deviceToken: attempt.deviceToken,
+                    expectedSSHAccount: attempt.sshAccount,
+                    expectedSSHFingerprint: attempt.sshFingerprint
                 )
             },
             clear: { attempt in
@@ -1205,24 +1159,43 @@ final class ConnectionModel: ObservableObject {
         )
     }
 
+    func recoverReplacedPairings(record: HostRecord, port: Int, adaptorHostId: String) async {
+        guard let activeToken = KeychainStore.loadDeviceToken(hostID: record.id) else { return }
+        let pending = KeychainStore.pendingPairingRevocations(hostID: record.id, activeToken: activeToken)
+        for retired in pending where retired.adaptorHostId == adaptorHostId {
+            guard KeychainStore.loadDeviceToken(hostID: record.id) == activeToken else { return }
+            let result = await revokePairingBestEffort(
+                record: record, port: port, deviceId: retired.deviceId, deviceToken: activeToken,
+                expectedAdaptorHostId: adaptorHostId
+            )
+            guard result == .revoked || result == .notFound else { return }
+            KeychainStore.confirmPairingRevocation(retired, hostID: record.id, activeToken: activeToken)
+        }
+    }
+
     private func revokePairingBestEffort(
         record: HostRecord,
         port: Int,
         deviceId: String,
-        deviceToken: String
+        deviceToken: String,
+        expectedSSHAccount: String? = nil,
+        expectedSSHFingerprint: String? = nil,
+        expectedAdaptorHostId: String? = nil
     ) async -> BootstrapStagingRevokeResult {
+#if DEBUG
+        if let bootstrapRevocationHandlerForTesting {
+            return await bootstrapRevocationHandlerForTesting(port, deviceId, deviceToken, expectedAdaptorHostId)
+        }
+#endif
         let account = KeychainStore.account(
             username: record.username,
             host: record.host,
             port: record.port
         )
-        guard let credential = KeychainStore.loadCredential(account: account) else { return .failed }
-        let pinned = KeychainStore.loadHostKey(account: account)
-        let (operationID, promptBroker) = makeHostKeyBroker(
-            account: account,
-            address: record.address
-        )
-        defer { releaseHostKeyBroker(operationID) }
+        guard expectedSSHAccount == nil || expectedSSHAccount == account,
+              let credential = KeychainStore.loadCredential(account: account),
+              let pinned = KeychainStore.loadHostKey(account: account),
+              expectedSSHFingerprint == nil || expectedSSHFingerprint == pinned.fingerprint else { return .failed }
 
         let client = RACPClient(
             configuration: RACPConfiguration(
@@ -1236,27 +1209,37 @@ final class ConnectionModel: ObservableObject {
                 hostPort: port,
                 deviceToken: deviceToken
             ),
-            confirmer: promptBroker
+            confirmer: RecoveryHostKeyConfirmer()
         )
         // The operation may not cooperate with cancellation. The deadline wins
         // independently, then stopBestEffort separately bounds client shutdown.
-        let revoked = await boundedAsyncValue(seconds: 8) {
+        let result = await boundedAsyncValue(seconds: 8) { () -> BootstrapStagingRevokeResult in
             let stream = await client.start()
             for await update in stream {
                 switch update {
-                case .ready:
-                    return (try? await client.revokeDevice(deviceId: deviceId)) ?? false
-                case .error:
-                    return false
+                case .state(.online):
+                    do {
+                        if let expectedAdaptorHostId,
+                           try await client.authenticatedHostId(timeout: 4) != expectedAdaptorHostId {
+                            return .failed
+                        }
+                        // PI-adaptor returns false only when this device is already revoked.
+                        return try await client.revokeDevice(deviceId: deviceId) ? .revoked : .notFound
+                    } catch RACPClientError.server(.unknown("DEVICE_NOT_FOUND"), _) {
+                        return .notFound
+                    } catch {
+                        return .failed
+                    }
+                case .error, .state(.offline):
+                    return .failed
                 default:
                     continue
                 }
             }
-            return false
+            return .failed
         }
         _ = await client.stopBestEffort(timeout: 1)
-        guard let revoked else { return .unknown }
-        return revoked ? .revoked : .failed
+        return result ?? .unknown
     }
 
     /// Reads the owner-only bootstrap log through a fresh SSH `exec`. The
@@ -1972,6 +1955,47 @@ final class ConnectionModel: ObservableObject {
         }
     }
 
+    func installedPiVersion(record: HostRecord) async throws -> RemotePiVersion {
+        try await withPiCLISSH(record: record) { transport in
+            try await RemotePiMaintenance.installedVersion(using: transport)
+        }
+    }
+
+    func upgradePiCLI(record: HostRecord, from installed: RemotePiVersion, toAtLeast latest: RemotePiVersion) async throws -> RemotePiVersion {
+        try await withPiCLISSH(record: record) { transport in
+            try await RemotePiMaintenance.upgrade(from: installed, toAtLeast: latest, using: transport)
+        }
+    }
+
+    private func withPiCLISSH(
+        record: HostRecord,
+        _ operation: (SSHTransport) async throws -> RemotePiVersion
+    ) async throws -> RemotePiVersion {
+        func matchesSavedAccount() -> Bool {
+            guard let current = prepareHostConnection(record) else { return false }
+            return current.host == record.host && current.port == record.port
+                && current.username == record.username && current.authKind == record.authKind
+        }
+        guard matchesSavedAccount() else { throw ConnectionLifecycleError.connectionChanged }
+        let account = KeychainStore.account(username: record.username, host: record.host, port: record.port)
+        guard let credential = KeychainStore.loadCredential(account: account) else {
+            throw ConnectionPairingError.missingCredential
+        }
+        guard activePiCLIAccounts.insert(account).inserted else { throw RemotePiMaintenanceError.busy }
+        defer { activePiCLIAccounts.remove(account) }
+        let connection = try await connectSSH(record: record, credential: credential, account: account)
+        defer { releaseHostKeyBroker(connection.operationID) }
+        do {
+            guard matchesSavedAccount() else { throw ConnectionLifecycleError.connectionChanged }
+            let version = try await operation(connection.transport)
+            await connection.transport.close()
+            return version
+        } catch {
+            await connection.transport.close()
+            throw error
+        }
+    }
+
     private func makeHostKeyBroker(
         account: String,
         address: String
@@ -2105,19 +2129,19 @@ final class ConnectionModel: ObservableObject {
     /// 建立隧道并拉取 `project/list` / `session/list`。
     ///
     /// 前提是 Keychain 里已有凭证与设备令牌；缺任何一项都直接给出原因，不假装在线。
-    func connect(record: HostRecord) async {
+    func connect(record requested: HostRecord) async {
         // 日志：连接开始只落 host UUID 前 8 位与 hostPort，不落用户名/密码/私钥/令牌。
-        let hostLabel = record.id.uuidString.prefix(8)
+        let hostLabel = requested.id.uuidString.prefix(8)
         let logStartedAt = Date()
         PILog.info(
             "Connection",
-            "connect start host=\(hostLabel) hostPort=\(record.hostPort.map { String($0) } ?? "-")"
+            "connect start host=\(hostLabel) hostPort=\(requested.hostPort.map { String($0) } ?? "-")"
         )
         connectionIntentGeneration &+= 1
         let intent = connectionIntentGeneration
         await disconnectCurrent(expectedIntent: intent)
         guard intent == connectionIntentGeneration,
-              cacheHostID == record.id
+              cacheHostID == requested.id
         else {
             PILog.debug(
                 "Connection",
@@ -2127,7 +2151,11 @@ final class ConnectionModel: ObservableObject {
         }
         if usesUITestFixture {
             PILog.debug("Connection", "connect fixture host=\(hostLabel)")
-            applyFixtureCatalog(fixtureCatalogs[record.id])
+            applyFixtureCatalog(fixtureCatalogs[requested.id])
+            return
+        }
+        guard let record = prepareHostConnection(requested) else {
+            state = .offline(reason: "配对记录待恢复：请重新连接以重试保存。")
             return
         }
         guard record.pairedAt != nil else {
@@ -2188,7 +2216,13 @@ final class ConnectionModel: ObservableObject {
                 return
             }
         }
-        guard intent == connectionIntentGeneration, cacheHostID == record.id else {
+        if intent == connectionIntentGeneration, cacheHostID == record.id,
+           !activeAdaptorInstalls.contains(record.id),
+           let hostPort, let adaptorHostId = record.adaptorHostId {
+            await recoverReplacedPairings(record: record, port: hostPort, adaptorHostId: adaptorHostId)
+        }
+        guard intent == connectionIntentGeneration, cacheHostID == record.id,
+              KeychainStore.loadDeviceToken(hostID: record.id) == token else {
             PILog.debug(
                 "Connection",
                 "connect cancelled host=\(hostLabel) elapsedMs=\(Int(Date().timeIntervalSince(logStartedAt) * 1000))"
@@ -2261,7 +2295,11 @@ final class ConnectionModel: ObservableObject {
 
     /// Starts a direct candidate while the old SSH client remains active and readable.
     /// Only a successful final C1 replay can atomically replace the active generation.
-    func retryDirect(record: HostRecord) async {
+    func retryDirect(record requested: HostRecord) async {
+        guard let record = prepareHostConnection(requested) else {
+            lastError = "配对记录待恢复：请重新连接以重试保存。"
+            return
+        }
         // 日志：直连候选属于重连尝试，只记 debug。
         PILog.debug("Connection", "direct retry start host=\(record.id.uuidString.prefix(8))")
         guard client != nil, state.isOnline, connectionStatus.activeRoute == .ssh,
@@ -2319,6 +2357,11 @@ final class ConnectionModel: ObservableObject {
                 expectedGeneration: expectedGeneration
             )
         }
+    }
+
+    private func prepareHostConnection(_ requested: HostRecord) -> HostRecord? {
+        if let onPrepareHostConnection { return onPrepareHostConnection(requested.id) }
+        return requested
     }
 
     private func runDirectCandidate(
@@ -2995,6 +3038,14 @@ final class ConnectionModel: ObservableObject {
                 }
             } else if event.kind == "turn.completed" || event.kind == "turn.failed"
                         || event.kind == "turn.interrupted" || event.kind == "turn.canceled" {
+#if DEBUG
+                if SessionController.observesUITestTurnOutcome,
+                   let turn = event.payload.value(at: ["payload", "turn"]),
+                   let outcome = try? RACPTurnRef.decoded(from: turn),
+                   outcome.sessionId == session.attachedSessionId {
+                    uiTestTerminalTurn = outcome
+                }
+#endif
                 if let id = session.attachedSessionId { await refreshSessionExtensions(id) }
             }
         case .error(let code, _):
@@ -3442,6 +3493,12 @@ final class ConnectionModel: ObservableObject {
 }
 
 // MARK: - 指纹核对的挂起点
+
+private struct RecoveryHostKeyConfirmer: HostKeyConfirming {
+    func confirmHostKey(_ key: SSHHostKey, status: HostKeyTrustStatus) async -> HostKeyConfirmation {
+        status == .matches ? .trust : .reject
+    }
+}
 
 /// 把手握期间的主机指纹判定转成「等界面回答」的 async 调用（AC-02.1）。
 ///

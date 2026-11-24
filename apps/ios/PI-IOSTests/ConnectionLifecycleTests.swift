@@ -189,6 +189,47 @@ final class ConnectionLifecycleTests: XCTestCase {
         XCTAssertEqual(events, ["clear:\(outcome.attemptId)", "close"])
     }
 
+    func testLeavingPendingDirectClearsOnlyMatchingTrustWithoutConfirmingSSHOnly() async {
+        let record = makeHost()
+        let model = ConnectionModel()
+        let outcome = makeInstallOutcome(host: record)
+        model.installBootstrapRetryOutcomeForTesting(hostID: record.id, outcome: outcome, trust: nil)
+        var events: [String] = []
+        model.clearDirectTrustExecutorForTesting = { events.append("clear:\($0)") }
+        model.transportCloseExecutorForTesting = { events.append("close") }
+
+        let stale = await model.discardBootstrapDirect(hostID: record.id, attemptId: "older-attempt")
+        XCTAssertFalse(stale)
+        XCTAssertTrue(events.isEmpty)
+        let discarded = await model.discardBootstrapDirect(hostID: record.id, attemptId: outcome.attemptId)
+        XCTAssertTrue(discarded)
+        XCTAssertEqual(events, ["clear:\(outcome.attemptId)", "close"])
+        XCTAssertEqual(model.installOutcome(hostID: record.id, attemptId: outcome.attemptId)?.requiresSSHOnlyConfirmation, true)
+    }
+
+    func testDiscardedDirectRetryCannotOverwriteTheSavedPin() async throws {
+        let record = makeHost()
+        let model = ConnectionModel()
+        let outcome = makeInstallOutcome(host: record)
+        let pin = DirectTLSTrustPin(hostId: "host_1", certificateSHA256: String(repeating: "a", count: 64), authorizedAt: Date())
+        let trust = try makeTrust(hostId: "host_1", pin: String(repeating: "b", count: 64))
+        defer {
+            KeychainStore.deleteDirectTLSTrustPin(hostID: record.id)
+            KeychainStore.deleteDeviceToken(hostID: record.id, legacyAccount: "", deleteLegacy: false)
+        }
+        XCTAssertTrue(KeychainStore.saveDirectTLSTrustPin(pin, hostID: record.id))
+        XCTAssertTrue(KeychainStore.savePairing(deviceId: "device_1", deviceToken: "pdt" + "2.lifecycle-test", hostID: record.id))
+        model.installBootstrapRetryOutcomeForTesting(hostID: record.id, outcome: outcome, trust: trust)
+        model.bootstrapDirectValidationHandlerForTesting = {
+            await model.discardBootstrapDirect(hostID: record.id, attemptId: outcome.attemptId)
+            return (true, nil)
+        }
+
+        let result = await model.retryBootstrapDirect(record: record, attemptId: outcome.attemptId)
+        XCTAssertNil(result)
+        XCTAssertEqual(KeychainStore.loadDirectTLSTrustPin(hostID: record.id), pin)
+    }
+
     private func onlineStream() -> AsyncStream<RACPClientUpdate> {
         AsyncStream { continuation in
             continuation.yield(.state(.online))

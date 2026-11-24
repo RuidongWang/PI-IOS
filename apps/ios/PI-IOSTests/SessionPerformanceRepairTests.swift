@@ -7,6 +7,24 @@ import PIiOSNet
 
 @MainActor
 final class SessionPerformanceRepairTests: XCTestCase {
+    func testReopeningReadOnlySessionDoesNotReuseItsOldAttachment() async throws {
+        let session = SessionController()
+        var snapshot = RACPSessionView.empty
+        snapshot.sessionId = "native"
+        snapshot.summary = try JSONDecoder().decode(
+            RACPSessionSummary.self,
+            from: Data(#"{"id":"native","readOnlyReason":"append_unverified"}"#.utf8)
+        )
+        session.configureUITestSnapshots(["native": snapshot])
+        await session.attach(sessionId: "native")
+        XCTAssertEqual(session.sendAdmission, .blockedReadOnly)
+
+        snapshot.summary?.readOnlyReason = nil
+        session.configureUITestSnapshots(["native": snapshot])
+        await session.attach(sessionId: "native")
+        XCTAssertEqual(session.sendAdmission, .start)
+    }
+
     func testPrepareSameDestinationDoesNotInvalidateSelectionTwice() {
         let session = SessionController()
         session.prepareToOpen(sessionId: "a")

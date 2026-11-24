@@ -8,9 +8,24 @@ import XCTest
 /// installed package uses the production installer from apps/pi-adaptor/scripts.
 final class BootstrapScriptIntegrationTests: XCTestCase {
     private let pairingToken = "ppt2." + "integration-token"
+    private let attemptId = "boot_integration"
 
     func testInstallsImmutablePIAdaptorReleaseAndStartsNewUnit() throws {
         let environment = try makeEnvironment()
+        try writeExecutable(
+            #"""
+            #!/bin/sh
+            case "${3:-}" in
+              "$HOME"/.pi-adaptor/.bootstrap/attempts/*/state.json)
+                if grep -q '"step":"done","status":"ok"' "$2"; then
+                  [ "$2" = "$HOME/.pi-adaptor/.bootstrap/transaction.active" ] || exit 1
+                fi
+                ;;
+            esac
+            exec /bin/mv "$@"
+            """#,
+            to: environment.root.appendingPathComponent("fake-bin/mv")
+        )
         let legacyRoot = environment.home
             .appendingPathComponent(".pi-desktop/pi-host", isDirectory: true)
         try FileManager.default.createDirectory(at: legacyRoot, withIntermediateDirectories: true)
@@ -30,6 +45,7 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         let state = try decodeState(environment.stateURL)
         XCTAssertEqual(state.step, .done)
         XCTAssertEqual(state.status, .ok)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: environment.workDirectory.appendingPathComponent("transaction.active").path))
         XCTAssertEqual(try permissions(environment.stateURL), 0o600)
         XCTAssertEqual(try permissions(environment.workDirectory), 0o700)
 
@@ -62,12 +78,13 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
                 atPath: environment.home.appendingPathComponent(".fake-pi-adaptor-active").path
             )
         )
+        XCTAssertEqual(try serviceEnablement(environment), "enabled\n")
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: legacyRoot.appendingPathComponent("pi-host.js").path),
             "legacy data must remain isolated and untouched"
         )
 
-        let pairURL = environment.workDirectory.appendingPathComponent("pair.json")
+        let pairURL = environment.attemptDirectory.appendingPathComponent("pair.json")
         XCTAssertFalse(FileManager.default.fileExists(atPath: pairURL.path))
         for output in try persistedOutputs(environment) {
             XCTAssertFalse(output.contains(pairingToken), "pairing token must never be logged")
@@ -101,6 +118,40 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         XCTAssertTrue(unit.contains("PI_ADAPTOR_DIRECT_ENABLED=0"))
     }
 
+    func testScopedAttemptPublishesDirectTrustAndRollbackRestoresTLSIdentity() throws {
+        let environment = try makeEnvironment(
+            piAdaptorInitiallyActive: true, piAdaptorEnableState: "enabled-runtime", existingDirectIdentity: true
+        )
+        let previous = try installCurrentFixture("2.0.0", in: environment)
+        let direct = try BootstrapDirectConfiguration(directName: "new.example", directPort: 9443, loopbackPort: 43_871)
+        let process = try launch(script: generatedScript(environment, direct: direct), environment: environment)
+        defer { terminateIfNeeded(process) }
+
+        let trustFile = environment.attemptDirectory.appendingPathComponent("direct-trust.json")
+        let trust = try BootstrapDirectTrust.parse(data: waitForFile(trustFile, timeout: 10), expectedAttemptId: attemptId)
+        XCTAssertEqual(trust.hostId, "host_fake")
+        let tls = environment.installRoot.appendingPathComponent("tls")
+        let cert = tls.appendingPathComponent("direct-cert.pem")
+        let key = tls.appendingPathComponent("direct-key.pem")
+        XCTAssertEqual(try Data(contentsOf: cert), Data("new-cert".utf8))
+        XCTAssertEqual(try Data(contentsOf: key), Data("new-key".utf8))
+
+        try writeMarker("ok", to: environment.attemptDirectory.appendingPathComponent("pair.result"))
+        try waitForState(environment.stateURL, timeout: 10, matching: { $0.step == .verifyDevice })
+        XCTAssertEqual(try serviceEnablement(environment), "enabled\n")
+        try writeMarker("failed", to: environment.attemptDirectory.appendingPathComponent("verify.result"))
+        try waitForExit(process, timeout: 10)
+
+        let state = try decodeState(environment.stateURL)
+        XCTAssertEqual(state.failureCode, .verifyDeviceFailed)
+        XCTAssertEqual(state.error?.value(at: ["details", "rollback"])?.stringValue, "succeeded")
+        XCTAssertEqual(try serviceEnablement(environment), "enabled-runtime\n")
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: environment.installRoot.appendingPathComponent("current").path), previous)
+        XCTAssertEqual(try Data(contentsOf: cert), Data("old-cert".utf8))
+        XCTAssertEqual(try Data(contentsOf: key), Data("old-key".utf8))
+        XCTAssertEqual(try Data(contentsOf: tls.appendingPathComponent("direct-name")), Data("old.example\n".utf8))
+    }
+
     func testDownloadFailureResumesAndDoesNotSwitchCurrent() throws {
         let environment = try makeEnvironment(downloadMode: "fail-once")
         let first = try launch(
@@ -127,6 +178,117 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         let secondFailureOutput = try capturedFailure(environment)
         XCTAssertEqual(second.terminationStatus, 0, secondFailureOutput)
         XCTAssertEqual(try decodeState(environment.stateURL).step, .done)
+    }
+
+    func testDowngradeIsBlockedBeforeDownloadEvenForForceReinstall() throws {
+        let environment = try makeEnvironment(piAdaptorInitiallyActive: true)
+        let previous = try installCurrentFixture("2.0.10", in: environment)
+        let current = environment.installRoot.appendingPathComponent("current")
+        let process = try launch(script: generatedScript(environment, force: true), environment: environment)
+        defer { terminateIfNeeded(process) }
+        try waitForExit(process, timeout: 10)
+
+        XCTAssertNotEqual(process.terminationStatus, 0)
+        let state = try decodeState(environment.stateURL)
+        XCTAssertEqual(state.failureCode, .downgradeBlocked)
+        XCTAssertEqual(state.failureDetails?.actualVersion, "2.0.10")
+        XCTAssertEqual(state.failureDetails?.expectedVersion, "2.0.1")
+        XCTAssertEqual(try downloadCount(environment), 0)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: environment.workDirectory.appendingPathComponent(environment.artifactName + ".sha256").path
+        ))
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: current.path), previous)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: environment.home.appendingPathComponent(".fake-pi-adaptor-active").path))
+    }
+
+    func testDowngradeIsBlockedWhenTheActiveInvocationIsNewerThanCurrent() throws {
+        let environment = try makeEnvironment(piAdaptorInitiallyActive: true, runningVersion: "2.0.10")
+        let previous = try installCurrentFixture("2.0.0", in: environment)
+        let process = try launch(script: generatedScript(environment), environment: environment)
+        defer { terminateIfNeeded(process) }
+        try waitForExit(process, timeout: 10)
+
+        let state = try decodeState(environment.stateURL)
+        XCTAssertEqual(state.failureCode, .downgradeBlocked)
+        XCTAssertEqual(state.failureDetails?.actualVersion, "2.0.10")
+        XCTAssertEqual(try downloadCount(environment), 0)
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: environment.installRoot.appendingPathComponent("current").path), previous)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: environment.home.appendingPathComponent(".fake-pi-adaptor-active").path))
+    }
+
+    func testUnverifiableActiveInvocationStopsBeforeDownload() throws {
+        let environment = try makeEnvironment(piAdaptorInitiallyActive: true, runningVersion: nil)
+        let process = try launch(script: generatedScript(environment), environment: environment)
+        defer { terminateIfNeeded(process) }
+        try waitForExit(process, timeout: 10)
+
+        let state = try decodeState(environment.stateURL)
+        XCTAssertEqual(state.failureCode, .runningVersionUnknown)
+        XCTAssertEqual(try downloadCount(environment), 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: environment.home.appendingPathComponent(".fake-pi-adaptor-active").path))
+    }
+
+    func testRecoveryKeepsAnAttemptThatPublishedSuccessBeforeCleanup() throws {
+        let environment = try makeEnvironment(piAdaptorInitiallyActive: true)
+        let previous = try installCurrentFixture("2.0.10", in: environment)
+        let completed = environment.workDirectory.appendingPathComponent("attempts/boot_previous")
+        try FileManager.default.createDirectory(at: completed, withIntermediateDirectories: true)
+        try Data(#"{"version":1,"attemptId":"boot_previous","step":"done","status":"ok","error":null}"#.appending("\n").utf8)
+            .write(to: completed.appendingPathComponent("state.json"))
+        let activeTransaction = environment.workDirectory.appendingPathComponent("transaction.active")
+        try writeMarker("boot_previous", to: activeTransaction)
+
+        let process = try launch(script: generatedScript(environment), environment: environment)
+        defer { terminateIfNeeded(process) }
+        try waitForExit(process, timeout: 10)
+
+        XCTAssertEqual(try decodeState(environment.stateURL).failureCode, .downgradeBlocked)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: activeTransaction.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: environment.home.appendingPathComponent(".fake-pi-adaptor-active").path))
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: environment.installRoot.appendingPathComponent("current").path), previous)
+    }
+
+    func testSecondAttemptIsBusyAndCannotChangeTheFirstAttempt() throws {
+        let environment = try makeEnvironment()
+        func command(_ operation: String, id: String, input: URL? = nil) throws -> Int32 {
+            try runProcess(
+                "/bin/sh", arguments: ["-c", BootstrapRemoteCommand.scoped(operation, attemptId: id)],
+                environment: environment.processEnvironment, input: input
+            ).status
+        }
+        XCTAssertEqual(try command(BootstrapRemoteCommand.installScript, id: attemptId, input: generatedScript(environment)), 0)
+        addTeardownBlock {
+            let lock = environment.workDirectory.appendingPathComponent("active.lock")
+            guard FileManager.default.fileExists(atPath: lock.path) else { return }
+            _ = try command(BootstrapRemoteCommand.cancel, id: self.attemptId)
+            let deadline = Date().addingTimeInterval(10)
+            while FileManager.default.fileExists(atPath: lock.path) {
+                guard Date() < deadline else { throw IntegrationError.timeout("detached bootstrap exit") }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+        XCTAssertEqual(try command(BootstrapRemoteCommand.launch, id: attemptId), 0)
+        let pairURL = environment.attemptDirectory.appendingPathComponent("pair.json")
+        let firstPair = try waitForFile(pairURL, timeout: 10)
+        let logURL = environment.attemptDirectory.appendingPathComponent("bootstrap.log")
+        let firstLog = try Data(contentsOf: logURL)
+        let activePID = environment.workDirectory.appendingPathComponent("active.lock/pid")
+        let firstPID = try Data(contentsOf: activePID)
+
+        let secondId = "boot_other"
+        XCTAssertEqual(try command(BootstrapRemoteCommand.installScript, id: secondId, input: generatedScript(environment, attemptId: secondId)), 0)
+        XCTAssertEqual(try command(BootstrapRemoteCommand.cancel, id: secondId), 0)
+        XCTAssertEqual(try command(BootstrapRemoteCommand.launch, id: secondId), 75)
+        XCTAssertEqual(try Data(contentsOf: pairURL), firstPair)
+        XCTAssertTrue(try Data(contentsOf: logURL).starts(with: firstLog))
+        XCTAssertEqual(try Data(contentsOf: activePID), firstPID)
+        XCTAssertEqual(try decodeState(environment.stateURL).attemptId, attemptId)
+
+        XCTAssertEqual(try command(BootstrapRemoteCommand.writePairingOK, id: attemptId), 0)
+        try waitForState(environment.stateURL, timeout: 10, matching: { $0.step == .verifyDevice })
+        XCTAssertEqual(try command(BootstrapRemoteCommand.writeVerificationOK, id: attemptId), 0)
+        try waitForState(environment.stateURL, timeout: 10, matching: { $0.status == .ok })
+        XCTAssertEqual(try downloadCount(environment), 1)
     }
 
     func testChecksumMismatchLeavesNoCurrentOrStage() throws {
@@ -226,6 +388,7 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
             state.error?.value(at: ["details", "reason"])?.stringValue,
             "legacy-pairing-token"
         )
+        XCTAssertEqual(try serviceEnablement(environment), "disabled\n")
         XCTAssertFalse(
             FileManager.default.fileExists(
                 atPath: environment.installRoot.appendingPathComponent("current").path
@@ -486,6 +649,52 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
     }
 
+    func testStandaloneInstallerRestoresCurrentWhenReceiptCannotBePublished() throws {
+        let environment = try makeEnvironment()
+        let previous = try installCurrentFixture("2.0.0", in: environment)
+        let receipt = environment.workDirectory.appendingPathComponent("install-receipt.json", isDirectory: true)
+        try FileManager.default.createDirectory(at: receipt, withIntermediateDirectories: true)
+        let bundle = environment.root.appendingPathComponent("source/\(environment.release.bundleDirectoryName)")
+        let manifestDigest = sha256(try Data(contentsOf: bundle.appendingPathComponent("SHA256SUMS")))
+        let install = try runProcess(
+            "/bin/bash",
+            arguments: [
+                repositoryRoot().appendingPathComponent("apps/pi-adaptor/scripts/install.sh").path,
+                "--install", "--bundle", bundle.path, "--home", environment.installRoot.path,
+                "--version", "2.0.1", "--target", "linux-arm64", "--asset-sha256", environment.assetSha256,
+                "--manifest-sha256", manifestDigest,
+            ],
+            environment: environment.processEnvironment
+        )
+        XCTAssertEqual(install.status, 6, install.stderr)
+        XCTAssertTrue(install.stderr.contains("could not publish receipt"))
+        let current = environment.installRoot.appendingPathComponent("current")
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: current.path), previous)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: receipt.path).isEmpty)
+    }
+
+    func testStandaloneRollbackCannotChangeCurrentWhileBootstrapHoldsTheLock() throws {
+        let environment = try makeEnvironment()
+        let process = try launch(script: generatedScript(environment), environment: environment)
+        defer { terminateIfNeeded(process) }
+        _ = try waitForFile(environment.attemptDirectory.appendingPathComponent("pair.json"), timeout: 15)
+        let rollback = try runProcess(
+            "/bin/bash",
+            arguments: [
+                repositoryRoot().appendingPathComponent("apps/pi-adaptor/scripts/install.sh").path,
+                "--rollback", "--home", environment.installRoot.path,
+                "--previous-current-target", "none", "--failed-install-dir", "none",
+            ],
+            environment: environment.processEnvironment
+        )
+        XCTAssertEqual(rollback.status, 5, rollback.stderr)
+        XCTAssertTrue(rollback.stderr.contains("another installation owns the install lock"))
+        let current = environment.installRoot.appendingPathComponent("current")
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: current.path), "releases/2.0.1-\(environment.assetSha256)")
+        try completePairingHandshake(environment: environment, process: process)
+        XCTAssertEqual(process.terminationStatus, 0)
+    }
+
     // MARK: - Isolated environment
 
     private struct Environment {
@@ -493,6 +702,7 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         let home: URL
         let installRoot: URL
         let workDirectory: URL
+        let attemptDirectory: URL
         let stateURL: URL
         let stdoutURL: URL
         let stderrURL: URL
@@ -511,6 +721,8 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         failPiAdaptorStop: Bool = false,
         failLegacyRestore: Bool = false,
         piAdaptorInitiallyActive: Bool = false,
+        piAdaptorEnableState: String = "disabled",
+        runningVersion: String? = "2.0.0",
         opensslFails: Bool = false,
         existingDirectIdentity: Bool = false
     ) throws -> Environment {
@@ -520,6 +732,7 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         let fakeBin = root.appendingPathComponent("fake-bin", isDirectory: true)
         let source = root.appendingPathComponent("source", isDirectory: true)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        addTeardownBlock { try FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
 
@@ -582,6 +795,25 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
             ? "ppt1." + "legacy-token"
             : pairingToken
         let realNode = try XCTUnwrap(findExecutable("node"))
+        let python = try XCTUnwrap(findExecutable("python3"))
+        try writeExecutable(
+            #"""
+            #!/bin/sh
+            case "$*" in
+              '-n -E 75 9'|'-n 9') ;;
+              *) exit 1 ;;
+            esac
+            exec "$REAL_PYTHON" -c '
+            import fcntl, sys
+            try:
+                fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                sys.exit(75)
+            '
+            """#,
+            to: fakeBin.appendingPathComponent("flock")
+        )
+        try writeExecutable("#!/bin/sh\nexec \"$@\"\n", to: fakeBin.appendingPathComponent("setsid"))
         try writeExecutable(
             #"""
             #!/bin/sh
@@ -591,6 +823,17 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
             esac
             case "$*" in
               *dist/main.js*)
+                if [ "${PI_ADAPTOR_DIRECT_ENABLED:-0}" = 1 ]; then
+                  "$REAL_NODE" -e '
+                    const fs = require("node:fs");
+                    const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+                    if (state.status === "running") {
+                      const trust = { schemaVersion: 1, attemptId: state.attemptId, hostId: "host_fake",
+                        certificateSha256: "a".repeat(64), notBefore: "2026-01-01T00:00:00Z", notAfter: "2099-01-01T00:00:00Z" };
+                      console.log("PI_HOST_DIRECT_TRUST " + JSON.stringify(trust));
+                    }
+                  ' "$PI_ADAPTOR_HOME/.bootstrap/state.json"
+                fi
                 printf '%s\n' 'PI_HOST_READY {"hostId":"host_fake","host":"127.0.0.1","port":43871,"version":"2.0.1"}'
                 printf '%s\n' 'PI_HOST_PAIRING_TOKEN {"token":"\#(requestedToken)","expiresAt":1893456000000}'
                 trap 'exit 0' HUP INT TERM
@@ -648,7 +891,25 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         )
 
         try writeExecutable(
-            "#!/bin/sh\nif [ \"${FAKE_OPENSSL_FAIL:-0}\" = 1 ]; then exit 1; fi\nexec /usr/bin/openssl \"$@\"\n",
+            #"""
+            #!/bin/sh
+            set -eu
+            [ "${FAKE_OPENSSL_FAIL:-0}" != 1 ] || exit 1
+            case "$1" in
+              req)
+                while [ "$#" -gt 0 ]; do
+                  case "$1" in
+                    -keyout) shift; printf '%s' new-key >"$1" ;;
+                    -out) shift; printf '%s' new-cert >"$1" ;;
+                  esac
+                  shift
+                done
+                ;;
+              pkey) exit 0 ;;
+              x509) printf '%s\n' 'CA:FALSE' ;;
+              *) exit 1 ;;
+            esac
+            """#,
             to: fakeBin.appendingPathComponent("openssl")
         )
 
@@ -657,6 +918,7 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
             #!/bin/sh
             set -eu
             active="$HOME/.fake-pi-adaptor-active"
+            enabled="$HOME/.fake-pi-adaptor-enable-state"
             legacy_active="$HOME/.fake-legacy-active"
             legacy_enabled="$HOME/.fake-legacy-enabled"
             legacy_enable_state="$HOME/.fake-legacy-enable-state"
@@ -670,7 +932,21 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
                 exit 0
                 ;;
               "--user is-active --quiet pi-adaptor.service") [ -f "$active" ] ;;
-              "--user start pi-adaptor.service") : >"$active"; exit 0 ;;
+              "--user is-active pi-adaptor.service")
+                if [ -f "$active" ]; then printf '%s\n' active; else printf '%s\n' inactive; exit 3; fi
+                ;;
+              "--user show pi-adaptor.service --property=MainPID --property=InvocationID")
+                printf '%s\n' 'MainPID=1234' 'InvocationID=0123456789abcdef0123456789abcdef'
+                ;;
+              "--user is-enabled pi-adaptor.service")
+                state=$(cat "$enabled")
+                printf '%s\n' "$state"
+                [ "$state" != disabled ]
+                ;;
+              "--user enable pi-adaptor.service") printf '%s\n' enabled >"$enabled" ;;
+              "--user enable --runtime pi-adaptor.service") printf '%s\n' enabled-runtime >"$enabled" ;;
+              "--user disable pi-adaptor.service") printf '%s\n' disabled >"$enabled" ;;
+              "--user start pi-adaptor.service") : >"$active" ;;
               "--user stop pi-host.service") rm -f "$legacy_active"; exit 0 ;;
               "--user disable pi-host.service")
                 rm -f "$legacy_enabled"
@@ -730,6 +1006,16 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
             """#,
             to: fakeBin.appendingPathComponent("systemctl")
         )
+        try Data("\(piAdaptorEnableState)\n".utf8).write(to: home.appendingPathComponent(".fake-pi-adaptor-enable-state"))
+        try writeExecutable(
+            #"""
+            #!/bin/sh
+            [ "$*" = "--user-unit=pi-adaptor.service --boot --no-pager --output=cat --grep=^PI_HOST_READY  --lines=1 _PID=1234 _SYSTEMD_INVOCATION_ID=0123456789abcdef0123456789abcdef" ] || exit 1
+            [ -n "${FAKE_RUNNING_VERSION:-}" ] || exit 1
+            printf 'PI_HOST_READY {"version":"%s"}\n' "$FAKE_RUNNING_VERSION"
+            """#,
+            to: fakeBin.appendingPathComponent("journalctl")
+        )
         if legacyConflict {
             try Data().write(to: home.appendingPathComponent(".fake-legacy-active"))
             if legacyEnableState == "enabled" {
@@ -743,7 +1029,14 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
             try Data().write(to: home.appendingPathComponent(".fake-pi-adaptor-active"))
         }
         try writeExecutable(
-            "#!/bin/sh\nexit 0\n",
+            """
+            #!/bin/sh
+            case "$1" in
+              show-user) printf '%s\\n' '\(piAdaptorInitiallyActive ? "yes" : "no")' ;;
+              enable-linger) [ '\(piAdaptorInitiallyActive ? "1" : "0")' = 0 ] ;;
+              *) exit 1 ;;
+            esac
+            """,
             to: fakeBin.appendingPathComponent("loginctl")
         )
 
@@ -756,7 +1049,9 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         processEnvironment["FAKE_DOWNLOAD_MODE"] = downloadMode
         processEnvironment["FAKE_DOWNLOAD_COUNT"] = downloadCount.path
         processEnvironment["REAL_NODE"] = realNode.path
+        processEnvironment["REAL_PYTHON"] = python.path
         processEnvironment["FAKE_OPENSSL_FAIL"] = opensslFails ? "1" : "0"
+        processEnvironment["FAKE_RUNNING_VERSION"] = runningVersion
 
         let installRoot = home.appendingPathComponent(".pi-adaptor", isDirectory: true)
         if existingDirectIdentity {
@@ -767,12 +1062,14 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
             try Data("old.example\n".utf8).write(to: tls.appendingPathComponent("direct-name"))
         }
         let workDirectory = installRoot.appendingPathComponent(".bootstrap", isDirectory: true)
+        let attemptDirectory = workDirectory.appendingPathComponent("attempts/\(attemptId)", isDirectory: true)
         return Environment(
             root: root,
             home: home,
             installRoot: installRoot,
             workDirectory: workDirectory,
-            stateURL: workDirectory.appendingPathComponent("state.json"),
+            attemptDirectory: attemptDirectory,
+            stateURL: attemptDirectory.appendingPathComponent("state.json"),
             stdoutURL: root.appendingPathComponent("script.stdout"),
             stderrURL: root.appendingPathComponent("script.stderr"),
             release: release,
@@ -782,15 +1079,26 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         )
     }
 
+    private func installCurrentFixture(_ version: String, in environment: Environment) throws -> String {
+        let previous = "releases/\(version)-" + String(repeating: "a", count: 64)
+        let directory = environment.installRoot.appendingPathComponent(previous)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(#"{"version":"\#(version)"}"#.utf8).write(to: directory.appendingPathComponent("package.json"))
+        let current = environment.installRoot.appendingPathComponent("current")
+        try FileManager.default.createSymbolicLink(atPath: current.path, withDestinationPath: previous)
+        return previous
+    }
+
     private func generatedScript(
         _ environment: Environment,
         force: Bool = false,
         allowLegacyPPT1: Bool = false,
-        direct: BootstrapDirectConfiguration? = nil
+        direct: BootstrapDirectConfiguration? = nil,
+        attemptId: String? = nil
     ) throws -> URL {
         let configuration = try BootstrapScriptConfiguration(
             release: environment.release,
-            attemptId: "boot_integration_\(UUID().uuidString)",
+            attemptId: attemptId ?? self.attemptId,
             hostArchitecture: "arm64",
             port: 43_871,
             readyTimeoutSeconds: 15,
@@ -808,7 +1116,9 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
 
     private func launch(script: URL, environment: Environment) throws -> Process {
         let stdout = try FileHandle(forWritingTo: createEmptyFile(environment.stdoutURL))
+        defer { try? stdout.close() }
         let stderr = try FileHandle(forWritingTo: createEmptyFile(environment.stderrURL))
+        defer { try? stderr.close() }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = [script.path]
@@ -816,7 +1126,12 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         process.standardOutput = stdout
         process.standardError = stderr
         try process.run()
+        addTeardownBlock { self.terminateIfNeeded(process) }
         return process
+    }
+
+    private func serviceEnablement(_ environment: Environment) throws -> String {
+        try String(contentsOf: environment.home.appendingPathComponent(".fake-pi-adaptor-enable-state"), encoding: .utf8)
     }
 
     private func createEmptyFile(_ url: URL) throws -> URL {
@@ -828,23 +1143,23 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
         environment: Environment,
         process: Process
     ) throws {
-        let pairURL = environment.workDirectory.appendingPathComponent("pair.json")
-        let pairData = try waitForFile(pairURL, timeout: 10)
+        let pairURL = environment.attemptDirectory.appendingPathComponent("pair.json")
+        let pairData = try waitForFile(pairURL, timeout: 30)
         let material = try JSONDecoder().decode(BootstrapPairingMaterial.self, from: pairData)
         XCTAssertEqual(material.token, pairingToken)
         XCTAssertEqual(material.expiresAt, 1_893_456_000_000)
         XCTAssertEqual(material.host, "127.0.0.1")
         XCTAssertEqual(material.port, 43_871)
         XCTAssertEqual(try permissions(pairURL), 0o600)
-        try writeMarker("ok", to: environment.workDirectory.appendingPathComponent("pair.result"))
+        try writeMarker("ok", to: environment.attemptDirectory.appendingPathComponent("pair.result"))
 
         try waitForState(
             environment.stateURL,
-            timeout: 10,
+            timeout: 30,
             matching: { $0.step == .verifyDevice }
         )
-        try writeMarker("ok", to: environment.workDirectory.appendingPathComponent("verify.result"))
-        try waitForExit(process, timeout: 10)
+        try writeMarker("ok", to: environment.attemptDirectory.appendingPathComponent("verify.result"))
+        try waitForExit(process, timeout: 30)
     }
 
     private func waitForFile(_ url: URL, timeout: TimeInterval) throws -> Data {
@@ -911,7 +1226,7 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
                 return ""
             }
         }
-        let pairErrorURL = environment.workDirectory.appendingPathComponent("pair.err")
+        let pairErrorURL = environment.attemptDirectory.appendingPathComponent("pair.err")
         var pairError = ""
         do {
             pairError = try String(contentsOf: pairErrorURL, encoding: .utf8)
@@ -1000,12 +1315,14 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
     private func runProcess(
         _ executable: String,
         arguments: [String],
-        environment: [String: String]
+        environment: [String: String],
+        input: URL? = nil
     ) throws -> (status: Int32, stderr: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.environment = environment
+        if let input { process.standardInput = try FileHandle(forReadingFrom: input) }
         let error = Pipe()
         process.standardError = error
         process.standardOutput = Pipe()

@@ -990,18 +990,24 @@ public actor RACPClient {
     }
 
     private func authenticatedDeviceIdentity() async throws -> RACPDeviceIdentity {
+        let hostId = try await authenticatedHostId()
+        guard let serverInfo else { throw RACPConnectionError(category: .hostIdentity) }
+        return RACPDeviceIdentity(serverInfo: serverInfo, adaptorHostId: hostId)
+    }
+
+    /// Returns the Host identity proven by the authenticated Ping response.
+    public func authenticatedHostId(timeout: TimeInterval = 20) async throws -> String {
         let result: RACPAuthenticatedPingResult = try await request(
             .ping,
             params: RACPEmptyParams(),
-            timeout: 20
+            timeout: timeout
         )
-        guard let serverInfo,
-              result.ok == true,
+        guard result.ok == true,
               result.pong == true,
               let hostId = result.hostId,
               !hostId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { throw RACPConnectionError(category: .hostIdentity) }
-        return RACPDeviceIdentity(serverInfo: serverInfo, adaptorHostId: hostId)
+        return hostId
     }
 
     // MARK: 会话
@@ -1495,8 +1501,10 @@ public actor RACPClient {
     }
 
     public func getSession(id: String) async throws -> RACPSessionSummary {
+        let generation = sessionAttachGeneration
         let result: RACPSessionGetResult = try await request(.sessionGet, params: RACPSessionGetParams(sessionId: id))
-        if self.sessionId == id {
+        if self.sessionId == id, generation == sessionAttachGeneration,
+           result.session.revision.map({ $0 >= (attachedSession?.revision ?? 0) }) ?? true {
             attachedSession = result.session
             if result.session.revision.map({ $0 >= viewModel.revision }) ?? true {
                 viewModel.recordActiveTurn(id: result.session.activeTurnId)
@@ -1612,8 +1620,13 @@ public actor RACPClient {
         idempotencyKey: String,
         apiKey: String? = nil,
         providerBinding: RACPProviderKeyBinding? = nil,
+        isRetry: Bool = false,
         timeout: TimeInterval = 30
     ) async throws -> RACPTurnStartResult {
+        let attachGeneration = sessionAttachGeneration
+        if self.sessionId == sessionId, let reason = attachedSession?.readOnlyReason {
+            throw RACPClientError.server(code: .sessionReadOnly, message: reason)
+        }
         let params = RACPTurnStartParams(
             sessionId: sessionId,
             admission: admission,
@@ -1622,14 +1635,47 @@ public actor RACPClient {
             apiKey: apiKey,
             providerBinding: providerBinding
         )
-        let result: RACPTurnStartResult = try await request(.turnStart, params: params, timeout: timeout)
+        var result: RACPTurnStartResult
+        do {
+            result = try await request(.turnStart, params: params, timeout: timeout)
+        } catch let error as RACPClientError {
+            if case .server(.sessionReadOnly, let reason) = error,
+               self.sessionId == sessionId, sessionAttachGeneration == attachGeneration {
+                attachedSession?.readOnlyReason = reason ?? RACPErrorCode.sessionReadOnly.rawValue
+                await emit(.sessionChanged)
+            }
+            throw error
+        }
+        if isRetry, result.accepted, serverInfo?.serverName != "pi-host" {
+            // A replayed admission receipt can predate a restart or a terminal event.
+            do {
+                let current: RACPTurnResult = try await request(
+                    .turnGet, params: RACPTurnByIDParams(turnId: result.turn.id), timeout: timeout
+                )
+                guard current.turn.id == result.turn.id,
+                      current.turn.sessionId == nil || current.turn.sessionId == sessionId,
+                      current.turn.status != nil else {
+                    throw RACPClientError.malformedFrame("轮次状态与发送回执不一致")
+                }
+                result.turn = current.turn
+            } catch let error as RACPClientError {
+                switch error {
+                case .server(.methodNotFound, _), .server(.unknown("-32601"), _):
+                    break // Legacy servers may implement turn/start without turn/get.
+                default:
+                    throw error
+                }
+            }
+        }
+        guard self.sessionId == sessionId, sessionAttachGeneration == attachGeneration else { return result }
         let status = result.turn.status?.lowercased()
         switch status {
         case "queued":
             viewModel.recordQueuedTurn(id: result.turn.id, text: text)
         case "running", "waiting_approval", "waiting_input", "in_progress":
+            viewModel.removeQueuedTurn(id: result.turn.id)
             viewModel.recordActiveTurn(id: result.turn.id)
-        case "completed", "interrupted", "failed", "canceled", "cancelled":
+        case "completed", "interrupted", "failed", "canceled", "cancelled", "uncertain":
             viewModel.removeQueuedTurn(id: result.turn.id)
             if viewModel.activeTurnId == result.turn.id {
                 viewModel.recordActiveTurn(id: nil)
@@ -2649,6 +2695,17 @@ public actor RACPClient {
             guard hostLease != nil || isHostSubscriptionPending else { return }
             if let observation = hostSubscription.observe(event),
                observation.requiresCatalogRefresh {
+                if event.kind == "session.changed",
+                   let attachedSession,
+                   let changed = event.payload.value(at: ["payload", "session"]),
+                   changed.value(at: ["id"])?.stringValue == attachedSession.id,
+                   let revision = changed.value(at: ["revision"])?.intValue,
+                   revision >= (attachedSession.revision ?? 0),
+                   let reason = changed.value(at: ["readOnlyReason"]) {
+                    self.attachedSession?.readOnlyReason = reason.stringValue
+                    self.attachedSession?.revision = revision
+                    await emit(.sessionChanged)
+                }
                 await emit(.hostChanged(observation.change))
             }
             if let hostLease, let durableSequence = event.durableSequence {

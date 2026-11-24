@@ -11,10 +11,15 @@ public struct SkillInstallRequest: Equatable, Sendable {
     public static let gitSourceType = "git"
     public static let directorySourceType = "directory"
 
+    public enum ReferenceType: String, Sendable {
+        case branch, tag, commit
+    }
+
     public var sourceType: String
     public var location: String
     public var subdir: String
     public var reference: String
+    public var referenceType: ReferenceType?
     public var replace: Bool
 
     public init(
@@ -22,6 +27,7 @@ public struct SkillInstallRequest: Equatable, Sendable {
         location: String,
         subdir: String = "",
         reference: String = "",
+        referenceType: ReferenceType? = nil,
         replace: Bool = false
     ) {
         self.sourceType = sourceType
@@ -29,21 +35,26 @@ public struct SkillInstallRequest: Equatable, Sendable {
         self.location = Self.trimmed(location)
         self.subdir = Self.trimmed(subdir)
         self.reference = Self.trimmed(reference)
+        self.referenceType = referenceType
         self.replace = replace
     }
 
-    /// 来源是否足够发起安装（只做「非空」这一条前端能确定的判断）。
-    public var isValid: Bool { !location.isEmpty }
+    public var isValid: Bool {
+        !location.isEmpty && (!isGit || referenceType == nil || !reference.isEmpty)
+    }
 
     public var isGit: Bool { sourceType == Self.gitSourceType }
 
     /// 与 PI-adaptor 的 `source` 载荷一致：`git` 用 `url`，目录用 `path`；
-    /// `subdir` / `ref` 只在非空时出现（空字符串不能当成「指定了空子目录」）。
+    /// `subdir` / `ref` 只在非空时出现，`refType` 随指定的 Git 引用发送。
     public func sourcePayload() -> JSONValue {
         var payload: [String: JSONValue] = ["type": .string(sourceType)]
         if isGit {
             payload["url"] = .string(location)
-            if !reference.isEmpty { payload["ref"] = .string(reference) }
+            if !reference.isEmpty {
+                payload["ref"] = .string(reference)
+                if let referenceType { payload["refType"] = .string(referenceType.rawValue) }
+            }
         } else {
             payload["path"] = .string(location)
         }

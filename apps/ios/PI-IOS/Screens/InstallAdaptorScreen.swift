@@ -125,6 +125,7 @@ struct InstallAdaptorScreen: View {
         .piPageBackground()
         .piDetailNavBar("安装 PI-adaptor")
         .onAppear(perform: seedPort)
+        .onDisappear { coordinator.leavePage(hostID: hostID, connection: connection) }
         // 指纹核对浮层统一由 AppRootView 呈现（DEF-R4-004）。
         .sheet(isPresented: $showingLog) {
             InstallAdaptorLogSheet(coordinator: coordinator) {
@@ -290,7 +291,7 @@ struct InstallAdaptorScreen: View {
     private func receiptSourceName(_ receipt: AdaptorInstallReceipt) -> String {
         switch receipt.releaseSource {
         case .latest:
-            return "GitHub 最新发布"
+            return "GitHub 最新兼容发布"
         case .fallback:
             return "内置版本"
         case nil:
@@ -629,7 +630,7 @@ private struct InstallAdaptorLogSheet: View {
 }
 
 @MainActor
-private final class InstallAdaptorCoordinator: ObservableObject {
+final class InstallAdaptorCoordinator: ObservableObject {
     enum Phase: Equatable {
         case idle
         case running
@@ -723,7 +724,8 @@ private final class InstallAdaptorCoordinator: ObservableObject {
         logError = nil
     }
 
-    private func requestDirectAuthorization(_ trust: BootstrapDirectTrust) async -> Bool {
+    func requestDirectAuthorization(_ trust: BootstrapDirectTrust) async -> Bool {
+        guard !Task.isCancelled else { return false }
         pendingDirectTrust = trust
         return await withCheckedContinuation { continuation in
             trustContinuation = continuation
@@ -740,6 +742,24 @@ private final class InstallAdaptorCoordinator: ObservableObject {
         pendingDirectTrust = nil
         trustContinuation?.resume(returning: false)
         trustContinuation = nil
+    }
+
+    func cancel() {
+        if let runTask {
+            runID = UUID()
+            self.runTask = nil
+            phase = .idle
+            runTask.cancel()
+        }
+        rejectPendingDirectTrust()
+    }
+
+    func leavePage(hostID: UUID, connection: ConnectionModel) {
+        cancel()
+        guard let directAttemptId else { return }
+        self.directAttemptId = nil
+        phase = .idle
+        Task { await connection.discardBootstrapDirect(hostID: hostID, attemptId: directAttemptId) }
     }
 
     func start(
@@ -771,6 +791,9 @@ private final class InstallAdaptorCoordinator: ObservableObject {
 
         runTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                if self.runID == generation { self.runTask = nil }
+            }
             if let previousDirectAttempt {
                 await connection.completeInstallSSHOnly(
                     hostID: host.id,
@@ -778,6 +801,7 @@ private final class InstallAdaptorCoordinator: ObservableObject {
                 )
             }
             do {
+                try Task.checkCancellation()
                 if let sudoCredential {
                     guard !sudoCredential.isEmpty else {
                         throw AdaptorInstallError.emptySudoPassword
@@ -788,6 +812,7 @@ private final class InstallAdaptorCoordinator: ObservableObject {
                         sudoPassword: sudoCredential
                     )
                     guard self.runID == generation else { return }
+                    try Task.checkCancellation()
                 }
                 let outcome = try await connection.installAdaptor(
                     request: request,
@@ -809,11 +834,12 @@ private final class InstallAdaptorCoordinator: ObservableObject {
                         }
                     },
                     eventHandler: { event in
+                        guard !Task.isCancelled else { return }
                         await self.receive(event)
                     }
                 )
                 guard self.runID == generation else { return }
-                self.finish(outcome: outcome, host: host, model: model, connection: connection)
+                self.finish(outcome: outcome, host: host, model: model)
             } catch is CancellationError {
                 guard self.runID == generation else { return }
                 self.phase = .failed
@@ -841,9 +867,6 @@ private final class InstallAdaptorCoordinator: ObservableObject {
                 } else {
                     self.failureDetail = ConnectionErrorText.describe(error)
                 }
-            }
-            if self.runID == generation {
-                self.runTask = nil
             }
         }
     }
@@ -901,8 +924,7 @@ private final class InstallAdaptorCoordinator: ObservableObject {
     private func finish(
         outcome: AdaptorInstallRunOutcome,
         host: HostRecord,
-        model: AppModel,
-        connection: ConnectionModel
+        model: AppModel
     ) {
         switch outcome.result {
         case .succeeded(let success):
@@ -938,7 +960,7 @@ private final class InstallAdaptorCoordinator: ObservableObject {
             failureCode = nil
             failureDetail = nil
             failureCount = 0
-            connectAfterInstall(host: host, model: model, connection: connection)
+            connectAfterInstall(host: host, model: model)
         case .failed(let failure):
             state = failure.state
             phase = .failed
@@ -948,7 +970,7 @@ private final class InstallAdaptorCoordinator: ObservableObject {
             if let source = outcome.releaseSource,
                source.isFallback,
                let reason = source.fallbackReason {
-                let suffix = "本次使用内置版本 \(outcome.releaseVersion)。"
+                let suffix = "本次选择的内置版本为 \(outcome.releaseVersion)。"
                 failureDetail = [meta, suffix].compactMap { $0 }.joined(separator: "\n")
                 releaseNotice = reason
             } else {
@@ -971,11 +993,12 @@ private final class InstallAdaptorCoordinator: ObservableObject {
     ) async {
         guard let directAttemptId else { return }
         await connection.completeInstallSSHOnly(hostID: host.id, attemptId: directAttemptId)
+        guard self.directAttemptId == directAttemptId else { return }
         phase = .success
         activity = "已明确选择仅使用 SSH。"
         postInstallWarning = directError
         self.directAttemptId = nil
-        connectAfterInstall(host: host, model: model, connection: connection)
+        connectAfterInstall(host: host, model: model)
     }
 
     func retryDirectOnly(
@@ -986,10 +1009,12 @@ private final class InstallAdaptorCoordinator: ObservableObject {
         guard let directAttemptId else { return }
         phase = .running
         activity = "仅重试 Direct 首验，不重新配对。"
-        guard let outcome = await connection.retryBootstrapDirect(
+        let result = await connection.retryBootstrapDirect(
             record: host,
             attemptId: directAttemptId
-        ) else {
+        )
+        guard self.directAttemptId == directAttemptId else { return }
+        guard let outcome = result else {
             phase = .directFailed
             directError = "没有可重试的直连首验，重新开始安装。"
             activity = "仅重试 Direct 首验，不重新配对。"
@@ -1001,7 +1026,7 @@ private final class InstallAdaptorCoordinator: ObservableObject {
             postInstallWarning = nil
             activity = "直连首验通过。"
             self.directAttemptId = nil
-            connectAfterInstall(host: host, model: model, connection: connection)
+            connectAfterInstall(host: host, model: model)
         } else {
             phase = .directFailed
             self.directAttemptId = outcome.attemptId
@@ -1015,18 +1040,17 @@ private final class InstallAdaptorCoordinator: ObservableObject {
     ///
     /// 只对「本来就是当前服务器」或「还没有当前服务器」的情况自动连：给另一台
     /// 服务器装 PI-adaptor 时不能悄悄切走用户正在用的连接。
-    private func connectAfterInstall(
-        host: HostRecord,
-        model: AppModel,
-        connection: ConnectionModel
-    ) {
-        let isCurrent = model.currentHost?.id == host.id
-        guard isCurrent || model.currentHost == nil else { return }
-        guard !(isCurrent && connection.state.isOnline) else { return }
+    private func connectAfterInstall(host: HostRecord, model: AppModel) {
+        guard model.currentHost?.id == host.id || model.currentHost == nil else { return }
         Task { await model.setCurrentHost(id: host.id) }
     }
 
     private func failureMeta(_ failure: BootstrapRunFailure) -> String? {
+        if failure.code == .downgradeBlocked,
+           let details = failure.state.failureDetails,
+           let current = details.actualVersion, let target = details.expectedVersion {
+            return "服务器当前为 PI-adaptor \(current)，本次目标为 \(target)。为避免降级，已停止安装。"
+        }
         var details: [String] = []
         if failure.callbackFailure == .pairing {
             details.append("配对失败。重试即可。")

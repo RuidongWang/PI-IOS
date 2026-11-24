@@ -13,6 +13,7 @@ struct SkillsScreen: View {
     @State private var sourceValue = ""
     @State private var subdir = ""
     @State private var ref = ""
+    @State private var refType: SkillInstallRequest.ReferenceType?
     @State private var replace = false
     @State private var pendingDelete: RACPV2Skill?
     /// 安装阶段（U08）：区分「未受理 / 正在安装 / 已安装但列表没刷新 / 安装失败」。
@@ -220,8 +221,18 @@ struct SkillsScreen: View {
             }
             if sourceType == "git" {
                 PIFormRow {
-                    PIFormField(label: "分支或版本") {
-                        TextField("main", text: $ref)
+                    Picker("Git 引用类型", selection: $refType) {
+                        Text("默认 / 自动").tag(nil as SkillInstallRequest.ReferenceType?)
+                        Text("分支").tag(Optional(SkillInstallRequest.ReferenceType.branch))
+                        Text("标签").tag(Optional(SkillInstallRequest.ReferenceType.tag))
+                        Text("提交").tag(Optional(SkillInstallRequest.ReferenceType.commit))
+                    }
+                    .disabled(locked)
+                    .accessibilityIdentifier("skills.refType")
+                }
+                PIFormRow {
+                    PIFormField(label: "Git 引用") {
+                        TextField(refType == .commit ? "完整提交哈希" : "main", text: $ref)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .disabled(locked)
@@ -278,6 +289,7 @@ struct SkillsScreen: View {
             location: sourceValue,
             subdir: subdir,
             reference: ref,
+            referenceType: refType,
             replace: replace
         )
     }
@@ -369,6 +381,7 @@ struct SkillsScreen: View {
         sourceValue = ""
         subdir = ""
         ref = ""
+        refType = nil
     }
 
     private func delete(_ skill: RACPV2Skill) async {

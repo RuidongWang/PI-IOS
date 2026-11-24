@@ -55,6 +55,23 @@ final class SkillInstallPhaseTests: XCTestCase {
         XCTAssertFalse(SkillInstallRequest(sourceType: "git", location: "   ").isValid)
     }
 
+    func testPinnedCommitRequestCarriesTheReferenceType() {
+        let commit = String(repeating: "0123456789", count: 4)
+        let request = SkillInstallRequest(
+            sourceType: SkillInstallRequest.gitSourceType,
+            location: "https://github.com/example/skills.git",
+            reference: " \(commit) ",
+            referenceType: .commit
+        )
+        XCTAssertTrue(request.isValid)
+        XCTAssertEqual(request.sourcePayload().value(at: ["ref"])?.stringValue, commit)
+        XCTAssertEqual(request.sourcePayload().value(at: ["refType"])?.stringValue, "commit")
+
+        let missingCommit = SkillInstallRequest(sourceType: "git", location: request.location, referenceType: .commit)
+        XCTAssertFalse(missingCommit.isValid)
+        XCTAssertNil(missingCommit.sourcePayload().value(at: ["refType"]))
+    }
+
     // MARK: - 状态机
 
     func testBeginFreezesRequestAndShowsInstallingTitle() {

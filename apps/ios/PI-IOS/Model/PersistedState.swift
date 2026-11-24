@@ -250,4 +250,20 @@ struct PersistedState: Codable, Equatable {
         let upper = 5000
         return min(max(value, lower), upper)
     }
+
+    mutating func removeHostDerivedData(_ id: UUID, wasCurrent: Bool) {
+        let key = id.uuidString
+        modelProviders.removeAll { $0.hostID == id }
+        projectBindings.removeAll { $0.hostID == id }
+        sessionBindings.removeAll { $0.hostID == id }
+        lastProjectByHost.removeValue(forKey: key)
+        lastSessionByHost.removeValue(forKey: key)
+        collapsedProjectGroups.removeAll { $0.hasPrefix("\(key):") }
+        projectBrowserPaths.removeValue(forKey: key)
+        readingPositionsByHost.removeValue(forKey: key)
+        if wasCurrent {
+            lastProjectId = nil
+            lastSessionId = nil
+        }
+    }
 }

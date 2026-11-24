@@ -28,8 +28,14 @@ public final class OfflineSessionCacheSQLite {
 
     private var database: OpaquePointer?
     private let lock = NSLock()
+    private let seal: (String) throws -> String
 
-    public init(url: URL) throws {
+    public convenience init(url: URL) throws {
+        try self.init(url: url, seal: OfflineCacheCipher.seal)
+    }
+
+    init(url: URL, seal: @escaping (String) throws -> String) throws {
+        self.seal = seal
         var handle: OpaquePointer?
         let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
         let result = sqlite3_open_v2(url.path, &handle, flags, nil)
@@ -466,7 +472,7 @@ public final class OfflineSessionCacheSQLite {
                 """, bindings: [
                     .text(Self.hostID(session.hostID)),
                     .text(session.id),
-                    .optionalText(OfflineCacheCipher.seal(optional: session.title)),
+                    .optionalText(try session.title.map(seal)),
                     .optionalText(session.projectID),
                     .optionalText(session.mode),
                     .optionalText(session.permissionMode),
@@ -492,7 +498,7 @@ public final class OfflineSessionCacheSQLite {
                     .text(entry.sessionId),
                     .optionalText(entry.kind),
                     .optionalText(entry.role),
-                    .text(OfflineCacheCipher.seal(entry.text)),
+                    .text(try seal(entry.text)),
                     .optionalText(entry.toolName),
                     .optionalText(entry.status),
                     .optionalText(entry.epoch),
@@ -532,7 +538,7 @@ public final class OfflineSessionCacheSQLite {
                     .text(Self.hostID(approval.hostID)),
                     .text(approval.id),
                     .text(approval.sessionId),
-                    .text(OfflineCacheCipher.seal(payload)),
+                    .text(try seal(payload)),
                     .text(approval.status),
                     .optionalInt(approval.revision),
                     .optionalText(approval.decision),
@@ -550,7 +556,7 @@ public final class OfflineSessionCacheSQLite {
                 """, bindings: [
                     .text(Self.hostID(draft.hostID)),
                     .text(draft.sessionId),
-                    .text(OfflineCacheCipher.seal(draft.text)),
+                    .text(try seal(draft.text)),
                     .text(draft.idempotencyKey),
                     .real(draft.updatedAt.timeIntervalSince1970),
                 ])

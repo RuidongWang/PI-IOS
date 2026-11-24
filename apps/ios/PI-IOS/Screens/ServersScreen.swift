@@ -79,6 +79,8 @@ struct ServersScreen: View {
                 if let host = existingHost {
                     fingerprintSection(for: host)
                     pairingSection(for: host)
+                    RemotePiSection(host: host, isEnabled: !isSaving && !isDeleting && !isPairing)
+                        .id(host.address)
                     dangerSection(for: host)
                 }
             }
@@ -128,7 +130,7 @@ struct ServersScreen: View {
                         model.showToast("已删除「\(name)」的本机记录")
                         dismiss()
                     } else {
-                        model.showToast("服务器已切换，本次删除未执行")
+                        model.showToast(model.saveError ?? "服务器已切换，本次删除未执行")
                     }
                 }
             }
@@ -815,24 +817,12 @@ struct ServersScreen: View {
         if typed.isEmpty {
             credential = KeychainStore.loadCredential(account: account)
         } else {
-            let newCredential: SSHCredential = submittedDraft.authKind == .password
+            credential = submittedDraft.authKind == .password
                 ? .password(submittedDraft.secret)
                 : .privateKey(
                     openSSHText: submittedDraft.secret,
                     passphrase: submittedDraft.passphrase.isEmpty ? nil : submittedDraft.passphrase
                 )
-            let writeStatus = KeychainStore.saveCredentialStatus(
-                newCredential,
-                kind: submittedDraft.authKind,
-                account: account
-            )
-            guard writeStatus == errSecSuccess else {
-                // 凭证没写进 Keychain 就不继续测试：否则会拿一份本机并不存在的凭证去连。
-                errors.secret = KeychainStore.describe(writeStatus)
-                resultMessage = "凭证未能写入 Keychain：本次没有测试连接"
-                return
-            }
-            credential = newCredential
         }
         guard let credential else {
             errors.secret = submittedDraft.authKind == .password ? "请填写服务器密码" : "请粘贴私钥内容"
@@ -879,14 +869,14 @@ struct ServersScreen: View {
                 else {
                     // 记录没更新成功就不测试：避免界面、Keychain 与测试结果分属不同记录。
                     errors = intent.validationErrors
-                    resultMessage = "本机记录更新失败：本次没有测试连接"
+                    resultMessage = model.saveError ?? "本机记录更新失败：本次没有测试连接"
                     return
                 }
                 record = updated
             } else {
                 guard let added = model.addHost(intent.draft) else {
                     errors = intent.validationErrors
-                    resultMessage = "本机记录保存失败：本次没有测试连接"
+                    resultMessage = model.saveError ?? "本机记录保存失败：本次没有测试连接"
                     return
                 }
                 // 转入该记录的编辑态：再次保存必须更新它，而不是新建第二条。
@@ -902,6 +892,19 @@ struct ServersScreen: View {
                ) {
                 resultMessage = "服务器已切换：记录已按本次提交保存，但未测试连接"
                 return
+            }
+
+            if !typed.isEmpty {
+                let status = KeychainStore.saveCredentialStatus(
+                    intent.credential,
+                    kind: intent.draft.authKind,
+                    account: intent.account
+                )
+                guard status == errSecSuccess else {
+                    errors.secret = KeychainStore.describe(status)
+                    resultMessage = "服务器记录已保存，凭证未能写入 Keychain"
+                    return
+                }
             }
 
             let message = await connection.testConnection(record: record, credential: intent.credential)

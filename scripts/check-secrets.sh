@@ -40,15 +40,16 @@ grep_excludes=(
 
 status=0
 
-# scan <pattern> [skip-pattern]
+# scan <kind> <pattern> [skip-pattern]
 # skip-pattern 用于滤掉刻意保留的假阳性（测试用示例路径等）。
 scan() {
-  local pattern="$1"
-  local skip="${2:-}"
+  local kind="$1"
+  local pattern="$2"
+  local skip="${3:-}"
   local hits
 
   if command -v rg >/dev/null 2>&1; then
-    if hits=$(rg -n -e "$pattern" "${rg_flags[@]}" .); then
+    if hits=$(rg --no-heading --color=never -Hn -e "$pattern" "${rg_flags[@]}" .); then
       :
     else
       local rg_status=$?
@@ -65,7 +66,7 @@ scan() {
     fi
   else
     # Exclude options must precede `--`; after `--` they are treated as paths.
-    if hits=$(grep -RInE "${grep_excludes[@]}" -e "$pattern" .); then
+    if hits=$(grep -RHInE "${grep_excludes[@]}" -e "$pattern" .); then
       :
     else
       local grep_status=$?
@@ -82,15 +83,15 @@ scan() {
   fi
 
   if [[ -n "$hits" ]]; then
-    printf '%s\n' "$hits"
+    printf '%s\n' "$hits" | awk -F : -v kind="$kind" '{ print $1 ":" $2 " (" kind ")" }'
     status=1
   fi
 }
 
-scan 'sk-[A-Za-z0-9_-]{30,}'                          # 占位符 sk-REPLACE_ME 不会命中
-scan '(ppt2|pdt2)\.[A-Za-z0-9._-]{20,}'
-scan '-----BEGIN [A-Z ]*PRIVATE KEY-----[[:space:]]*$'
-scan '/Users/[A-Za-z0-9._-]+/' '/Users/(me|user|shared)/'
+scan 'API Key' 'sk-[A-Za-z0-9_-]{30,}'                # 占位符 sk-REPLACE_ME 不会命中
+scan '配对或设备令牌' '(ppt2|pdt2)\.[A-Za-z0-9._-]{20,}'
+scan 'PEM 私钥' '-----BEGIN [A-Z ]*PRIVATE KEY-----[[:space:]]*$'
+scan '本机路径' '/Users/[A-Za-z0-9._-]+/' '/Users/(me|user|shared)/'
 
 if [[ $status -ne 0 ]]; then
   echo "✗ 发现疑似凭证或本机身份信息：请删除/轮换，或替换为占位符（见 docs/qa/2026-10-31-deepseek-live-test.md §4）" >&2

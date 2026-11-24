@@ -72,6 +72,14 @@ public final class SessionRequestKeyStore {
         _ identity: SessionRequestIdentity,
         admission: RACPTurnAdmission? = nil
     ) throws -> SessionRequestAttempt {
+        try prepareSubmission(identity, admission: admission).attempt
+    }
+
+    /// Reports whether this submission reuses an attempt that may already have reached the Host.
+    public func prepareSubmission(
+        _ identity: SessionRequestIdentity,
+        admission: RACPTurnAdmission? = nil
+    ) throws -> (attempt: SessionRequestAttempt, isRetry: Bool) {
         Self.lock.lock()
         defer { Self.lock.unlock() }
         guard !identity.hostID.isEmpty, !identity.sessionID.isEmpty else {
@@ -81,7 +89,7 @@ public final class SessionRequestKeyStore {
         var payload = try load()
         if let existing = payload.pending[fingerprint] {
             if let fileURL { try setResourceValues(fileURL) }
-            return existing
+            return (existing, true)
         }
         let attempt = SessionRequestAttempt(
             fingerprint: fingerprint,
@@ -90,7 +98,7 @@ public final class SessionRequestKeyStore {
         )
         payload.pending[fingerprint] = attempt
         try save(payload, requireResourceValues: true)
-        return attempt
+        return (attempt, false)
     }
 
     /// A late acknowledgement may retire only its own attempt, never a subsequent one.
@@ -836,7 +844,7 @@ public final class SessionViewModel {
     }
 
     public func recordQueuedTurn(id: String, text: String?, attachmentCount: Int? = nil) {
-        guard !id.isEmpty else { return }
+        guard !id.isEmpty, activeTurnId != id, terminalTurnSequences[id] == nil else { return }
         queuedTurnIDs.insert(id)
         guard !queuedTurns.contains(where: { $0.value(at: ["id"])?.stringValue == id }) else { return }
         var payload: [String: JSONValue] = ["id": .string(id)]

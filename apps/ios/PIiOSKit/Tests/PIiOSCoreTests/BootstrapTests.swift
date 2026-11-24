@@ -168,7 +168,7 @@ final class BootstrapTests: XCTestCase {
     }
 
     func testAC01_9_clientSideFailureCodesAreDistinctFromUpstream() {
-        XCTAssertEqual(BootstrapFailureCode.upstreamCodes.count, 19, "上游 19 个真实 die 码")
+        XCTAssertEqual(BootstrapFailureCode.upstreamCodes.count, 22, "安装脚本失败码应包含运行版本保护")
         XCTAssertEqual(BootstrapFailureCode.clientSideCodes.count, 4)
         XCTAssertEqual(
             BootstrapFailureCode.clientSideCodes.map(\.rawValue),

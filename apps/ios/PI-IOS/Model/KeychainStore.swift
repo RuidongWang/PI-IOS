@@ -145,6 +145,14 @@ enum KeychainStore {
     private struct StoredPairing: Codable {
         let deviceId: String
         let deviceToken: String
+        var pendingInstall: BootstrapPairingCommit? = nil
+        var pendingRevocations: [PairingRevocation]? = nil
+        var adaptorHostId: String? = nil
+    }
+
+    struct PairingRevocation: Codable, Equatable {
+        let deviceId: String
+        let adaptorHostId: String
     }
 
     struct PairingCredential: Equatable {
@@ -186,11 +194,22 @@ enum KeychainStore {
     static func savePairing(
         deviceId: String,
         deviceToken: String,
-        hostID: UUID
+        hostID: UUID,
+        pendingInstall: BootstrapPairingCommit? = nil
     ) -> Bool {
         guard !deviceId.isEmpty,
-              (deviceToken.hasPrefix("pdt1.") || deviceToken.hasPrefix("pdt2.")),
-              let data = try? JSONEncoder().encode(StoredPairing(deviceId: deviceId, deviceToken: deviceToken)) else { return false }
+              (deviceToken.hasPrefix("pdt1.") || deviceToken.hasPrefix("pdt2.")) else { return false }
+        let pairing = StoredPairing(
+            deviceId: deviceId,
+            deviceToken: deviceToken,
+            pendingInstall: pendingInstall,
+            pendingRevocations: validPairing(hostID: hostID)?.pendingRevocations
+        )
+        return writePairing(pairing, hostID: hostID)
+    }
+
+    private static func writePairing(_ pairing: StoredPairing, hostID: UUID) -> Bool {
+        guard let data = try? JSONEncoder().encode(pairing) else { return false }
         return set(data, service: Service.deviceToken, account: deviceTokenAccount(hostID: hostID))
     }
 
@@ -203,14 +222,18 @@ enum KeychainStore {
         deviceToken: String,
         hostID: UUID,
         attemptId: String,
-        targetPort: Int
+        targetPort: Int,
+        sshAccount: String? = nil,
+        sshFingerprint: String? = nil
     ) -> Bool {
         guard let staged = BootstrapStagedCredential(
             hostID: hostID,
             attemptId: attemptId,
             targetPort: targetPort,
             deviceId: deviceId,
-            deviceToken: deviceToken
+            deviceToken: deviceToken,
+            sshAccount: sshAccount,
+            sshFingerprint: sshFingerprint
         ),
         let data = try? JSONEncoder().encode(staged)
         else { return false }
@@ -285,16 +308,59 @@ enum KeychainStore {
     /// staging cleanup can only leave redundant data; it can never replace a
     /// valid active token with a half-promoted value.
     @discardableResult
-    static func promoteStagedPairing(hostID: UUID, attemptId: String) -> Bool {
-        guard let staged = loadStagedPairing(hostID: hostID, attemptId: attemptId),
-              savePairing(
-                deviceId: staged.deviceId,
-                deviceToken: staged.deviceToken,
-                hostID: hostID
-              )
-        else { return false }
+    static func promoteStagedPairing(
+        hostID: UUID,
+        attemptId: String,
+        pendingInstall: BootstrapPairingCommit? = nil,
+        verifiedAdaptorHostId: String? = nil,
+        previousAdaptorHostId: String? = nil
+    ) -> Bool {
+        guard let staged = loadStagedPairing(hostID: hostID, attemptId: attemptId) else { return false }
+        let previous = validPairing(hostID: hostID)
+        let adaptorHostId = pendingInstall?.adaptorHostId ?? verifiedAdaptorHostId
+        let previousHostIds = [previous?.adaptorHostId, previousAdaptorHostId].compactMap { $0 }.filter { !$0.isEmpty }
+        var revocations = previous?.pendingRevocations ?? []
+        if let previous, previous.deviceId != staged.deviceId,
+           previous.deviceToken.hasPrefix("pdt2."),
+           let adaptorHostId, previousHostIds.allSatisfy({ $0 == adaptorHostId }) {
+            let retired = PairingRevocation(deviceId: previous.deviceId, adaptorHostId: adaptorHostId)
+            if !revocations.contains(retired) { revocations.append(retired) }
+        }
+        let promoted = StoredPairing(
+            deviceId: staged.deviceId,
+            deviceToken: staged.deviceToken,
+            pendingInstall: pendingInstall,
+            pendingRevocations: revocations.isEmpty ? nil : revocations,
+            adaptorHostId: adaptorHostId
+        )
+        // Retiring the previous device is only possible after promotion. Persist
+        // its identity atomically with the new token before returning success.
+        guard writePairing(promoted, hostID: hostID) else { return false }
         _ = clearStagedPairing(hostID: hostID, attemptId: attemptId)
         return true
+    }
+
+    static func pendingInstall(hostID: UUID) -> BootstrapPairingCommit? {
+        validPairing(hostID: hostID)?.pendingInstall
+    }
+
+    static func clearPendingInstall(hostID: UUID, attemptId: String) {
+        guard var pairing = validPairing(hostID: hostID), pairing.pendingInstall?.attemptId == attemptId else { return }
+        pairing.pendingInstall = nil
+        _ = writePairing(pairing, hostID: hostID)
+    }
+
+    static func pendingPairingRevocations(hostID: UUID, activeToken: String) -> [PairingRevocation] {
+        guard let pairing = validPairing(hostID: hostID),
+              pairing.deviceToken == activeToken, pairing.pendingInstall == nil else { return [] }
+        return pairing.pendingRevocations?.filter { $0.deviceId != pairing.deviceId } ?? []
+    }
+
+    static func confirmPairingRevocation(_ retired: PairingRevocation, hostID: UUID, activeToken: String) {
+        guard var pairing = validPairing(hostID: hostID), pairing.deviceToken == activeToken,
+              pairing.pendingRevocations?.contains(retired) == true else { return }
+        pairing.pendingRevocations?.removeAll { $0 == retired }
+        _ = writePairing(pairing, hostID: hostID)
     }
 
     @discardableResult

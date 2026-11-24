@@ -14,7 +14,7 @@ struct ProjectsScreen: View {
     @State private var showingBrowser = false
     @State private var actionError: String?
     @State private var currentProjectId: String?
-    @State private var selectedProject: RACPProjectSummary?
+    @State private var selectedProject: (project: RACPProjectSummary, hostID: UUID)?
 
     var body: some View {
         NavigationStack {
@@ -58,7 +58,7 @@ struct ProjectsScreen: View {
                 }
             }
             .sheet(isPresented: projectDetailBinding) {
-                if let project = selectedProject {
+                if let (project, hostID) = selectedProject {
                     ProjectDetailSheet(
                         project: project,
                         initialName: projectDisplayName(project),
@@ -79,7 +79,7 @@ struct ProjectsScreen: View {
                             selectedProject = nil
                         },
                         onDelete: {
-                            delete(project)
+                            delete(project, hostID: hostID)
                             selectedProject = nil
                         },
                         onRestore: {
@@ -456,9 +456,10 @@ struct ProjectsScreen: View {
     /// 项目行只有一个去向：详情浮层。会话续接、改名、归档、删除都在浮层里，
     /// 行上不再并列第二个入口（quiet-v2 R10）。
     private func openProjectDetails(_ project: RACPProjectSummary) {
+        guard let hostID = model.currentHost?.id else { return }
         currentProjectId = project.id
         model.rememberProject(project.id)
-        selectedProject = project
+        selectedProject = (project, hostID)
     }
 
     private func restore(_ project: RACPProjectSummary) {
@@ -479,15 +480,18 @@ struct ProjectsScreen: View {
         model.showToast("已归档项目「\(projectDisplayName(project))」")
     }
 
-    private func delete(_ project: RACPProjectSummary) {
-        guard let hostID = model.currentHost?.id else { return }
-        let removedSessions = model.deleteProjectLocally(hostID: hostID, projectID: project.id)
-        connection.removeCachedSessions(removedSessions)
+    private func delete(_ project: RACPProjectSummary, hostID: UUID) {
+        guard hostID == model.currentHost?.id else { return }
+        let name = projectDisplayName(project, hostID: hostID)
+        guard model.deleteProjectLocally(hostID: hostID, projectID: project.id, name: name) else {
+            if model.saveError == nil { actionError = "项目删除未保存，请重试。" }
+            return
+        }
         if currentProjectId == project.id {
             currentProjectId = nil
             advanceCurrentProject(excluding: project.id)
         }
-        model.showToast("已从本机删除项目「\(projectDisplayName(project))」")
+        model.showToast("已从本机删除项目「\(name)」")
     }
 
     private func advanceCurrentProject(excluding projectID: String) {

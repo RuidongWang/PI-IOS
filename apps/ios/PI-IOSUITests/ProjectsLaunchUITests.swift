@@ -2,15 +2,25 @@ import XCTest
 import UIKit
 
 final class ProjectsLaunchUITests: XCTestCase {
-    private let app = XCUIApplication()
-    /// 仓库里只保留脱敏后的保留地址（203.0.113.10，RFC 5737）。
-    /// 要对着真实 PI-adaptor 跑，用 `PI_IOS_EXPECTED_HOST=<真实地址片段>` 覆盖，不要把真实地址写回仓库。
-    private let expectedHostFragment =
-        ProcessInfo.processInfo.environment["PI_IOS_EXPECTED_HOST"] ?? "203.0.113.10"
+    private var app: XCUIApplication!
+    private var expectedHost = ""
     private let expectedProjectName = "pi-test-proj"
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+    }
+
+    override func tearDown() {
+        app?.terminate()
+    }
+
+    private func launchOnConfiguredHost() throws {
+        let configuredHost = ProcessInfo.processInfo.environment["PI_IOS_EXPECTED_HOST"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let configuredHost, !configuredHost.isEmpty else {
+            throw XCTSkip("Set PI_IOS_EXPECTED_HOST to the QA adaptor before running live project checks.")
+        }
+        expectedHost = configuredHost
         addUIInterruptionMonitor(withDescription: "System alerts") { alert in
             for label in ["允许", "Allow", "好", "OK"] where alert.buttons[label].exists {
                 alert.buttons[label].tap()
@@ -18,37 +28,17 @@ final class ProjectsLaunchUITests: XCTestCase {
             }
             return false
         }
+        app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         app.launch()
+        showRoot("项目")
+        let address = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "@\(expectedHost):")).firstMatch
+        XCTAssertTrue(address.waitForExistence(timeout: 10), "The current adaptor must match PI_IOS_EXPECTED_HOST.")
     }
 
     func testProjectsScreenAndAddProjectAffordanceAreDiscoverable() throws {
-        showRoot("项目")
-
-        let addProject = app.buttons["projects.add"]
-        XCTAssertTrue(
-            addProject.waitForExistence(timeout: 8),
-            "The projects.add accessibility identifier must be discoverable."
-        )
-        guard app.staticTexts
-            .matching(NSPredicate(format: "label CONTAINS %@", expectedHostFragment))
-            .firstMatch
-            .waitForExistence(timeout: 3)
-        else {
-            throw XCTSkip("The expected real PI-adaptor is not configured for this host-backed smoke test.")
-        }
-
-        // 目录入口只有一个主操作：导航栏 +（有项目时）或空态动作（没有项目时）。
-        let emptyStateAction = app.buttons["projects.addProject"]
-        XCTAssertTrue(
-            addProject.exists || emptyStateAction.exists,
-            "The projects screen must expose a non-mutating path to the directory browser."
-        )
-
-        // 静默 return 会把“没跑”报成通过；目录不可浏览时明确记为跳过。
-        guard addProject.isEnabled else {
-            throw XCTSkip("The current PI-adaptor has no browsable project catalog.")
-        }
-        addProject.tap()
+        try launchOnConfiguredHost()
+        openProjectBrowser()
 
         let sheet = app.descendants(matching: .any)
             .matching(identifier: "projectBrowser.sheet")
@@ -73,28 +63,13 @@ final class ProjectsLaunchUITests: XCTestCase {
     }
 
     func testEditedProjectNameSurvivesDirectoryNavigation() throws {
-        showRoot("项目")
-
-        let addProject = app.buttons["projects.add"]
-        guard addProject.waitForExistence(timeout: 8) else {
-            throw XCTSkip("The current PI-adaptor has no browsable project catalog.")
-        }
-        let catalogReady = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "enabled == true"),
-            object: addProject
-        )
-        guard XCTWaiter.wait(for: [catalogReady], timeout: 10) == .completed else {
-            throw XCTSkip("The current PI-adaptor has no browsable project catalog.")
-        }
-        addProject.tap()
+        try launchOnConfiguredHost()
+        openProjectBrowser()
 
         let name = app.textFields["projectBrowser.name"]
         let currentPath = app.staticTexts["projectBrowser.currentPath"]
-        guard name.waitForExistence(timeout: 10),
-              currentPath.waitForExistence(timeout: 15)
-        else {
-            throw XCTSkip("The project browser is unavailable in this App state.")
-        }
+        XCTAssertTrue(name.waitForExistence(timeout: 10), "The project browser must show the name field.")
+        XCTAssertTrue(currentPath.waitForExistence(timeout: 15), "The project browser must load the current directory.")
 
         let typedMarker = "E2E-NAME-KEEP"
         let browser = app.collectionViews["projectBrowser.sheet"]
@@ -123,9 +98,7 @@ final class ProjectsLaunchUITests: XCTestCase {
                 )
             )
             .firstMatch
-        guard navigationTarget.waitForExistence(timeout: 25) else {
-            throw XCTSkip("The current PI-adaptor has no navigable server directory.")
-        }
+        XCTAssertTrue(navigationTarget.waitForExistence(timeout: 25), "The QA directory must have a navigable entry.")
         for _ in 0..<3 where !navigationTarget.isHittable {
             app.swipeDown()
         }
@@ -158,22 +131,7 @@ final class ProjectsLaunchUITests: XCTestCase {
     }
 
     func testProjectsShowCurrentServerAndCurrentProject() throws {
-        showRoot("项目")
-
-        guard app.staticTexts
-            .matching(NSPredicate(format: "label CONTAINS %@", expectedHostFragment))
-            .firstMatch
-            .waitForExistence(timeout: 8)
-        else {
-            throw XCTSkip("The expected real PI-adaptor is not configured for this host-backed smoke test.")
-        }
-        XCTAssertTrue(
-            app.staticTexts
-                .matching(NSPredicate(format: "label CONTAINS %@", expectedHostFragment))
-                .firstMatch
-                .waitForExistence(timeout: 8),
-            "The projects screen must show the connected server address."
-        )
+        try launchOnConfiguredHost()
         XCTAssertTrue(
             app.buttons
                 .matching(NSPredicate(format: "label CONTAINS %@", expectedProjectName))
@@ -188,12 +146,8 @@ final class ProjectsLaunchUITests: XCTestCase {
               deniedPath.hasPrefix("/"), deniedPath != "/" else {
             throw XCTSkip("Provide an existing unreadable child directory on the QA PI-adaptor.")
         }
-        showRoot("项目")
-        let addProject = app.buttons["projects.add"]
-        guard addProject.waitForExistence(timeout: 10), addProject.isEnabled else {
-            throw XCTSkip("The QA PI-adaptor has no browsable project catalog.")
-        }
-        addProject.tap()
+        try launchOnConfiguredHost()
+        openProjectBrowser()
         let currentPath = app.staticTexts["projectBrowser.currentPath"]
         XCTAssertTrue(currentPath.waitForExistence(timeout: 15))
         let registerButton = app.buttons["projectBrowser.register"]
@@ -218,9 +172,7 @@ final class ProjectsLaunchUITests: XCTestCase {
             } else {
                 next = app.buttons["projectBrowser.parent"]
             }
-            guard next.waitForExistence(timeout: 5) else {
-                throw XCTSkip("The unreadable fixture is outside the PI-adaptor's browsable tree.")
-            }
+            XCTAssertTrue(next.waitForExistence(timeout: 5), "The unreadable fixture must be under the QA host's browsable tree.")
             let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: next)
             XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed)
             for _ in 0..<10 {
@@ -277,18 +229,16 @@ final class ProjectsLaunchUITests: XCTestCase {
     }
 
     func testSettingsShowHostVersionAndSystemdState() throws {
+        try launchOnConfiguredHost()
         showRoot("设置")
 
-        let hostVersion = app.staticTexts
-            .matching(NSPredicate(format: "label CONTAINS %@", "PI-adaptor 版本"))
-            .firstMatch
-        guard hostVersion.waitForExistence(timeout: 10) else {
-            throw XCTSkip("No real PI-adaptor is configured for the host-backed settings smoke test.")
-        }
+        let hostVersion = app.descendants(matching: .any)["settings.hostVersion"]
+        XCTAssertTrue(hostVersion.waitForExistence(timeout: 15), "The connected adaptor must report its version.")
 
-        let systemd = app.buttons
-            .matching(NSPredicate(format: "label CONTAINS[c] %@", "systemd 服务"))
-            .firstMatch
+        let diagnostics = app.buttons["settings.advancedDiagnostics.toggle"]
+        XCTAssertTrue(diagnostics.waitForExistence(timeout: 5))
+        if diagnostics.value as? String == "collapsed" { diagnostics.tap() }
+        let systemd = app.descendants(matching: .any)["settings.hostUnit"]
         XCTAssertTrue(
             systemd.waitForExistence(timeout: 10),
             "Settings must expose the systemd status row."
@@ -309,45 +259,33 @@ final class ProjectsLaunchUITests: XCTestCase {
         )
         XCTAssertTrue(
             systemd.label.range(
-                of: "active|inactive|failed|unknown|无法读取",
+                of: #"\b(active|inactive|failed)\b"#,
                 options: [.regularExpression, .caseInsensitive]
             ) != nil,
             "The settled systemd row must include a status value. Current label: \(systemd.label)"
         )
-        // quiet-v2 §6.4：整段后台推送说明下线，通知区只留一行开关；
-        // 断言按 identifier 定位这一行，不绑在被删的说明文案上。
-        XCTAssertTrue(
-            app.descendants(matching: .any)["settings.notificationRow"]
-                .waitForExistence(timeout: 5),
-            "Notification settings must remain a single row."
-        )
-        XCTAssertFalse(
-            app.staticTexts["不会收到后台推送"].exists,
-            "The removed background push paragraph must not come back."
-        )
+        let notifications = app.descendants(matching: .any)["settings.notificationRow"]
+        XCTAssertTrue(notifications.waitForExistence(timeout: 5), "Notification settings must remain accessible.")
+        XCTAssertFalse(app.staticTexts["不会收到后台推送"].exists)
     }
 
     // 协议预设与 localhost 默认值不依赖真实 Host，由 UIRegressionSuiteTests 的
     // MDL-02/03 在确定性夹具中逐协议覆盖，不在本真实 Host 套件重复执行。
 
     func testInstallAdaptorScreenIsReachableWithoutStartingInstallation() throws {
+        try launchOnConfiguredHost()
         showRoot("设置")
 
-        let host = app.buttons
-            .matching(NSPredicate(format: "label CONTAINS %@", expectedHostFragment))
-            .firstMatch
-        guard host.waitForExistence(timeout: 8) else {
-            throw XCTSkip("The current PI-adaptor row is unavailable.")
-        }
+        let host = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "settings.server.", "@\(expectedHost):"
+        )).firstMatch
+        XCTAssertTrue(host.waitForExistence(timeout: 8), "The QA adaptor must appear in Settings.")
         host.tap()
         XCTAssertTrue(app.navigationBars["服务器"].waitForExistence(timeout: 8))
 
-        let install = app.buttons
-            .matching(NSPredicate(format: "label CONTAINS %@", "安装或修复 PI-adaptor"))
-            .firstMatch
-        guard install.waitForExistence(timeout: 8) else {
-            throw XCTSkip("The install entry is unavailable for this PI-adaptor.")
-        }
+        let install = app.buttons["servers.install"]
+        for _ in 0..<6 where !install.isHittable { app.swipeUp() }
+        XCTAssertTrue(install.isHittable, "The QA adaptor must expose the install entry.")
         install.tap()
 
         let installBar = app.navigationBars
@@ -359,13 +297,13 @@ final class ProjectsLaunchUITests: XCTestCase {
             "The installation screen must expose its fixed loopback port."
         )
         XCTAssertTrue(
-            app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "安装")).firstMatch.exists,
+            app.buttons["installHost.start"].exists,
             "The installation screen must expose the real install action without auto-starting it."
         )
     }
 
     func testConversationAttachmentIsAvailableAndSidebarSearchIsDiscoverable() throws {
-        showRoot("项目")
+        try launchOnConfiguredHost()
 
         let session = app.buttons
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "projects.session."))
@@ -373,9 +311,7 @@ final class ProjectsLaunchUITests: XCTestCase {
         for _ in 0..<4 where !session.exists {
             app.swipeUp()
         }
-        guard session.waitForExistence(timeout: 8) else {
-            throw XCTSkip("There is no active session row for the current project.")
-        }
+        XCTAssertTrue(session.waitForExistence(timeout: 8), "The QA project must contain an active session.")
         session.tap()
 
         let attachment = app.buttons
@@ -421,6 +357,7 @@ final class ProjectsLaunchUITests: XCTestCase {
             throw XCTSkip("Provide PI_IOS_LIVE_LLM_BASE_URL and PI_IOS_LIVE_LLM_API_KEY to run the live provider import.")
         }
 
+        try launchOnConfiguredHost()
         showRoot("设置")
         let models = app.buttons
             .matching(NSPredicate(format: "label CONTAINS %@", "模型服务"))
@@ -482,7 +419,7 @@ final class ProjectsLaunchUITests: XCTestCase {
         else {
             throw XCTSkip("Provide PI_IOS_LIVE_HISTORY_EXPECTED for the live history projection probe.")
         }
-        showRoot("项目")
+        try launchOnConfiguredHost()
         let session = app.buttons
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "projects.session."))
             .firstMatch
@@ -500,9 +437,12 @@ final class ProjectsLaunchUITests: XCTestCase {
         )
     }
 
-    private func segmentedButton(named name: String) -> XCUIElement {
-        let scoped = app.segmentedControls.buttons[name].firstMatch
-        return scoped.exists ? scoped : app.buttons[name].firstMatch
+    private func openProjectBrowser() {
+        let addProject = app.buttons["projects.add"]
+        XCTAssertTrue(addProject.waitForExistence(timeout: 8), "The add-project control must exist.")
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: addProject)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 15), .completed, "The QA adaptor must expose a browsable project catalog.")
+        addProject.tap()
     }
 
     private func showRoot(_ title: String) {

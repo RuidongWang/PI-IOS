@@ -9,6 +9,7 @@ import XCTest
 /// - `PI_BOOTSTRAP_SSH_HOST`, `PI_BOOTSTRAP_SSH_USER`, `PI_BOOTSTRAP_SSH_KEY`
 /// - `PI_BOOTSTRAP_PORT` (the loopback port installed into the user unit)
 /// - `PI_BOOTSTRAP_RELEASE_BASE_URL` (directory containing both bundles and `.sha256`)
+/// Optionally set `PI_BOOTSTRAP_DIRECT_PORT` and `PI_BOOTSTRAP_DIRECT_ENDPOINT` to verify pinned Direct.
 final class RealBootstrapInstallTests: XCTestCase {
     func testInstallsPairsStartsUnitAndVerifiesDeviceToken() async throws {
         let env = ProcessInfo.processInfo.environment
@@ -35,6 +36,7 @@ final class RealBootstrapInstallTests: XCTestCase {
             confirmer: AcceptBootstrapHostKey(),
             timeout: 20
         )
+        defer { Task { await transport.close() } }
 
         let probe = try await transport.exec(BootstrapRemoteCommand.probe, timeout: 15)
         XCTAssertEqual(probe.exitStatus, 0)
@@ -48,6 +50,10 @@ final class RealBootstrapInstallTests: XCTestCase {
             PIAdaptorRelease.patched(target: target, baseURL: releaseBaseURL)
         )
         let attempt = "real-\(UUID().uuidString.lowercased())"
+        let directEndpoint = env["PI_BOOTSTRAP_DIRECT_ENDPOINT"].flatMap(URL.init(string:))
+        let direct = try env["PI_BOOTSTRAP_DIRECT_PORT"].flatMap(Int.init).map { directPort in
+            try BootstrapDirectConfiguration(directName: host, directPort: directPort, loopbackPort: port)
+        }
         let configuration = try BootstrapScriptConfiguration(
             release: release,
             attemptId: attempt,
@@ -56,7 +62,8 @@ final class RealBootstrapInstallTests: XCTestCase {
             readyTimeoutSeconds: 120,
             pairTimeoutSeconds: 180,
             stopTimeoutSeconds: 30,
-            verifyTimeoutSeconds: 120
+            verifyTimeoutSeconds: 120,
+            direct: direct
         )
 
         let runner = BootstrapRunner(
@@ -72,7 +79,11 @@ final class RealBootstrapInstallTests: XCTestCase {
                 verificationCallbackTimeout: 60
             )
         )
-        let result = try await runner.run(configuration: configuration, deviceLabel: "PI-IOS real bootstrap test")
+        let result = try await runner.run(
+            configuration: configuration,
+            deviceLabel: "PI-IOS real bootstrap test",
+            keepTransportOpen: direct != nil
+        )
 
         guard case let .succeeded(success) = result else {
             return XCTFail("真实安装未成功：\(result)")
@@ -82,6 +93,29 @@ final class RealBootstrapInstallTests: XCTestCase {
         XCTAssertEqual(success.state.service?.state, "active")
         XCTAssertEqual(success.port, port)
         XCTAssertFalse(success.device.deviceToken.isEmpty)
+        if direct != nil {
+            let endpoint = try XCTUnwrap(directEndpoint)
+            let output = try await transport.exec(BootstrapRemoteCommand.readDirectTrust(attemptId: attempt), timeout: 15)
+            XCTAssertEqual(output.exitStatus, 0)
+            let trust = try BootstrapDirectTrust.parse(data: output.stdout, expectedAttemptId: attempt)
+            let client = RACPClient(configuration: RACPConfiguration(
+                ssh: nil, hostPort: nil, deviceToken: success.device.deviceToken, connectionPreference: .directPreferred,
+                direct: DirectRACPConfiguration(endpoint: endpoint, certificateSHA256: trust.certificateSHA256, adaptorHostId: trust.hostId)
+            ), confirmer: AcceptBootstrapHostKey())
+            defer { Task { await client.stopBestEffort() } }
+            let updates = await client.start()
+            for await update in updates {
+                if case .state(.online) = update {
+                    try await client.ping()
+                    print("CASE Linux bootstrap pinned direct PASS")
+                    return
+                }
+                if case .state(.offline(let reason)) = update {
+                    return XCTFail("Direct 首验失败：\(reason ?? "连接关闭")")
+                }
+            }
+            XCTFail("Direct 首验未完成")
+        }
     }
 
     private func parseProbe(_ stdout: String) throws -> (platform: String, architecture: String) {

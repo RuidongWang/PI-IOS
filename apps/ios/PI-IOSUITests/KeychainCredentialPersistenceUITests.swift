@@ -8,24 +8,28 @@ import XCTest
 /// 这里走密码认证路径（不涉及私钥材料），确认凭证写入成功后才进入连接测试。
 final class KeychainCredentialPersistenceUITests: XCTestCase {
     private let app = XCUIApplication()
+    private let accountName = "keychain-ui-\(UUID().uuidString.prefix(8).lowercased())"
+    private var attemptedSave = false
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        app.launchEnvironment["PI_IOS_UI_FIXTURE_SCENARIO"] = "empty-state"
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         app.launch()
     }
 
     override func tearDownWithError() throws {
-        app.terminate()
+        defer { app.terminate() }
+        if attemptedSave { deleteCreatedHostIfPresent() }
     }
 
     func testPasswordCredentialIsPersistedToKeychain() throws {
         openServersScreen()
 
-        // 按 identifier 定位（quiet-v2 §7）：文案变了测试不该跟着改。
+        replace(app.textFields["servers.name"].firstMatch, with: accountName)
         replace(app.textFields["servers.host"].firstMatch, with: "127.0.0.1")
         replace(app.textFields["servers.port"].firstMatch, with: "1")
-        replace(app.textFields["servers.username"].firstMatch, with: "pi")
+        replace(app.textFields["servers.username"].firstMatch, with: accountName)
 
         let password = app.secureTextFields["servers.password"].firstMatch
         XCTAssertTrue(password.waitForExistence(timeout: 5), "密码输入框")
@@ -34,26 +38,39 @@ final class KeychainCredentialPersistenceUITests: XCTestCase {
         password.typeText("keychain-regression-password")
         dismissKeyboard()
 
+        attemptedSave = true
+        saveAndExpectSSHTest()
+
+        app.buttons["BackButton"].tap()
+        XCTAssertTrue(createdHost.waitForExistence(timeout: 5), "服务器记录应可重新打开")
+        createdHost.tap()
+        XCTAssertTrue(app.navigationBars["服务器"].waitForExistence(timeout: 5))
+        XCTAssertTrue(password.waitForExistence(timeout: 5))
+        XCTAssertEqual(password.placeholderValue, "留空沿用已保存凭证")
+        let reopenedValue = password.value as? String ?? ""
+        XCTAssertTrue(reopenedValue.isEmpty || reopenedValue == password.placeholderValue as? String)
+        // 新表单的密码为空。能再次进入 SSH 测试，说明表单从 Keychain 取回了凭证。
+        saveAndExpectSSHTest()
+    }
+
+    private var createdHost: XCUIElement {
+        app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "settings.server.", accountName
+        )).firstMatch
+    }
+
+    private func saveAndExpectSSHTest() {
+        let saved = app.staticTexts["已保存「\(accountName)」"]
+        XCTAssertTrue(saved.waitForNonExistence(timeout: 5))
         let save = app.buttons["servers.saveAndTest"].firstMatch
         scrollUntilHittable(save)
+        XCTAssertTrue(save.isHittable)
         save.tap()
-
-        let keychainFailure = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "凭证写入 Keychain 失败")
-        ).firstMatch
-        XCTAssertFalse(
-            keychainFailure.waitForExistence(timeout: 5),
-            "凭证必须写入 Keychain；实际提示：\(keychainFailure.label)"
-        )
-
-        XCTAssertTrue(
-            app.staticTexts.matching(
-                NSPredicate(format: "label CONTAINS %@", "测试结果")
-            ).firstMatch.waitForExistence(timeout: 25),
-            "凭证写入成功后应进入连接测试并给出结果"
-        )
-
-        deleteCreatedHost()
+        // 只有完成真实 SSH 测试才会显示这条保存提示。Keychain 写入或读取失败会提前返回。
+        let result = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "测试结果：")).firstMatch
+        XCTAssertTrue(saved.waitForExistence(timeout: 25), result.exists ? result.label : "应完成 SSH 测试并显示保存提示")
+        XCTAssertTrue(result.exists, "应显示本次 SSH 测试结果")
+        XCTAssertTrue(saved.waitForNonExistence(timeout: 5), "等待保存提示收起后再返回")
     }
 
     // MARK: - 导航与操作
@@ -77,19 +94,21 @@ final class KeychainCredentialPersistenceUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["服务器"].waitForExistence(timeout: 5), "新增服务器页")
     }
 
-    /// 保存会先创建本机记录再测连接；测试结束把这条 127.0.0.1 记录删掉，
-    /// 避免污染模拟器上已有的服务器列表。
-    private func deleteCreatedHost() {
-        let delete = app.buttons["servers.delete"].firstMatch.exists
-            ? app.buttons["servers.delete"].firstMatch
-            : app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "删除这台服务器")).firstMatch
+    private func deleteCreatedHostIfPresent() {
+        if app.navigationBars["服务器"].exists { app.buttons["BackButton"].tap() }
+        XCTAssertTrue(app.navigationBars["设置"].waitForExistence(timeout: 5))
+        guard createdHost.exists else { return }
+        createdHost.tap()
+        XCTAssertTrue(app.navigationBars["服务器"].waitForExistence(timeout: 5))
+        let delete = app.buttons["servers.delete"].firstMatch
         scrollUntilHittable(delete)
-        guard delete.exists, delete.isHittable else { return }
+        XCTAssertTrue(delete.isHittable)
         delete.tap()
         let confirm = app.buttons["删除"].firstMatch
-        guard confirm.waitForExistence(timeout: 5) else { return }
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
         confirm.tap()
-        _ = app.navigationBars["设置"].waitForExistence(timeout: 10)
+        XCTAssertTrue(app.navigationBars["设置"].waitForExistence(timeout: 10))
+        XCTAssertFalse(createdHost.exists)
     }
 
     private func replace(_ field: XCUIElement, with value: String) {

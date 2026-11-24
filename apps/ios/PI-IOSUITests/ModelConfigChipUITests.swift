@@ -53,118 +53,7 @@ final class ModelConfigChipUITests: XCTestCase {
         XCTAssertFalse(app.buttons["composer.permissionChip"].exists, "权限 chip 已从输入栏移除")
         XCTAssertFalse(modelChip.isEnabled)
     }
-}
-
-// MARK: - 模型域 quiet-v2 回归
-//
-// 本域的契约是「看得懂靠布局，不靠文案」：footer / hint 必须为 0，
-// 文案定位解耦到 accessibilityIdentifier。这里锁的就是这两件事。
-
-extension ModelConfigChipUITests {
-    /// 模型服务页：清单与表单都没有 footer/hint，密钥归属只说明一次。
-    func testModelsScreenHasNoFooterCopyAndStableIdentifiers() {
-        relaunch("online-model-config")
-        openModelsScreen()
-
-        XCTAssertTrue(app.staticTexts["本机模型清单"].exists, "清单分组标题仍在")
-        XCTAssertFalse(app.staticTexts["还没有模型服务"].exists, "夹具有两个服务，不应出现空态")
-
-        XCTAssertFalse(anyLabelContains("点一条服务可查看详情并删除"), "清单 footer 已删除")
-        XCTAssertFalse(anyLabelContains("Base URL 填模型请求根地址"), "表单 footer 已删除")
-        XCTAssertFalse(anyLabelContains("四种线路协议"), "协议 hint 已删除")
-        XCTAssertFalse(anyLabelContains("用于模型选择器分组"), "服务名称 hint 已删除")
-
-        let apiKeyNote = app.staticTexts["models.apiKeyNote"].label
-        XCTAssertTrue(apiKeyNote.contains("只存本机"), "API Key 归属说明仍在填写处")
-        XCTAssertTrue(apiKeyNote.contains("不落盘"), "必须说清服务器不持久化")
-        XCTAssertFalse(app.buttons["models.fetchModels"].isEnabled, "空 API Key 时禁用获取")
-        XCTAssertFalse(app.buttons["models.selectAll"].exists, "未获取模型前不出现发现区控件")
-
-        let row = providerRow("Alpha Models")
-        XCTAssertTrue(row.waitForExistence(timeout: 5), "服务行可见")
-        XCTAssertTrue(row.label.contains("1 个模型"), "副标题只放状态数据")
-        XCTAssertTrue(row.label.contains("https://alpha.invalid"), "副标题带地址")
-    }
-
-    /// 模型服务详情：两个动作靠按钮名自解释，不靠 footer。
-    func testProviderDetailActionsExplainThemselves() {
-        relaunch("online-model-update")
-        openModelsScreen()
-
-        let row = providerRow("Alpha Models")
-        XCTAssertTrue(row.waitForExistence(timeout: 5), "服务行可见")
-        row.tap()
-        XCTAssertTrue(app.navigationBars["模型服务详情"].waitForExistence(timeout: 5), "进入详情")
-
-        XCTAssertEqual(
-            app.buttons["models.provider.editModel.alpha-mini"].label,
-            "编辑模型",
-            "编辑按钮自解释"
-        )
-        XCTAssertEqual(
-            app.buttons["models.provider.setDefault.alpha-mini"].label,
-            "设为默认",
-            "默认按钮自解释"
-        )
-        XCTAssertFalse(anyLabelContains("只改这一个模型"), "按钮 footer 已删除")
-        XCTAssertFalse(anyLabelContains("本机记录"), "摘要不再带实现标签")
-        XCTAssertTrue(
-            app.descendants(matching: .any)["models.provider.delete"].waitForExistence(timeout: 5),
-            "删除入口有稳定 identifier"
-        )
-    }
-
     // MARK: - 默认模型
-
-    /// 回归：详情页点「设为默认」后，本机记录必须真的切过去。
-    /// 旧实现的详情页本地快照会变，但 `recordImportedProvider` 用本机旧默认覆盖
-    /// 了新选择，关闭详情页/回到设置页又显示旧默认（用户看到的「选了没变」）。
-    func testSetDefaultModelPersistsIntoLocalCatalog() {
-        relaunch("online-model-update")
-        openModelsScreen()
-
-        let row = providerRow("Alpha Models")
-        XCTAssertTrue(row.waitForExistence(timeout: 5), "服务行可见")
-        row.tap()
-        XCTAssertTrue(app.navigationBars["模型服务详情"].waitForExistence(timeout: 5), "进入详情")
-
-        let setDefault = app.buttons["models.provider.setDefault.alpha-mini"]
-        XCTAssertTrue(setDefault.waitForExistence(timeout: 5), "非默认模型有设为默认按钮")
-        setDefault.tap()
-
-        let alert = app.alerts["模型服务已更新"]
-        XCTAssertTrue(alert.waitForExistence(timeout: 8), "设为默认成功提示")
-        alert.buttons["知道了"].tap()
-        XCTAssertTrue(
-            app.buttons["models.provider.setDefault.alpha-pro"].waitForExistence(timeout: 5),
-            "详情的本地快照应立即切换默认标记"
-        )
-
-        // 关闭详情后重新打开：若本机记录没更新，这里会退回 alpha-pro。
-        app.buttons["完成"].tap()
-        XCTAssertTrue(app.navigationBars["模型服务"].waitForExistence(timeout: 5), "回到模型服务页")
-        XCTAssertTrue(providerRow("Alpha Models").waitForExistence(timeout: 5))
-        providerRow("Alpha Models").tap()
-        XCTAssertTrue(app.navigationBars["模型服务详情"].waitForExistence(timeout: 5), "再次进入详情")
-        XCTAssertTrue(
-            app.buttons["models.provider.setDefault.alpha-pro"].waitForExistence(timeout: 5),
-            "重新打开详情后默认仍应是 Alpha Mini（本机记录已更新）"
-        )
-        XCTAssertFalse(
-            app.buttons["models.provider.setDefault.alpha-mini"].exists,
-            "Alpha Mini 已不是待选默认项"
-        )
-        app.buttons["完成"].tap()
-
-        // 设置页「默认模型」一行必须同步显示新选择。
-        let back = app.navigationBars.buttons.element(boundBy: 0)
-        if back.exists { back.tap() }
-        XCTAssertTrue(app.navigationBars["设置"].waitForExistence(timeout: 8), "回到设置页")
-        XCTAssertTrue(
-            waitForLabelContains(anyLabel: "默认模型", expected: "Alpha Mini"),
-            "设置页默认模型应显示新选择"
-        )
-    }
 
     private func waitForLabelContains(
         anyLabel needle: String,
@@ -258,11 +147,5 @@ extension ModelConfigChipUITests {
 
     private func providerRow(_ name: String) -> XCUIElement {
         app.buttons.matching(NSPredicate(format: "label CONTAINS %@", name)).firstMatch
-    }
-
-    private func anyLabelContains(_ value: String) -> Bool {
-        app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS %@", value))
-            .firstMatch.exists
     }
 }

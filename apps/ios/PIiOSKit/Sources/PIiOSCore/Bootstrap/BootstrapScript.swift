@@ -121,7 +121,8 @@ enum BootstrapScriptValidation {
     )
 
     static func isAttemptId(_ value: String) -> Bool {
-        !value.isEmpty && value.utf8.count <= 96 && value.unicodeScalars.allSatisfy {
+        !value.isEmpty && value != "." && value != ".."
+            && value.utf8.count <= 96 && value.unicodeScalars.allSatisfy {
             $0.isASCII && attemptCharacters.contains($0)
         }
     }
@@ -211,13 +212,15 @@ umask 077
 BASE="$HOME/.pi-adaptor"
 RELEASES="$BASE/releases"
 WORK="$BASE/.bootstrap"
-STATE="$WORK/state.json"
+ATTEMPT="$WORK/attempts/$ATTEMPT_ID"
+STATE="$ATTEMPT/state.json"
+LEGACY_STATE="$WORK/state.json"
 RECEIPT="$WORK/install-receipt.json"
-PAIR_JSON="$WORK/pair.json"
-PAIR_RESULT="$WORK/pair.result"
-PAIR_REJECT="$WORK/pair.reject"
-VERIFY_RESULT="$WORK/verify.result"
-CANCEL="$WORK/cancel"
+PAIR_JSON="$ATTEMPT/pair.json"
+PAIR_RESULT="$ATTEMPT/pair.result"
+PAIR_REJECT="$ATTEMPT/pair.reject"
+VERIFY_RESULT="$ATTEMPT/verify.result"
+CANCEL="$ATTEMPT/cancel"
 LOCK="$WORK/active.lock"
 PART="$WORK/$ARTIFACT_NAME.part"
 CHECKSUM_FILE="$WORK/$ARTIFACT_NAME.sha256"
@@ -231,10 +234,12 @@ TRANSACTION_RECEIPT_BACKUP="$WORK/transaction.receipt.previous"
 TRANSACTION_LEGACY="$WORK/transaction.legacy-units"
 TRANSACTION_UNIT_BACKUP="$WORK/transaction.unit.previous"
 TRANSACTION_UNIT_ABSENT="$WORK/transaction.unit.absent"
+TRANSACTION_TLS_BACKUP="$WORK/transaction.tls.previous"
+TRANSACTION_TLS_ABSENT="$WORK/transaction.tls.absent"
 ROLLBACK_SCRIPT="$WORK/install.sh"
 DIRECT_ACTIVE=0
 DIRECT_TLS="$BASE/tls"
-DIRECT_TRUST="$WORK/direct-trust.json"
+DIRECT_TRUST="$ATTEMPT/direct-trust.json"
 
 CURRENT_STEP="probe"
 ARTIFACT_BYTES=0
@@ -243,6 +248,7 @@ EXPECTED_SHA256=""
 SERVICE_STATE="absent"
 MANUAL_PID=""
 PAIR_READER_PID=""
+DOWNLOAD_PID=""
 STAGE=""
 INSTALL_DIR=""
 PREVIOUS_CURRENT_TARGET="none"
@@ -255,9 +261,9 @@ FAILURE_REASON=""
 ROLLBACK_RESULT="not-needed"
 ROLLBACK_STEP=""
 ROLLBACK_REASON=""
-TRANSACTION_STARTED=0
 SERVER_ARCH="unknown"
 NODE_VERSION="unknown"
+ACTUAL_VERSION=""
 
 step() {
   printf '%s\n' "PI_HOST_BOOTSTRAP $1"
@@ -268,16 +274,19 @@ write_state() {
   status=$2
   error_code=${3:-}
   service_value=${4:-$SERVICE_STATE}
+  output_state=${5:-$STATE}
   case "$next_step$status$error_code$service_value$ATTEMPT_ID$ARTIFACT_NAME$EXPECTED_SHA256" in
     *'"'*|*'\'*) return 1 ;;
   esac
-  [ -d "$WORK" ] || return 1
+  [ -d "$ATTEMPT" ] || return 1
   error_json='null'
   if [ -n "$error_code" ]; then
     details_reason=${FAILURE_REASON:-$error_code}
-    error_json="{\"code\":\"$error_code\",\"details\":{\"reason\":\"$details_reason\",\"phase\":\"$next_step\",\"expectedName\":\"$SERVER_NAME\",\"expectedVersion\":\"$VERSION\",\"installDirectory\":\"$INSTALL_DIR\",\"unitName\":\"$UNIT_NAME\",\"port\":$PORT,\"legacyUnits\":$LEGACY_UNITS_JSON,\"rollback\":\"$ROLLBACK_RESULT\",\"rollbackStep\":\"$ROLLBACK_STEP\",\"serverArch\":\"$SERVER_ARCH\",\"nodeVersion\":\"$NODE_VERSION\"}}"
+    actual_version_json=null
+    [ -z "$ACTUAL_VERSION" ] || actual_version_json="\"$ACTUAL_VERSION\""
+    error_json="{\"code\":\"$error_code\",\"details\":{\"reason\":\"$details_reason\",\"phase\":\"$next_step\",\"expectedName\":\"$SERVER_NAME\",\"expectedVersion\":\"$VERSION\",\"actualVersion\":$actual_version_json,\"installDirectory\":\"$INSTALL_DIR\",\"unitName\":\"$UNIT_NAME\",\"port\":$PORT,\"legacyUnits\":$LEGACY_UNITS_JSON,\"rollback\":\"$ROLLBACK_RESULT\",\"rollbackStep\":\"$ROLLBACK_STEP\",\"serverArch\":\"$SERVER_ARCH\",\"nodeVersion\":\"$NODE_VERSION\"}}"
   fi
-  tmp="$STATE.tmp.$$"
+  tmp="$output_state.tmp.$$"
   {
     printf '{"version":1,"attemptId":"%s","step":"%s","status":"%s",' "$ATTEMPT_ID" "$next_step" "$status"
     printf '"host":{"platform":"%s","arch":"%s"},' "$HOST_PLATFORM" "$HOST_ARCH"
@@ -287,7 +296,7 @@ write_state() {
     printf '"error":%s,"updatedAt":"%s"}\n' "$error_json" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   } >"$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$STATE"
+  mv -f "$tmp" "$output_state"
 }
 
 refresh_legacy_units_json() {
@@ -337,17 +346,25 @@ cleanup_manual() {
   MANUAL_PID=""
 }
 
+cleanup_download() {
+  if [ -n "$DOWNLOAD_PID" ]; then
+    kill "$DOWNLOAD_PID" 2>/dev/null || true
+    wait "$DOWNLOAD_PID" 2>/dev/null || true
+    DOWNLOAD_PID=""
+  fi
+}
+
 redact_pair_stderr() {
-  [ -f "$WORK/pair.err" ] || return 0
+  [ -f "$ATTEMPT/pair.err" ] || return 0
   token=""
   if [ -f "$PAIR_JSON" ]; then
     token=$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PAIR_JSON" 2>/dev/null || true)
   fi
   if [ -n "$token" ]; then
-    redacted="$WORK/pair.err.redacted.$$"
-    sed "s/$token/<redacted>/g" "$WORK/pair.err" >"$redacted" 2>/dev/null || return 1
+    redacted="$ATTEMPT/pair.err.redacted.$$"
+    sed "s/$token/<redacted>/g" "$ATTEMPT/pair.err" >"$redacted" 2>/dev/null || return 1
     chmod 600 "$redacted" 2>/dev/null || return 1
-    mv -f "$redacted" "$WORK/pair.err" || return 1
+    mv -f "$redacted" "$ATTEMPT/pair.err" || return 1
   fi
 }
 
@@ -428,9 +445,38 @@ record_transaction() {
     cp "$RECEIPT" "$TRANSACTION_RECEIPT_BACKUP"
     chmod 600 "$TRANSACTION_RECEIPT_BACKUP"
   fi
-  : >"$TRANSACTION_ACTIVE"
-  chmod 600 "$TRANSACTION_ACTIVE"
-  TRANSACTION_STARTED=1
+  rm -rf "$TRANSACTION_TLS_BACKUP"
+  rm -f "$TRANSACTION_TLS_ABSENT"
+  printf '%s\n' "$ATTEMPT_ID" >"$TRANSACTION_ACTIVE.next" &&
+    mv -f "$TRANSACTION_ACTIVE.next" "$TRANSACTION_ACTIVE" || die "bootstrap-permissions"
+}
+
+attempt_committed() {
+  committed_attempt=$1
+  case "$committed_attempt" in ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  committed_state="$WORK/attempts/$committed_attempt/state.json"
+  [ -f "$committed_state" ] || return 1
+  IFS= read -r state_line <"$committed_state" || return 1
+  case "$state_line" in
+    '{"version":1,"attemptId":"'"$committed_attempt"'","step":"done","status":"ok",'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+clear_transaction() {
+  rm -f "$TRANSACTION_ACTIVE" || return 1
+  rm -f "$TRANSACTION_PREVIOUS" "$TRANSACTION_SERVICE" "$TRANSACTION_ENABLED" \
+    "$TRANSACTION_INSTALL_DIR" "$TRANSACTION_ROLLBACK_SCRIPT" "$TRANSACTION_RECEIPT_BACKUP" \
+    "$TRANSACTION_LEGACY" "$TRANSACTION_UNIT_BACKUP" "$TRANSACTION_UNIT_ABSENT" \
+    "$TRANSACTION_TLS_ABSENT" && rm -rf "$TRANSACTION_TLS_BACKUP"
+}
+
+restore_tls() {
+  if [ -e "$TRANSACTION_TLS_BACKUP" ] || [ -L "$TRANSACTION_TLS_BACKUP" ]; then
+    rm -rf "$DIRECT_TLS" && mv "$TRANSACTION_TLS_BACKUP" "$DIRECT_TLS"
+  elif [ -f "$TRANSACTION_TLS_ABSENT" ]; then
+    rm -rf "$DIRECT_TLS"
+  fi
 }
 
 restore_legacy_units() {
@@ -495,7 +541,11 @@ restore_service_enablement() {
 }
 
 rollback_transaction() {
-  [ "$TRANSACTION_STARTED" = 1 ] || [ -f "$TRANSACTION_ACTIVE" ] || return 0
+  [ -f "$TRANSACTION_ACTIVE" ] || return 0
+  if attempt_committed "$(cat "$TRANSACTION_ACTIVE" 2>/dev/null || true)"; then
+    clear_transaction
+    return $?
+  fi
   ROLLBACK_RESULT="attempted"
   ROLLBACK_STEP=""
   ROLLBACK_REASON=""
@@ -556,6 +606,8 @@ rollback_transaction() {
     rollback_ok=0
   fi
 
+  restore_tls || { ROLLBACK_STEP="restore-tls"; rollback_ok=0; }
+
   # Restore the unit file (or remove a newly-created one) before daemon-reload
   # and before re-enabling/starting the old service.
   unit_path="$HOME/.config/systemd/user/$UNIT_NAME"
@@ -572,15 +624,17 @@ rollback_transaction() {
   systemctl --user daemon-reload >/dev/null 2>&1 || { ROLLBACK_STEP="restore-unit"; rollback_ok=0; }
 
   if [ -f "$TRANSACTION_RECEIPT_BACKUP" ]; then
-    cp "$TRANSACTION_RECEIPT_BACKUP" "$RECEIPT" 2>/dev/null || true
-    chmod 600 "$RECEIPT" 2>/dev/null || true
+    if ! cp "$TRANSACTION_RECEIPT_BACKUP" "$RECEIPT" 2>/dev/null || ! chmod 600 "$RECEIPT" 2>/dev/null; then
+      ROLLBACK_STEP="restore-receipt"; rollback_ok=0
+    fi
   else
-    rm -f "$RECEIPT"
+    rm -f "$RECEIPT" || { ROLLBACK_STEP="restore-receipt"; rollback_ok=0; }
   fi
 
   restore_service_enablement || { ROLLBACK_STEP="restore-enablement"; rollback_ok=0; }
 
-  if [ "$PREVIOUS_SERVICE_ACTIVE" = 1 ]; then
+  previous_service_active=$(cat "$TRANSACTION_SERVICE" 2>/dev/null || printf '%s' "$PREVIOUS_SERVICE_ACTIVE")
+  if [ "$previous_service_active" = 1 ]; then
     if ! systemctl --user start "$UNIT_NAME" >/dev/null 2>&1 ||
        ! systemctl --user is-active --quiet "$UNIT_NAME" >/dev/null 2>&1; then
       ROLLBACK_STEP="restart-previous"
@@ -596,14 +650,10 @@ rollback_transaction() {
   fi
 
   if [ "$rollback_ok" = 1 ]; then
+    clear_transaction || { ROLLBACK_STEP="cleanup-rollback"; ROLLBACK_RESULT="failed"; return 1; }
     ROLLBACK_RESULT="succeeded"
     ROLLBACK_STEP=""
     ROLLBACK_REASON=""
-    rm -f "$TRANSACTION_ACTIVE" "$TRANSACTION_PREVIOUS" "$TRANSACTION_SERVICE" \
-      "$TRANSACTION_ENABLED" "$TRANSACTION_INSTALL_DIR" "$TRANSACTION_ROLLBACK_SCRIPT" \
-      "$TRANSACTION_RECEIPT_BACKUP" "$TRANSACTION_LEGACY" \
-      "$TRANSACTION_UNIT_BACKUP" "$TRANSACTION_UNIT_ABSENT"
-    TRANSACTION_STARTED=0
     return 0
   fi
 
@@ -612,10 +662,13 @@ rollback_transaction() {
 }
 
 cleanup() {
+  cleanup_download
   cleanup_manual
   redact_pair_stderr || true
-  rm -f "$PAIR_JSON" "$PAIR_JSON".tmp.* "$WORK/pair.fifo" "$WORK/manual.pid"
+  rm -f "$PAIR_JSON" "$PAIR_JSON".tmp.* "$ATTEMPT/pair.fifo" "$WORK/manual.pid" \
+    "$PAIR_RESULT" "$VERIFY_RESULT" "$CANCEL" "$LEGACY_STATE.next.$$"
   [ -z "$STAGE" ] || rm -rf "$STAGE"
+  rm -rf "$DIRECT_TLS.staging.$$"
   rm -rf "$LOCK"
 }
 
@@ -623,9 +676,14 @@ die() {
   failure_code=$1
   FAILURE_REASON=${2:-$failure_code}
   trap - HUP INT TERM
+  if [ "$CURRENT_STEP" = "done" ] && attempt_committed "$ATTEMPT_ID"; then
+    clear_transaction || true
+    exit 0
+  fi
+  cleanup_download
   cleanup_manual
   redact_pair_stderr || true
-  rm -f "$PAIR_JSON" "$PAIR_JSON".tmp.* "$WORK/pair.fifo" "$WORK/pair.result" "$WORK/verify.result"
+  rm -f "$PAIR_JSON" "$PAIR_JSON".tmp.* "$ATTEMPT/pair.fifo" "$PAIR_RESULT" "$VERIFY_RESULT"
   refresh_legacy_units_json
   rollback_transaction || ROLLBACK_RESULT="failed"
   if [ "$ROLLBACK_RESULT" = "failed" ]; then
@@ -681,9 +739,9 @@ resume_download() {
   url=$1
   destination=$2
   if need curl; then
-    curl -fL -C - --connect-timeout 20 --max-time 900 -o "$destination" "$url"
+    exec curl -fL -C - --connect-timeout 20 --max-time 900 -o "$destination" "$url"
   elif need wget; then
-    wget -c -q --timeout=900 -O "$destination" "$url"
+    exec wget -c -q --timeout=900 -O "$destination" "$url"
   else
     return 127
   fi
@@ -691,8 +749,9 @@ resume_download() {
 
 download_artifact() {
   resume_download "$ARTIFACT_URL" "$PART" &
-  download_pid=$!
-  while kill -0 "$download_pid" 2>/dev/null; do
+  DOWNLOAD_PID=$!
+  while kill -0 "$DOWNLOAD_PID" 2>/dev/null; do
+    [ ! -f "$CANCEL" ] || die "download-failed" "cancelled"
     if [ -f "$PART" ]; then
       DOWNLOADED_BYTES=$(wc -c <"$PART" | tr -d ' ')
       write_state download running || true
@@ -700,7 +759,8 @@ download_artifact() {
     sleep 1
   done
   status=0
-  wait "$download_pid" || status=$?
+  wait "$DOWNLOAD_PID" || status=$?
+  DOWNLOAD_PID=""
   DOWNLOADED_BYTES=0
   [ ! -f "$PART" ] || DOWNLOADED_BYTES=$(wc -c <"$PART" | tr -d ' ')
   if [ "$status" -ne 0 ] && [ -f "$PART" ] && [ -n "$EXPECTED_SHA256" ]; then
@@ -741,8 +801,19 @@ if [ -z "${HOME:-}" ]; then
   printf '%s\n' "PI_HOST_FAILED {\"code\":\"HOST_BOOTSTRAP_FAILED\",\"step\":\"no-home\"}"
   exit 1
 fi
-mkdir -p "$BASE" "$WORK" || die "bootstrap-permissions"
-chmod 700 "$BASE" "$WORK" 2>/dev/null || die "bootstrap-permissions"
+mkdir -p "$ATTEMPT" || exit 1
+chmod 700 "$BASE" "$WORK" "$ATTEMPT" 2>/dev/null || exit 1
+
+reject_busy() {
+  printf '%s\n' busy >"$ATTEMPT/start"
+  exit 75
+}
+
+exec 9>"$WORK/install.flock" || exit 1
+lock_status=0
+flock -n -E 75 9 || lock_status=$?
+[ "$lock_status" -ne 75 ] || reject_busy
+[ "$lock_status" -eq 0 ] || exit 1
 
 if ! mkdir "$LOCK" 2>/dev/null; then
   # The pid file is written just after the lock directory is created. Give the
@@ -757,23 +828,23 @@ if ! mkdir "$LOCK" 2>/dev/null; then
     old_command=$(ps -p "$old_pid" -o command= 2>/dev/null || true)
     case "$old_command" in
       *bootstrap.sh*)
-        printf '%s\n' "PI_HOST_BOOTSTRAP_FAILED stage-failed" >&2
-        exit 1
+        reject_busy
         ;;
     esac
   fi
   rm -rf "$LOCK"
-  mkdir "$LOCK" 2>/dev/null || die "stage-failed"
+  mkdir "$LOCK" 2>/dev/null || reject_busy
 fi
-printf '%s\n' "$$" >"$LOCK/pid"
-chmod 600 "$LOCK/pid" 2>/dev/null || die "bootstrap-permissions"
-# Only the lock owner may clear another attempt's control files. Doing this
-# before acquiring the lock let a rejected second install wipe the first
-# install's cancel/pair/verify state.
-rm -f "$CANCEL" "$PAIR_RESULT" "$VERIFY_RESULT"
 trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
-rm -f "$PAIR_REJECT"
+printf '%s\n' "$$" >"$LOCK/pid" || die "bootstrap-permissions"
+trap 'die "stage-failed" "cancelled"' HUP INT TERM
+rm -f "$PAIR_RESULT" "$VERIFY_RESULT" "$PAIR_REJECT"
+# Released Hosts read the shared path to bind their trust output to this attempt.
+[ ! -d "$LEGACY_STATE" ] && ln -s "attempts/$ATTEMPT_ID/state.json" "$LEGACY_STATE.next.$$" &&
+  mv -f "$LEGACY_STATE.next.$$" "$LEGACY_STATE" || die "bootstrap-permissions"
+printf '%s\n' "$ATTEMPT_ID" >"$WORK/latest-attempt.$$" &&
+  mv -f "$WORK/latest-attempt.$$" "$WORK/latest-attempt" || die "bootstrap-permissions"
+printf '%s\n' ready >"$ATTEMPT/start" || die "bootstrap-permissions"
 
 # 诊断信息要在此之前采好，否则恢复事务失败时 state.json 里只有 unknown。
 SERVER_ARCH=$(uname -m 2>/dev/null | sed -n '1p' || true)
@@ -784,20 +855,31 @@ NODE_VERSION=$(node -v 2>/dev/null | sed -n '1p' || true)
 case "$NODE_VERSION" in *[!A-Za-z0-9._+-]*) NODE_VERSION="unknown" ;; esac
 
 if [ -f "$TRANSACTION_ACTIVE" ]; then
-  TRANSACTION_STARTED=1
-  PREVIOUS_CURRENT_TARGET=$(cat "$TRANSACTION_PREVIOUS" 2>/dev/null || printf 'none')
-  PREVIOUS_SERVICE_ACTIVE=$(cat "$TRANSACTION_SERVICE" 2>/dev/null || printf '0')
-  PREVIOUS_SERVICE_ENABLED=$(cat "$TRANSACTION_ENABLED" 2>/dev/null || printf 'disabled')
-  INSTALL_DIR=$(cat "$TRANSACTION_INSTALL_DIR" 2>/dev/null || true)
-  refresh_legacy_units_json
-  if ! rollback_transaction; then
-    FAILURE_REASON="recovery（回滚失败${ROLLBACK_STEP:+：$ROLLBACK_STEP}${ROLLBACK_REASON:+，$ROLLBACK_REASON}）"
-    write_state probe failed "rollback-failed" || true
-    printf '%s\n' "PI_HOST_BOOTSTRAP_FAILED rollback-failed" >&2
-    printf '%s\n' "PI_HOST_FAILED {\"code\":\"HOST_BOOTSTRAP_FAILED\",\"step\":\"rollback-failed\",\"originalStep\":\"recovery\"}"
-    exit 1
+  previous_attempt=$(cat "$TRANSACTION_ACTIVE" 2>/dev/null || true)
+  if attempt_committed "$previous_attempt"; then
+    if ! clear_transaction; then
+      write_state probe failed "bootstrap-permissions" || true
+      exit 1
+    fi
+  else
+    previous_pid=$(cat "$WORK/manual.pid" 2>/dev/null || true)
+    stop_manual_process "$previous_pid" || die "host-stop-timeout"
+    PREVIOUS_CURRENT_TARGET=$(cat "$TRANSACTION_PREVIOUS" 2>/dev/null || printf 'none')
+    PREVIOUS_SERVICE_ACTIVE=$(cat "$TRANSACTION_SERVICE" 2>/dev/null || printf '0')
+    PREVIOUS_SERVICE_ENABLED=$(cat "$TRANSACTION_ENABLED" 2>/dev/null || printf 'disabled')
+    INSTALL_DIR=$(cat "$TRANSACTION_INSTALL_DIR" 2>/dev/null || true)
+    refresh_legacy_units_json
+    if ! rollback_transaction; then
+      FAILURE_REASON="recovery（回滚失败${ROLLBACK_STEP:+：$ROLLBACK_STEP}${ROLLBACK_REASON:+，$ROLLBACK_REASON}）"
+      write_state probe failed "rollback-failed" || true
+      printf '%s\n' "PI_HOST_BOOTSTRAP_FAILED rollback-failed" >&2
+      printf '%s\n' "PI_HOST_FAILED {\"code\":\"HOST_BOOTSTRAP_FAILED\",\"step\":\"rollback-failed\",\"originalStep\":\"recovery\"}"
+      exit 1
+    fi
   fi
 fi
+find "$WORK/attempts" -mindepth 1 -maxdepth 1 -type d ! -name "$ATTEMPT_ID" -mtime +1 \
+  -exec rm -rf {} + 2>/dev/null || true
 
 step "probe"
 ARTIFACT_BYTES=0
@@ -826,7 +908,71 @@ node_path=$(command -v node)
   }
 ' "$MIN_NODE_VERSION" 2>/dev/null || die "node-too-old"
 
+check_host_version() {
+  version_status=0
+  ACTUAL_VERSION=$("$node_path" -e '
+    const { readFileSync } = require("node:fs");
+    const [source, value, requested] = process.argv.slice(1);
+    const readyPrefix = "PI_HOST_READY ";
+    if (source === "ready" && !value.startsWith(readyPrefix)) process.exit(2);
+    const actual = JSON.parse(source === "ready" ? value.slice(readyPrefix.length) : readFileSync(value, "utf8")).version;
+    const versionPattern = /^v?[0-9]+(?:\.[0-9]+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+    if (typeof actual !== "string" || actual.trim() !== actual ||
+        !versionPattern.test(actual) || !versionPattern.test(requested)) {
+      process.exit(2);
+    }
+    const parts = (version) => version.replace(/^v/, "").split(/[+-]/, 1)[0].split(".").map(BigInt);
+    const installed = parts(actual);
+    const target = parts(requested);
+    for (let index = 0; index < Math.max(installed.length, target.length); index++) {
+      const left = installed[index] ?? 0n;
+      const right = target[index] ?? 0n;
+      if (left === right) continue;
+      if (left > right) process.exitCode = 3;
+      break;
+    }
+    process.stdout.write(actual);
+  ' "$1" "$2" "$VERSION" 2>/dev/null) || version_status=$?
+  case "$version_status" in
+    0) ;;
+    3) die "downgrade-blocked" ;;
+    *) ACTUAL_VERSION=""; die "$3" ;;
+  esac
+}
+
+check_downgrade() {
+  ACTUAL_VERSION=""
+  if [ -f "$BASE/current/package.json" ] || [ -f "$BASE/current/dist/main.js" ]; then
+    check_host_version file "$BASE/current/package.json" "installed-version-unknown"
+  fi
+
+  # A changed current symlink cannot identify a process that started earlier.
+  running_state=$(systemctl --user is-active "$UNIT_NAME" 2>/dev/null || true)
+  case "$running_state" in
+    inactive|failed|unknown) return 0 ;;
+    active|reloading|refreshing|activating|deactivating) ;;
+    *) ACTUAL_VERSION=""; die "running-version-unknown" ;;
+  esac
+  ACTUAL_VERSION=""
+  running_unit=$(systemctl --user show "$UNIT_NAME" --property=MainPID --property=InvocationID 2>/dev/null) ||
+    die "running-version-unknown"
+  running_pid=$(printf '%s\n' "$running_unit" | sed -n 's/^MainPID=//p')
+  running_invocation=$(printf '%s\n' "$running_unit" | sed -n 's/^InvocationID=//p')
+  case "$running_pid" in ''|0|*[!0-9]*) die "running-version-unknown" ;; esac
+  case "$running_invocation" in ''|*[!0-9a-f]*) die "running-version-unknown" ;; esac
+  [ "${#running_invocation}" -eq 32 ] || die "running-version-unknown"
+  running_ready=$(journalctl --user-unit="$UNIT_NAME" --boot --no-pager --output=cat \
+    --grep='^PI_HOST_READY ' --lines=1 "_PID=$running_pid" "_SYSTEMD_INVOCATION_ID=$running_invocation" 2>/dev/null) ||
+    die "running-version-unknown"
+  [ "$running_unit" = "$(systemctl --user show "$UNIT_NAME" --property=MainPID --property=InvocationID 2>/dev/null)" ] ||
+    die "running-version-unknown"
+  check_host_version ready "$running_ready" "running-version-unknown"
+}
+
+check_downgrade
+
 progress "resolve"
+[ ! -f "$CANCEL" ] || die "download-failed" "cancelled"
 rm -f "$CHECKSUM_FILE"
 fetch "$CHECKSUM_URL" "$CHECKSUM_FILE" || die "download-failed"
 chmod 600 "$CHECKSUM_FILE" 2>/dev/null || die "artifact-permissions"
@@ -948,6 +1094,8 @@ if [ "$reuse" = 0 ]; then
   cp "$unpack/$BUNDLE_DIR/scripts/install.sh" "$ROLLBACK_SCRIPT" || die "install-failed"
   chmod 700 "$ROLLBACK_SCRIPT"
   INSTALL_DIR="$RELEASES/$VERSION-$EXPECTED_SHA256"
+  [ ! -f "$CANCEL" ] || die "stage-failed" "cancelled"
+  check_downgrade
   record_transaction
   progress "activate"
   if ! "$unpack/$BUNDLE_DIR/scripts/install.sh" --install \
@@ -965,6 +1113,8 @@ else
   cp "$BASE/current/scripts/install.sh" "$ROLLBACK_SCRIPT" || die "install-failed"
   chmod 700 "$ROLLBACK_SCRIPT"
   INSTALL_DIR="$RELEASES/$VERSION-$EXPECTED_SHA256"
+  [ ! -f "$CANCEL" ] || die "stage-failed" "cancelled"
+  check_downgrade
   record_transaction
   progress "activate"
   if ! "$ROLLBACK_SCRIPT" --install \
@@ -996,7 +1146,7 @@ installed_version=$(node -e '
 
 # Optional direct TLS. Failure leaves the complete loopback/SSH pairing path available.
 if [ "$DIRECT_REQUESTED" = 1 ]; then
-  if mkdir -p "$DIRECT_TLS" && chmod 700 "$DIRECT_TLS"; then
+  if [ ! -d "$DIRECT_TLS" ] || chmod 700 "$DIRECT_TLS"; then
     previous_name=$(cat "$DIRECT_TLS/direct-name" 2>/dev/null || true)
     reuse_ok=0
     if [ "$previous_name" = "$DIRECT_NAME" ] && [ -f "$DIRECT_TLS/direct-cert.pem" ] && [ -f "$DIRECT_TLS/direct-key.pem" ] && \
@@ -1009,8 +1159,7 @@ if [ "$DIRECT_REQUESTED" = 1 ]; then
     fi
     if [ "$reuse_ok" != 1 ]; then
       tls_staging="$DIRECT_TLS.staging.$$"
-      tls_backup="$DIRECT_TLS.previous.$$"
-      rm -rf "$tls_staging" "$tls_backup"
+      rm -rf "$tls_staging"
       if mkdir -p "$tls_staging" && chmod 700 "$tls_staging" && \
         openssl req -x509 -newkey rsa:3072 -sha256 -days 825 -nodes \
           -keyout "$tls_staging/direct-key.pem" \
@@ -1026,12 +1175,15 @@ if [ "$DIRECT_REQUESTED" = 1 ]; then
         chmod 600 "$tls_staging/direct-key.pem" && \
         printf '%s\n' "$DIRECT_NAME" >"$tls_staging/direct-name" && \
         chmod 600 "$tls_staging/direct-name"; then
-        [ ! -d "$DIRECT_TLS" ] || mv "$DIRECT_TLS" "$tls_backup"
+        if [ -e "$DIRECT_TLS" ] || [ -L "$DIRECT_TLS" ]; then
+          mv "$DIRECT_TLS" "$TRANSACTION_TLS_BACKUP" || die "bootstrap-permissions"
+        else
+          : >"$TRANSACTION_TLS_ABSENT" || die "bootstrap-permissions"
+        fi
         if mv "$tls_staging" "$DIRECT_TLS"; then
-          rm -rf "$tls_backup"
           DIRECT_ACTIVE=1
         else
-          [ ! -d "$tls_backup" ] || mv "$tls_backup" "$DIRECT_TLS"
+          restore_tls || die "bootstrap-permissions"
         fi
       else
         rm -rf "$tls_staging"
@@ -1083,7 +1235,10 @@ mv -f "$unit_tmp" "$unit_path" || die "unit-failed"
 SERVICE_STATE="written"
 write_state "write-unit" running "" "written" || die "bootstrap-permissions"
 systemctl --user daemon-reload >/dev/null 2>&1 || die "unit-failed"
-loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || die "unit-failed"
+install_user=$(id -un)
+if [ "$(loginctl show-user "$install_user" --property=Linger --value 2>/dev/null || true)" != yes ]; then
+  loginctl enable-linger "$install_user" >/dev/null 2>&1 || die "unit-failed"
+fi
 # 只 start 不 enable 的话，重启后服务不会自动拉起，设备会失联。
 systemctl --user enable "$UNIT_NAME" >/dev/null 2>&1 || die "unit-failed"
 
@@ -1144,12 +1299,12 @@ fi
 
 previous_pid=$(cat "$WORK/manual.pid" 2>/dev/null || true)
 stop_manual_process "$previous_pid" || die "host-stop-timeout"
-rm -f "$PAIR_JSON" "$PAIR_RESULT" "$PAIR_REJECT" "$VERIFY_RESULT" "$WORK/pair.fifo"
+rm -f "$PAIR_JSON" "$PAIR_RESULT" "$PAIR_REJECT" "$VERIFY_RESULT" "$ATTEMPT/pair.fifo"
 
-mkfifo "$WORK/pair.fifo" || die "host-start-failed"
-chmod 600 "$WORK/pair.fifo" 2>/dev/null || die "bootstrap-permissions"
-: >"$WORK/pair.err"
-chmod 600 "$WORK/pair.err" 2>/dev/null || die "bootstrap-permissions"
+mkfifo "$ATTEMPT/pair.fifo" || die "host-start-failed"
+chmod 600 "$ATTEMPT/pair.fifo" 2>/dev/null || die "bootstrap-permissions"
+: >"$ATTEMPT/pair.err"
+chmod 600 "$ATTEMPT/pair.err" 2>/dev/null || die "bootstrap-permissions"
 
 # The manual and systemd processes must use the same isolated root.
 rm -f "$DIRECT_TRUST"
@@ -1168,7 +1323,7 @@ PI_ADAPTOR_DIRECT_ENABLED="$DIRECT_ACTIVE" \
   --port "$PORT" \
   --pair \
   --pairing-lifetime-ms "$PAIRING_LIFETIME_MS" \
-  >"$WORK/pair.fifo" 2>"$WORK/pair.err" </dev/null &
+  >"$ATTEMPT/pair.fifo" 2>"$ATTEMPT/pair.err" </dev/null 9>&- &
 MANUAL_PID=$!
 printf '%s\n' "$MANUAL_PID" >"$WORK/manual.pid"
 chmod 600 "$WORK/manual.pid" 2>/dev/null || die "bootstrap-permissions"
@@ -1234,8 +1389,8 @@ chmod 600 "$WORK/manual.pid" 2>/dev/null || die "bootstrap-permissions"
       chmod 600 "$pair_tmp" 2>/dev/null || exit 1
       mv -f "$pair_tmp" "$PAIR_JSON" || exit 1
     fi
-  done <"$WORK/pair.fifo"
-) &
+  done <"$ATTEMPT/pair.fifo"
+) 9>&- &
 PAIR_READER_PID=$!
 
 waited=0
@@ -1246,7 +1401,7 @@ while [ ! -s "$PAIR_JSON" ]; do
     die "pair-failed" "$reason"
   fi
   if ! kill -0 "$MANUAL_PID" 2>/dev/null; then
-    if grep -q '^PI_HOST_FAILED ' "$WORK/pair.err" 2>/dev/null; then
+    if grep -q '^PI_HOST_FAILED ' "$ATTEMPT/pair.err" 2>/dev/null; then
       die "host-start-failed"
     fi
     die "host-exited"
@@ -1279,7 +1434,7 @@ progress "stop-manual"
 manual_to_stop=$MANUAL_PID
 cleanup_manual
 kill -0 "$manual_to_stop" 2>/dev/null && die "host-stop-timeout"
-rm -f "$WORK/pair.fifo" "$WORK/manual.pid"
+rm -f "$ATTEMPT/pair.fifo" "$WORK/manual.pid"
 
 progress "start-unit"
 systemctl --user start "$UNIT_NAME" >/dev/null 2>&1 || die "unit-failed"
@@ -1300,13 +1455,12 @@ verify_result=$(cat "$VERIFY_RESULT" 2>/dev/null || true)
 rm -f "$VERIFY_RESULT"
 [ "$verify_result" = "ok" ] || die "verify-device-failed"
 
+CURRENT_STEP="done"
 step "done"
-write_state "done" ok "" "active" || die "receipt-failed"
-ROLLBACK_RESULT="not-needed"
-TRANSACTION_STARTED=0
-rm -f "$TRANSACTION_ACTIVE" "$TRANSACTION_PREVIOUS" "$TRANSACTION_SERVICE" \
-  "$TRANSACTION_ENABLED" "$TRANSACTION_INSTALL_DIR" "$TRANSACTION_ROLLBACK_SCRIPT" \
-  "$TRANSACTION_RECEIPT_BACKUP" "$TRANSACTION_LEGACY"
+# Rename the active journal into the success state so even an older installer sees the commit.
+write_state "done" ok "" "active" "$TRANSACTION_ACTIVE" &&
+  mv -f "$TRANSACTION_ACTIVE" "$STATE" || die "receipt-failed"
+clear_transaction || true
 """#
     }
 
@@ -1317,31 +1471,48 @@ rm -f "$TRANSACTION_ACTIVE" "$TRANSACTION_PREVIOUS" "$TRANSACTION_SERVICE" \
 
 /// The non-secret progress commands used between polling reads.
 public enum BootstrapRemoteCommand {
-    public static let workDirectory = #"$HOME/.pi-adaptor/.bootstrap"#
-    public static let statePath = #"$HOME/.pi-adaptor/.bootstrap/state.json"#
-    public static let pairPath = #"$HOME/.pi-adaptor/.bootstrap/pair.json"#
-    public static let scriptPath = #"$HOME/.pi-adaptor/.bootstrap/bootstrap.sh"#
-
     /// One exec performs the only platform probe used by the whole run.
     public static let probe = #"printf 'platform=%s\narch=%s\n' "$(uname -s)" "$(uname -m)""#
 
-    public static let installScript = #"umask 077; mkdir -p "$HOME/.pi-adaptor/.bootstrap" && chmod 700 "$HOME/.pi-adaptor/.bootstrap" && cat > "$HOME/.pi-adaptor/.bootstrap/bootstrap.sh" && chmod 700 "$HOME/.pi-adaptor/.bootstrap/bootstrap.sh""#
+    public static func scoped(_ command: String, attemptId: String) -> String {
+        guard BootstrapScriptValidation.isAttemptId(attemptId) else { return "exit 64" }
+        return #"attempt="$HOME/.pi-adaptor/.bootstrap/attempts/\#(attemptId)""# + "\n" + command
+    }
 
-    public static let launch = #"work="$HOME/.pi-adaptor/.bootstrap"; command -v setsid >/dev/null 2>&1 || exit 1; command -v nohup >/dev/null 2>&1 || exit 1; cd "$work" || exit 1; setsid nohup /bin/sh ./bootstrap.sh >bootstrap.log 2>&1 </dev/null & printf 'pid=%s\n' "$!""#
+    public static let installScript = #"umask 077; mkdir -p "${attempt%/*}" && mkdir "$attempt" && cat > "$attempt/bootstrap.sh" && chmod 700 "$attempt/bootstrap.sh""#
 
-    public static let readState = #"cat "$HOME/.pi-adaptor/.bootstrap/state.json" 2>/dev/null || true"#
+    public static let launch = #"""
+    umask 077
+    for tool in setsid nohup flock; do command -v "$tool" >/dev/null 2>&1 || exit 69; done
+    cd "$attempt" || exit 1
+    setsid nohup /bin/sh ./bootstrap.sh >bootstrap.log 2>&1 </dev/null &
+    launcher_pid=$!
+    waited=0
+    while [ "$waited" -lt 60 ]; do
+      case "$(cat start 2>/dev/null)" in
+        ready) printf 'pid=%s\n' "$launcher_pid"; exit 0 ;;
+        busy) cd / && rm -rf "$attempt"; exit 75 ;;
+      esac
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    : >cancel
+    exit 1
+    """#
 
-    public static let readPairing = #"cat "$HOME/.pi-adaptor/.bootstrap/pair.json" 2>/dev/null || true"#
+    public static let readState = #"cat "$attempt/state.json" 2>/dev/null || true"#
 
-    public static let writePairingOK = #"umask 077; printf '%s\n' ok > "$HOME/.pi-adaptor/.bootstrap/pair.result" && chmod 600 "$HOME/.pi-adaptor/.bootstrap/pair.result""#
+    public static let readPairing = #"cat "$attempt/pair.json" 2>/dev/null || true"#
 
-    public static let writePairingFailed = #"umask 077; printf '%s\n' failed > "$HOME/.pi-adaptor/.bootstrap/pair.result" && chmod 600 "$HOME/.pi-adaptor/.bootstrap/pair.result""#
+    public static let writePairingOK = #"umask 077; printf '%s\n' ok > "$attempt/pair.result" && chmod 600 "$attempt/pair.result""#
 
-    public static let writeVerificationOK = #"umask 077; printf '%s\n' ok > "$HOME/.pi-adaptor/.bootstrap/verify.result" && chmod 600 "$HOME/.pi-adaptor/.bootstrap/verify.result""#
+    public static let writePairingFailed = #"umask 077; printf '%s\n' failed > "$attempt/pair.result" && chmod 600 "$attempt/pair.result""#
 
-    public static let writeVerificationFailed = #"umask 077; printf '%s\n' failed > "$HOME/.pi-adaptor/.bootstrap/verify.result" && chmod 600 "$HOME/.pi-adaptor/.bootstrap/verify.result""#
+    public static let writeVerificationOK = #"umask 077; printf '%s\n' ok > "$attempt/verify.result" && chmod 600 "$attempt/verify.result""#
 
-    public static let cancel = #"umask 077; printf '%s\n' cancel > "$HOME/.pi-adaptor/.bootstrap/cancel" && chmod 600 "$HOME/.pi-adaptor/.bootstrap/cancel""#
+    public static let writeVerificationFailed = #"umask 077; printf '%s\n' failed > "$attempt/verify.result" && chmod 600 "$attempt/verify.result""#
+
+    public static let cancel = #"umask 077; printf '%s\n' cancel > "$attempt/cancel" && chmod 600 "$attempt/cancel""#
 }
 
 /// Token material handed from the owner-only remote file to the pairing

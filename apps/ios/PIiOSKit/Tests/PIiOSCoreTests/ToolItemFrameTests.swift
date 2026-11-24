@@ -74,6 +74,18 @@ final class ToolItemFrameTests: XCTestCase {
         XCTAssertEqual(item.text, "hello-from-tool")
     }
 
+    func testToolPreviewReadsTheCommittedHistoryItemID() throws {
+        let model = model()
+        _ = model.applyEvents([
+            try toolStarted(sequence: 1),
+            try toolCompleted(sequence: 2, status: "completed", result: #"{"text":"preview","textByteLength":500000,"historyItemId":"native_1"}"#),
+        ])
+        let item = try XCTUnwrap(model.item(id: "call_1"))
+        XCTAssertEqual(item.historyItemID, "native_1")
+        XCTAssertEqual(item.historyTextByteLength, 500_000)
+        XCTAssertEqual(item.text, "preview")
+    }
+
     /// `tool.updated` 的 `delta` 是追加文本（契约 §7.2），必须累计到同一条卡片正文上。
     func testToolUpdatedDeltasAccumulateOnTheCardBody() throws {
         let model = model()

@@ -64,13 +64,13 @@ public enum BootstrapDirectTrustError: Error, Equatable, CustomStringConvertible
 
 public extension BootstrapRemoteCommand {
     static func readDirectTrust(attemptId: String) -> String {
-        guard BootstrapScriptValidation.isAttemptId(attemptId) else { return "exit 64" }
-        return #"path="$HOME/.pi-adaptor/.bootstrap/direct-trust.json"; if [ ! -e "$path" ]; then exit 0; fi; [ -f "$path" ] && [ ! -L "$path" ] || exit 73; [ "$(stat -c %u "$path")" = "$(id -u)" ] || exit 73; [ "$(stat -c %a "$path")" = "600" ] || exit 73; bytes=$(stat -c %s "$path") || exit 73; [ "$bytes" -le 4096 ] || exit 73; cat "$path""#
+        scoped(
+            #"path="$attempt/direct-trust.json"; if [ ! -e "$path" ]; then exit 0; fi; [ -f "$path" ] && [ ! -L "$path" ] || exit 73; [ "$(stat -c %u "$path")" = "$(id -u)" ] || exit 73; [ "$(stat -c %a "$path")" = "600" ] || exit 73; bytes=$(stat -c %s "$path") || exit 73; [ "$bytes" -le 4096 ] || exit 73; cat "$path""#,
+            attemptId: attemptId
+        )
     }
 
     static func clearDirectTrust(attemptId: String) -> String {
-        guard BootstrapScriptValidation.isAttemptId(attemptId) else { return "exit 0" }
-        let expected = "'" + attemptId.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        return #"path="$HOME/.pi-adaptor/.bootstrap/direct-trust.json"; [ -f "$path" ] || exit 0; actual=$(sed -n 's/.*"attemptId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$path" 2>/dev/null || true); [ "$actual" = \#(expected) ] && rm -f "$path" || true"#
+        scoped(#"rm -f "$attempt/direct-trust.json""#, attemptId: attemptId)
     }
 }

@@ -4,7 +4,7 @@ import Foundation
 
 /// `GET /repos/{owner}/{repo}/releases` 的一个条目。
 ///
-/// 只解码自动匹配需要的字段：标签、是否草稿、是否预发布、资产名。
+/// 只解码自动匹配需要的发布字段。
 /// 未识别的字段一律忽略，方便 GitHub 继续扩展响应。
 public struct GitHubReleaseListEntry: Decodable, Equatable, Sendable {
     public struct Asset: Decodable, Equatable, Sendable {
@@ -33,12 +33,14 @@ public struct GitHubReleaseListEntry: Decodable, Equatable, Sendable {
     public let draft: Bool
     public let prerelease: Bool
     public let assets: [Asset]
+    public let body: String?
 
-    public init(tagName: String, draft: Bool, prerelease: Bool, assets: [Asset]) {
+    public init(tagName: String, draft: Bool, prerelease: Bool, assets: [Asset], body: String? = nil) {
         self.tagName = tagName
         self.draft = draft
         self.prerelease = prerelease
         self.assets = assets
+        self.body = body
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -46,6 +48,7 @@ public struct GitHubReleaseListEntry: Decodable, Equatable, Sendable {
         case draft
         case prerelease
         case assets
+        case body
     }
 
     public init(from decoder: Decoder) throws {
@@ -54,6 +57,7 @@ public struct GitHubReleaseListEntry: Decodable, Equatable, Sendable {
         draft = try container.decode(Bool.self, forKey: .draft)
         prerelease = try container.decode(Bool.self, forKey: .prerelease)
         assets = try container.decodeIfPresent([Asset].self, forKey: .assets) ?? []
+        body = try container.decodeIfPresent(String.self, forKey: .body)
     }
 }
 
@@ -88,37 +92,50 @@ public struct AdaptorReleaseCandidate: Equatable, Sendable {
 
 // MARK: - 纯选择逻辑
 
-/// 从 GitHub 发布列表里挑选「最新稳定版 PI-adaptor」。
+/// 从 GitHub 发布列表里挑选与当前 App 兼容的最新稳定版 PI-adaptor。
 ///
 /// 规则（顺序即优先级）：
 /// 1. 跳过草稿与预发布；
 /// 2. 标签必须是 `pi-adaptor-v<数字点分版本>`，iOS App 的发布因此不会被误选；
 /// 3. 必须同时存在目标架构的 `.tar.gz` 与 `.sha256` 资产。
+/// 4. 双方版本均满足对方的最低要求。
 ///
-/// 不满足条件的发布会被跳过，继续看下一个；都不满足时返回 `nil`，由调用方回退内置版本。
+/// 在满足条件的发布中选版本号最高的一项；无匹配时由调用方回退内置版本。
 public enum AdaptorReleaseSelection {
     public static let tagPrefix = "pi-adaptor-v"
 
     public static func latest(
         from data: Data,
         target: BootstrapArtifactTarget,
-        repository: String = PIAdaptorRelease.releaseRepository
+        repository: String = PIAdaptorRelease.releaseRepository,
+        clientVersion: String = PIAdaptorRelease.releaseVersion,
+        minimumHostVersion: String = PIAdaptorRelease.releaseVersion
     ) -> AdaptorReleaseCandidate? {
         guard let entries = try? JSONDecoder().decode([GitHubReleaseListEntry].self, from: data) else {
             return nil
         }
-        return latest(from: entries, target: target, repository: repository)
+        return latest(
+            from: entries, target: target, repository: repository,
+            clientVersion: clientVersion, minimumHostVersion: minimumHostVersion
+        )
     }
 
     public static func latest(
         from entries: [GitHubReleaseListEntry],
         target: BootstrapArtifactTarget,
-        repository: String = PIAdaptorRelease.releaseRepository
+        repository: String = PIAdaptorRelease.releaseRepository,
+        clientVersion: String = PIAdaptorRelease.releaseVersion,
+        minimumHostVersion: String = PIAdaptorRelease.releaseVersion
     ) -> AdaptorReleaseCandidate? {
+        var selected: (version: SemverParts, candidate: AdaptorReleaseCandidate)?
         for entry in entries where !entry.draft && !entry.prerelease {
             guard entry.tagName.hasPrefix(tagPrefix) else { continue }
             let rawVersion = String(entry.tagName.dropFirst(tagPrefix.count))
-            guard isStableVersion(rawVersion) else { continue }
+            guard let version = SemverParts(rawVersion),
+                  isCompatible(
+                entry, hostVersion: rawVersion, clientVersion: clientVersion, minimumHostVersion: minimumHostVersion
+            ) else { continue }
+            if let selected, version <= selected.version { continue }
             guard let release = PIAdaptorRelease(
                 version: rawVersion,
                 target: target,
@@ -132,7 +149,7 @@ public enum AdaptorReleaseSelection {
             }
 
             let baseURL = "https://github.com/\(repository)/releases/download/\(release.releaseTag)"
-            return AdaptorReleaseCandidate(
+            selected = (version, AdaptorReleaseCandidate(
                 version: release.version,
                 releaseTag: release.releaseTag,
                 baseURL: baseURL,
@@ -141,9 +158,43 @@ public enum AdaptorReleaseSelection {
                 pinnedChecksum: entry.assets
                     .first { $0.name == release.artifactName }
                     .flatMap { sha256Digest(fromAPIDigest: $0.digest) }
-            )
+            ))
         }
-        return nil
+        return selected?.candidate
+    }
+
+    public static func isCompatible(
+        _ entry: GitHubReleaseListEntry,
+        hostVersion: String,
+        clientVersion: String,
+        minimumHostVersion: String = PIAdaptorRelease.releaseVersion
+    ) -> Bool {
+        guard isStableVersion(hostVersion),
+              meetsMinimum(version: hostVersion, minimum: minimumHostVersion),
+              (entry.tagName != PIAdaptorRelease.releaseTag ||
+               meetsMinimum(version: clientVersion, minimum: PIAdaptorRelease.minimumBundledClientVersion)),
+              let minimumClient = minimumClientVersion(for: entry, hostVersion: hostVersion) else {
+            return false
+        }
+        return meetsMinimum(version: clientVersion, minimum: minimumClient)
+    }
+
+    public static func meetsMinimum(version: String, minimum: String) -> Bool {
+        guard isStableVersion(version), isStableVersion(minimum),
+              let version = SemverParts(version), let minimum = SemverParts(minimum) else {
+            return false
+        }
+        return version >= minimum
+    }
+
+    public static func minimumClientVersion(for entry: GitHubReleaseListEntry, hostVersion: String) -> String? {
+        let prefix = "<!-- pi-ios-min-version:"
+        let declarations = entry.body?.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.hasPrefix(prefix) } ?? []
+        guard let declaration = declarations.first else { return hostVersion }
+        guard declarations.count == 1, declaration.hasSuffix("-->") else { return nil }
+        return declaration.dropFirst(prefix.count).dropLast(3).trimmingCharacters(in: .whitespaces)
     }
 
     /// 把 GitHub API 的 `digest`（`sha256:<hex>`）转成发布脚本使用的裸摘要。
