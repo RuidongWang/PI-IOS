@@ -113,7 +113,7 @@ final class GitHubReleaseListTests: XCTestCase {
         let entries = [
             release("0.0.11", body: "<!-- pi-ios-min-version: invalid -->"),
             release("0.0.10", body: "说明\n<!-- pi-ios-min-version: 0.0.6 -->"),
-            release("0.0.6", body: "<!-- pi-ios-min-version: 0.0.5 -->"),
+            release(PIAdaptorRelease.releaseVersion, body: "<!-- pi-ios-min-version: 0.0.5 -->"),
             release("0.0.5"),
         ]
         XCTAssertEqual(AdaptorReleaseSelection.latest(

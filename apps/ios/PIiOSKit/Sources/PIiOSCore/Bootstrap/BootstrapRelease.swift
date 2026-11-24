@@ -7,9 +7,9 @@ import Foundation
 public struct PIAdaptorRelease: Equatable, Sendable {
     public static let defaultRepository = "RuidongWang/PI-adaptor"
     public static let releaseRepository = "RuidongWang/PI-adaptor"
-    public static let releaseVersion = "0.0.6"
-    public static let releaseTag = "pi-adaptor-v0.0.6"
-    public static let minimumBundledClientVersion = "0.0.6"
+    public static let releaseVersion = "0.0.7"
+    public static let releaseTag = "pi-adaptor-v0.0.7"
+    public static let minimumBundledClientVersion = "0.0.7"
     public static let runtimeServerName = "pi-adaptor"
     public static let installHomeName = ".pi-adaptor"
     public static let unitName = "pi-adaptor.service"
@@ -24,8 +24,8 @@ public struct PIAdaptorRelease: Equatable, Sendable {
         "https://github.com/\(patchedRepository)/releases/download/\(patchedReleaseTag)"
     }
     public static let patchedChecksums: [BootstrapArtifactTarget: String] = [
-        .linuxX64: "fa657457737a21c4940a0f954992203ad5d3923450387d3ce779a03fca6b91d6",
-        .linuxArm64: "80dd56956280fdf15677f76848ad23f18d16cf249e9acbcae99b87845ab42565",
+        .linuxX64: "c40983850d1bb2fe7faca20dee153c333b060d7deb9bead891553bc70cd4074f",
+        .linuxArm64: "227172928ea36f6c3923173b0234ffdb1f6cab863b7071fb341aeb990f7e7b74",
     ]
 
     public let repository: String

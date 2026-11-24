@@ -578,10 +578,12 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("SKL-01", app.navigationBars["全局 Skill"].waitForExistence(timeout: 5), "Skill 页")
         expect("SKL-01", app.descendants(matching: .any)["skills.listState"].exists, "离线列表状态可见")
         expect("SKL-01", !text("Skill 操作失败") && !textContaining("RACPV2Error"), "离线不暴露原始请求错误")
+        let referenceType = app.descendants(matching: .any)["skills.refType"].firstMatch
+        let reference = app.textFields["skills.ref"]
         expect(
             "SKL-01",
             text("安装来源") && text("公开 Git") && text("服务器目录")
-                && text("分支或版本") && text("同名覆盖"),
+                && referenceType.exists && reference.exists && text("同名覆盖"),
             "Skill 安装来源控件"
         )
         let installSkill = app.buttons["安装 Skill"]
