@@ -39,18 +39,11 @@ struct ModelProviderDetailSheet: View {
     }
 
     private var canUpdate: Bool {
-        snapshot.hostV2Mirror != false && connection.state.isOnline
+        connection.state.isOnline
     }
 
-    /// 本机 Keychain 是否还留有这条服务（或它的 legacy 映射）的密钥。
     private var hasLocalProviderKey: Bool {
-        if KeychainStore.loadProviderKey(hostID: snapshot.hostID, providerId: snapshot.providerId) != nil {
-            return true
-        }
-        guard let legacyProviderId = snapshot.legacyProviderId,
-              legacyProviderId != snapshot.providerId
-        else { return false }
-        return KeychainStore.loadProviderKey(hostID: snapshot.hostID, providerId: legacyProviderId) != nil
+        KeychainStore.loadProviderKey(hostID: snapshot.hostID, providerId: snapshot.providerId) != nil
     }
 
     /// v0.0.3 起服务器不保存 api_key 类服务的密钥；这里只反映本机 Keychain。
@@ -129,12 +122,7 @@ struct ModelProviderDetailSheet: View {
                         }
                         .padding(PISpacing.s16)
                     }
-                    if snapshot.hostV2Mirror == false {
-                        Text("旧版服务不能就地更新。")
-                            .font(PIFont.caption)
-                            .foregroundStyle(PIColor.text3)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else if !connection.state.isOnline {
+                    if !connection.state.isOnline {
                         Text("连接后可更新。")
                             .font(PIFont.caption)
                             .foregroundStyle(PIColor.text3)
@@ -335,10 +323,6 @@ struct ModelProviderDetailSheet: View {
             return
         }
         let apiKey: String
-        if snapshot.hostV2Mirror == false {
-            errorMessage = "这条旧版服务没有 PI-adaptor v2 镜像，无法重新获取模型。"
-            return
-        }
         if hasLocalProviderKey {
             guard let credential = model.providerCredentialForTurn(providerId: snapshot.providerId, hostID: snapshot.hostID),
                   credential.baseURL == snapshot.baseURL else {
@@ -400,12 +384,11 @@ struct ModelProviderDetailSheet: View {
         apiKey: String?
     ) async -> String? {
         guard snapshot.hostID == host.id,
-              snapshot.hostV2Mirror != false,
               let operation = model.providerOperationContext(for: host) else {
             return "当前 PI-adaptor 不支持更新或已切换，请在原 PI-adaptor 上重试。"
         }
         guard !isSaving else { return "正在保存，请稍候。" }
-        let requiresV2Confirmation = snapshot.hostV2Mirror != true
+        let requiresV2Confirmation = false
         let intent = ProviderSaveIntent(
             kind: .update(providerId: snapshot.providerId),
             hostID: host.id,
@@ -414,8 +397,6 @@ struct ModelProviderDetailSheet: View {
             models: models,
             apiKey: apiKey ?? "",
             apiKeyDraft: apiKey ?? "",
-            legacyProviderId: snapshot.legacyProviderId,
-            hostV2Mirror: snapshot.hostV2Mirror,
             defaultModelID: defaultModelID
         )
         isSaving = true
@@ -467,9 +448,7 @@ struct ModelProviderDetailSheet: View {
                 context: operation,
                 input: createInput,
                 providerId: updated.id,
-                serverDefaultSet: false,
-                legacyProviderId: snapshot.legacyProviderId,
-                hostV2Mirror: true
+                serverDefaultSet: false
             ) else {
                 return "服务器已更新，但本机记录保存失败。请稍后重新打开详情页核对。"
             }
@@ -485,8 +464,6 @@ struct ModelProviderDetailSheet: View {
             }
             snapshot = StoredModelProvider(
                 providerId: updated.id,
-                legacyProviderId: snapshot.legacyProviderId,
-                hostV2Mirror: true,
                 hostID: snapshot.hostID,
                 name: updated.name,
                 baseURL: updated.baseUrl,
@@ -532,11 +509,9 @@ struct ModelProviderDetailSheet: View {
         let target = ProviderDeletionTarget(
             host: host,
             providerId: snapshot.providerId,
-            legacyProviderId: snapshot.legacyProviderId,
-            hostV2Mirror: snapshot.hostV2Mirror,
             localRecordId: snapshot.id,
             displayName: snapshot.name,
-            keychainProviderIds: [snapshot.providerId, snapshot.legacyProviderId].compactMap { $0 }
+            keychainProviderIds: [snapshot.providerId]
         )
         let report = await ProviderDeletionUseCase(model: model, connection: connection)
             .delete(target)

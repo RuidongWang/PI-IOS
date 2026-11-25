@@ -41,13 +41,6 @@ final class RACPCommandWireTests: XCTestCase {
         return try XCTUnwrap(object as? [String: Any])
     }
 
-    func testSessionRevokeCarriesSavedDeviceId() throws {
-        let object = try encodedObject(.sessionRevoke, params: RACPSessionRevokeParams(deviceId: "dev_abc"))
-        XCTAssertEqual(object["method"] as? String, "session/revoke")
-        let params = try XCTUnwrap(object["params"] as? [String: Any])
-        XCTAssertEqual(params["deviceId"] as? String, "dev_abc")
-    }
-
     func testInstallationRevokeUsesV2MethodAndWriteContext() async throws {
         let socket = RevokeRecordingSocket()
         let client = RACPClient(
@@ -73,21 +66,6 @@ final class RACPCommandWireTests: XCTestCase {
 
         pump.cancel()
         await socket.close()
-    }
-
-    func testInputAnswersEncodeArraysAndSkips() throws {
-        let params = RACPInputRespondParams(
-            inputId: "in_1",
-            answers: [["yes"], nil],
-            context: RACPContext(requestId: "req_1", idempotencyKey: "key_1")
-        )
-        let object = try encodedObject(.inputRespond, params: params)
-        XCTAssertEqual(object["method"] as? String, "input/respond")
-        let payload = try XCTUnwrap(object["params"] as? [String: Any])
-        let answers = try XCTUnwrap(payload["answers"] as? [Any])
-        XCTAssertEqual(answers.count, 2)
-        XCTAssertEqual(answers[0] as? [String], ["yes"], "每题是一组标签，不是单个标签")
-        XCTAssertTrue(answers[1] is NSNull, "未作答必须是 null")
     }
 
     func testTurnStartPutsIdempotencyKeyOnlyInContext() throws {

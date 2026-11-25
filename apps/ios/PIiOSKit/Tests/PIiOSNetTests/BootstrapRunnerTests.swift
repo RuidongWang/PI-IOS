@@ -373,7 +373,7 @@ final class BootstrapRunnerTests: XCTestCase {
     func testRuntimeNameMismatchReturnsFailureDetail() async throws {
         let result = try await runVerificationFailure(
             serverInfo: RACPServerInfo(
-                protocolVersion: "1.0",
+                protocolVersion: "2.0.0",
                 serverName: "pi-host",
                 serverVersion: "0.21.0",
                 hostId: "host_old",
@@ -393,7 +393,7 @@ final class BootstrapRunnerTests: XCTestCase {
     func testRuntimeVersionMismatchReturnsFailureDetail() async throws {
         let result = try await runVerificationFailure(
             serverInfo: RACPServerInfo(
-                protocolVersion: "1.0",
+                protocolVersion: "2.0.0",
                 serverName: "pi-adaptor",
                 serverVersion: "0.20.0",
                 hostId: "host_old",
@@ -737,7 +737,7 @@ private final class RecordingVerifier: BootstrapDeviceVerificationCallback, @unc
     init(
         error: Error? = nil,
         serverInfo: RACPServerInfo = RACPServerInfo(
-            protocolVersion: "1.0",
+            protocolVersion: "2.0.0",
             serverName: "pi-adaptor",
             serverVersion: "0.21.0",
             hostId: "host_test",

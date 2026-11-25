@@ -225,39 +225,6 @@ extension RACPApprovalRequest: Codable {
     }
 }
 
-/// 快照 `pendingInputs[]` 的一项；`answers` 顺序与该卡的问题顺序对齐（契约 §3.1）。
-public struct RACPInputRequest: Equatable, Sendable {
-    public let id: String
-    public let payload: JSONValue
-
-    public init(id: String, payload: JSONValue) {
-        self.id = id
-        self.payload = payload
-    }
-
-    public init(payload: JSONValue) throws {
-        guard let id = payload.value(at: ["id"])?.stringValue, !id.isEmpty else {
-            throw RACPSessionModelError.missingIdentifier(type: "input")
-        }
-        self.init(id: id, payload: payload)
-    }
-
-    public var revision: Int? { payload.value(at: ["revision"])?.intValue }
-    public var status: String? { payload.value(at: ["status"])?.stringValue }
-    public var questionCount: Int? { payload.value(at: ["questions"])?.arrayValue?.count }
-}
-
-extension RACPInputRequest: Codable {
-    public init(from decoder: Decoder) throws {
-        let decoded = try JSONObjectPayload.decodeIdentifyObject(from: decoder, type: "input")
-        self.init(id: decoded.id, payload: decoded.payload)
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        try payload.encode(to: encoder)
-    }
-}
-
 // MARK: - 快照
 
 /// `session/attach` 的 `snapshot`（契约 §3.2 形状）。
@@ -271,7 +238,6 @@ public struct RACPSnapshot: Equatable, Sendable {
     /// `queuedTurns` 的元素形状在 FROZEN 契约里未定义，保留原始 JSON。
     public var queuedTurns: [JSONValue]
     public var pendingApprovals: [RACPApprovalRequest]
-    public var pendingInputs: [RACPInputRequest]
     public var hasMoreHistory: Bool
 
     public init(
@@ -282,7 +248,6 @@ public struct RACPSnapshot: Equatable, Sendable {
         activeTurn: RACPTurnRef? = nil,
         queuedTurns: [JSONValue] = [],
         pendingApprovals: [RACPApprovalRequest] = [],
-        pendingInputs: [RACPInputRequest] = [],
         hasMoreHistory: Bool = false
     ) {
         self.cursor = cursor
@@ -292,14 +257,13 @@ public struct RACPSnapshot: Equatable, Sendable {
         self.activeTurn = activeTurn
         self.queuedTurns = queuedTurns
         self.pendingApprovals = pendingApprovals
-        self.pendingInputs = pendingInputs
         self.hasMoreHistory = hasMoreHistory
     }
 }
 
 extension RACPSnapshot: Codable {
     private enum CodingKeys: String, CodingKey {
-        case cursor, revision, items, activeItems, activeTurn, queuedTurns, pendingApprovals, pendingInputs, hasMoreHistory
+        case cursor, revision, items, activeItems, activeTurn, queuedTurns, pendingApprovals, hasMoreHistory
     }
 
     public init(from decoder: Decoder) throws {
@@ -312,7 +276,6 @@ extension RACPSnapshot: Codable {
         activeTurn = try container.decodeIfPresent(RACPTurnRef.self, forKey: .activeTurn)
         queuedTurns = try container.decodeIfPresent([JSONValue].self, forKey: .queuedTurns) ?? []
         pendingApprovals = try container.decodeIfPresent([RACPApprovalRequest].self, forKey: .pendingApprovals) ?? []
-        pendingInputs = try container.decodeIfPresent([RACPInputRequest].self, forKey: .pendingInputs) ?? []
         hasMoreHistory = try container.decodeIfPresent(Bool.self, forKey: .hasMoreHistory) ?? false
     }
 
@@ -325,7 +288,6 @@ extension RACPSnapshot: Codable {
         try container.encodeIfPresent(activeTurn, forKey: .activeTurn)
         try container.encode(queuedTurns, forKey: .queuedTurns)
         try container.encode(pendingApprovals, forKey: .pendingApprovals)
-        try container.encode(pendingInputs, forKey: .pendingInputs)
         try container.encode(hasMoreHistory, forKey: .hasMoreHistory)
     }
 }

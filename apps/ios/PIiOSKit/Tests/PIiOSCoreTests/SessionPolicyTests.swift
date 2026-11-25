@@ -154,12 +154,6 @@ final class SessionPolicyTests: XCTestCase {
         }
     }
 
-    func testInputAvailabilityFollowsSnapshot() {
-        let card = RACPInputRequest(id: "in_1", payload: .object(["id": .string("in_1"), "revision": .number(2)]))
-        XCTAssertEqual(DecisionPolicy.inputAvailability(id: "in_1", pending: [card]), .actionable(revision: 2))
-        XCTAssertEqual(DecisionPolicy.inputAvailability(id: "in_2", pending: [card]), .missing)
-    }
-
     // MARK: - AC-13.1 / AC-13.2 排队
 
     func testQueueParsingDropsEntriesWithoutIdentifier() {

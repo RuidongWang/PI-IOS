@@ -1102,8 +1102,10 @@ final class CacheWorkerTests: XCTestCase {
         XCTAssertEqual(evidence.maximum("cache-adapter"), 1)
         XCTAssertEqual(store.cachedSession(hostID: hostID, sessionID: sessionID)?.entries.first?.text, "cached")
         XCTAssertEqual(store.cachedSession(hostID: hostID, sessionID: sessionID)?.draft?.text, "latest-draft")
-        XCTAssertEqual(StateFile.load(from: stateURL).state.readingPositionsByHost[hostID.uuidString]?[sessionID]?.lastVisibleItemID,
-                       "cached-item")
+        XCTAssertEqual(
+            ReadingPositionStore.load(from: root.appendingPathComponent("reading-positions-v1.json"))?[hostID.uuidString]?[sessionID]?.lastVisibleItemID,
+            "cached-item"
+        )
         await client.stop()
     }
 
@@ -1322,7 +1324,6 @@ final class CacheWorkerTests: XCTestCase {
             activeItems: [],
             queuedTurns: [],
             pendingApprovals: [],
-            pendingInputs: [],
             expiredApprovalIds: [],
             cursor: RACPCursor(epoch: "epoch", sequence: 3),
             revision: 3,
@@ -1566,7 +1567,6 @@ final class CacheWorkerTests: XCTestCase {
             activeItems: [],
             queuedTurns: [],
             pendingApprovals: [],
-            pendingInputs: [],
             expiredApprovalIds: [],
             cursor: RACPCursor(epoch: "epoch", sequence: items.count),
             revision: items.count,
@@ -1600,7 +1600,6 @@ final class CacheWorkerTests: XCTestCase {
             activeItems: [],
             queuedTurns: [],
             pendingApprovals: [],
-            pendingInputs: [],
             expiredApprovalIds: [],
             cursor: RACPCursor(epoch: "epoch", sequence: revision),
             revision: revision,

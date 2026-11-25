@@ -3,12 +3,13 @@ import XCTest
 
 final class RACPPairingTests: XCTestCase {
     func testPairingTokenValidation() {
-        XCTAssertEqual(RACPPairingToken.normalize("  ppt1.abc  "), "ppt1.abc")
+        XCTAssertEqual(RACPPairingToken.normalize("  ppt2.abc  "), "ppt2.abc")
         XCTAssertEqual(RACPPairingToken.normalize("ppt" + "2.abc"), "ppt" + "2.abc")
+        XCTAssertNil(RACPPairingToken.normalize("ppt1.abc"))
         XCTAssertNil(RACPPairingToken.normalize("pdt" + "1.abc"))
         XCTAssertNil(RACPPairingToken.normalize("pdt" + "2.abc"))
-        XCTAssertNil(RACPPairingToken.normalize("ppt1."))
-        XCTAssertNil(RACPPairingToken.normalize("ppt1.abc def"))
+        XCTAssertNil(RACPPairingToken.normalize("ppt2."))
+        XCTAssertNil(RACPPairingToken.normalize("ppt2.abc def"))
     }
 
     func testPairRejectsDeviceTokenBeforeConnecting() async {

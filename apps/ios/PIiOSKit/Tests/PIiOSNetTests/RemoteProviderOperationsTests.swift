@@ -252,8 +252,8 @@ final class RemoteProviderOperationsTests: XCTestCase {
 private struct FailingV2Client: RACPV2Requesting {
     let error: RACPClientError
 
-    func v2Request<R: Decodable & Sendable>(
-        method: String,
+    func request<R: Decodable & Sendable>(
+        _ method: RACPMethod,
         params: JSONValue,
         timeout: TimeInterval
     ) async throws -> R {
@@ -283,11 +283,12 @@ private actor RecordingProviderV2Client: RACPV2Requesting {
         self.rejectProtocolParam = rejectProtocolParam
     }
 
-    func v2Request<R: Decodable & Sendable>(
-        method: String,
+    func request<R: Decodable & Sendable>(
+        _ method: RACPMethod,
         params: JSONValue,
         timeout: TimeInterval
     ) async throws -> R {
+        let method = method.rawValue
         records.append(
             RecordedV2Request(
                 method: method,

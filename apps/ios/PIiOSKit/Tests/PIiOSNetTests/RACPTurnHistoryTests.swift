@@ -833,7 +833,6 @@ private final class TurnHistorySocket: RACPSocket, @unchecked Sendable {
             "activeItems": activeItems,
             "queuedTurns": [],
             "pendingApprovals": [],
-            "pendingInputs": [],
             "hasMoreHistory": hasMore,
         ]
         let result: [String: Any] = [
@@ -936,7 +935,6 @@ private final class TurnHistorySocket: RACPSocket, @unchecked Sendable {
                         "activeItems": [],
                         "queuedTurns": [],
                         "pendingApprovals": [],
-                        "pendingInputs": [],
                         "hasMoreHistory": false,
                     ],
                 ]

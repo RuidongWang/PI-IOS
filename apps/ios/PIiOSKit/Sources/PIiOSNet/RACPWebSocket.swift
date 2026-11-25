@@ -86,7 +86,7 @@ extension RACPSocket {
 public final class RACPWebSocket: RACPSocket, @unchecked Sendable {
     /// 契约 §2.1 的上游常量。
     public static let path = "/v1/racp/ws"
-    public static let subprotocol = "pi-racp.v1.jsonrpc"
+    public static let subprotocol = "pi-racp.v2.jsonrpc"
 
     private let channel: Channel
     private let handler: WebSocketClientHandler
@@ -414,7 +414,7 @@ enum WebSocketHandshake {
     ) -> String {
         var lines = [
             "GET \(path) HTTP/1.1",
-            "PI-adaptor: \(hostHeader)",
+            "Host: \(hostHeader)",
             "Upgrade: websocket",
             "Connection: Upgrade",
             "Sec-WebSocket-Key: \(key)",

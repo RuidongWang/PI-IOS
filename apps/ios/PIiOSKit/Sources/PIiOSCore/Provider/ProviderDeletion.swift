@@ -83,35 +83,19 @@ public enum ProviderDeletionOutcome: Equatable, Sendable {
 /// U07 要求提示明确区分 v2 镜像、legacy 存储、默认模型三个阶段，但普通界面
 /// 只能用用户语言描述（「服务器记录」「旧版服务记录」「默认模型」）。
 public struct ProviderDeletionStages: Equatable, Sendable {
-    /// 本次是否向 v2 PI-adaptor 发过删除请求。
-    public var v2Requested: Bool
-    /// v2 上的记录由本次删除。
     public var v2Removed: Bool
-    /// v2 上原本就没有这条记录。
     public var v2AlreadyAbsent: Bool
-    /// legacy SSH 存储中的记录由本次删除。
-    public var legacyCleared: Bool
-    /// legacy 存储中原本就没有这条记录。
-    public var legacyAlreadyAbsent: Bool
-    /// 本机映射是否已移除。
     public var localRecordRemoved: Bool
-    /// 本机 Keychain 中的密钥是否已清除。
     public var localKeyCleared: Bool
 
     public init(
-        v2Requested: Bool = false,
         v2Removed: Bool = false,
         v2AlreadyAbsent: Bool = false,
-        legacyCleared: Bool = false,
-        legacyAlreadyAbsent: Bool = false,
         localRecordRemoved: Bool = false,
         localKeyCleared: Bool = false
     ) {
-        self.v2Requested = v2Requested
         self.v2Removed = v2Removed
         self.v2AlreadyAbsent = v2AlreadyAbsent
-        self.legacyCleared = legacyCleared
-        self.legacyAlreadyAbsent = legacyAlreadyAbsent
         self.localRecordRemoved = localRecordRemoved
         self.localKeyCleared = localKeyCleared
     }
@@ -235,11 +219,6 @@ public enum ProviderDeletionPresenter {
         var notes: [String] = []
         if includeServerAbsent && stages.v2AlreadyAbsent {
             notes.append("PI-adaptor 上原本已没有这条记录。")
-        }
-        if stages.legacyCleared {
-            notes.append("旧版服务记录也已一并清理。")
-        } else if includeServerAbsent && stages.legacyAlreadyAbsent {
-            notes.append("旧版服务里原本也没有这条记录。")
         }
         if stages.localRecordRemoved {
             notes.append("本机记录已清理。")

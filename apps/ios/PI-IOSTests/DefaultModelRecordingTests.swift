@@ -43,9 +43,7 @@ final class DefaultModelRecordingTests: XCTestCase {
             context: try operationContext(model),
             input: createInput(provider: target, defaultModelId: "beta-basic"),
             providerId: "prv_beta",
-            serverDefaultSet: false,
-            legacyProviderId: nil,
-            hostV2Mirror: true
+            serverDefaultSet: false
         ))
 
         XCTAssertEqual(
@@ -88,8 +86,7 @@ final class DefaultModelRecordingTests: XCTestCase {
                 defaultModelId: "alpha-mini"
             ),
             providerId: "prv_alpha",
-            serverDefaultSet: false,
-            hostV2Mirror: true
+            serverDefaultSet: false
         ))
 
         XCTAssertEqual(
@@ -112,9 +109,7 @@ final class DefaultModelRecordingTests: XCTestCase {
             context: try operationContext(model),
             input: createInput(provider: target, defaultModelId: nil),
             providerId: "prv_beta",
-            serverDefaultSet: true,
-            legacyProviderId: nil,
-            hostV2Mirror: true
+            serverDefaultSet: true
         ))
 
         XCTAssertNil(
@@ -146,8 +141,7 @@ final class DefaultModelRecordingTests: XCTestCase {
                 defaultModelId: nil
             ),
             providerId: "prv_alpha",
-            serverDefaultSet: false,
-            hostV2Mirror: true
+            serverDefaultSet: false
         ))
 
         XCTAssertEqual(
@@ -175,8 +169,7 @@ final class DefaultModelRecordingTests: XCTestCase {
                 defaultModelId: "ghost-model"
             ),
             providerId: "prv_alpha",
-            serverDefaultSet: false,
-            hostV2Mirror: true
+            serverDefaultSet: false
         ))
 
         XCTAssertEqual(
@@ -205,18 +198,6 @@ final class DefaultModelRecordingTests: XCTestCase {
         XCTAssertEqual(model.defaultModelSelectionForNewSession?.modelId, "alpha-mini")
     }
 
-    func testLegacyOnlyProviderIsNotUsedForNewSessionBinding() {
-        var legacy = provider("prv_legacy", defaultModel: "legacy-mini", models: ["legacy-mini"])
-        legacy.hostV2Mirror = false
-        let model = makeModel(providers: [legacy])
-
-        XCTAssertEqual(model.defaultModelLabel, "未配置")
-        XCTAssertNil(
-            model.defaultModelSelectionForNewSession,
-            "只存在旧 SSH 存储的服务不能作为新会话绑定，否则会话一创建就不可用"
-        )
-    }
-
     // MARK: - 首条导入
 
     func testFirstProviderImportUsesServerDefaultModel() throws {
@@ -235,8 +216,7 @@ final class DefaultModelRecordingTests: XCTestCase {
                 defaultModelId: nil
             ),
             providerId: "prv_first",
-            serverDefaultSet: true,
-            hostV2Mirror: true
+            serverDefaultSet: true
         ))
 
         XCTAssertEqual(
@@ -264,8 +244,7 @@ final class DefaultModelRecordingTests: XCTestCase {
                 defaultModelId: nil
             ),
             providerId: "prv_beta",
-            serverDefaultSet: true,
-            hostV2Mirror: true
+            serverDefaultSet: true
         ))
 
         XCTAssertNil(
@@ -324,7 +303,6 @@ final class DefaultModelRecordingTests: XCTestCase {
     ) -> StoredModelProvider {
         StoredModelProvider(
             providerId: providerId,
-            hostV2Mirror: true,
             hostID: hostID,
             name: providerId == "prv_alpha" ? "Alpha Models" : "Beta Models",
             baseURL: "https://\(providerId).invalid",

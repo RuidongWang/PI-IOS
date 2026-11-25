@@ -78,33 +78,33 @@ final class SessionController: ObservableObject {
             return result
         }
     }
-    @Published private(set) var view: RACPSessionView = .empty
-    @Published private(set) var attachedSessionId: String?
-    @Published private(set) var attachedSummary: RACPSessionSummary?
+    @Published var view: RACPSessionView = .empty
+    @Published var attachedSessionId: String?
+    @Published var attachedSummary: RACPSessionSummary?
     /// Selected destination is separate from the transport's attached session.
     /// Retained after failure so the selected cache and retry remain visible.
-    @Published private(set) var openingSessionID: String?
-    @Published private(set) var isAttaching = false
-    @Published private(set) var lastError: String?
-    @Published private(set) var notice: String?
-    @Published private(set) var isBusy = false
-    @Published private(set) var isLoadingEarlierHistory = false
-    @Published private(set) var historyError: String?
-    @Published private(set) var isOnline = false
-    @Published private(set) var runningTurnId: String?
+    @Published var openingSessionID: String?
+    @Published var isAttaching = false
+    @Published var lastError: String?
+    @Published var notice: String?
+    @Published var isBusy = false
+    @Published var isLoadingEarlierHistory = false
+    @Published var historyError: String?
+    @Published var isOnline = false
+    @Published var runningTurnId: String?
 #if DEBUG
     static let observesUITestTurnOutcome = ProcessInfo.processInfo.environment["PI_IOS_UI_TEST_TURN_OUTCOME"] == "1"
-    @Published private(set) var uiTestSubmittedTurnID: String?
+    @Published var uiTestSubmittedTurnID: String?
 #endif
-    @Published private(set) var permissionMode: RACPPermissionMode = .ask
-    @Published private(set) var sessionMode: RACPSessionMode = .agent
-    @Published private(set) var thinkingLevel: RACPThinkingLevel?
-    @Published private(set) var selectedProviderId: String?
-    @Published private(set) var selectedModelId: String?
-    @Published private(set) var thinkingSupport = ThinkingLevelSupport(declared: [])
+    @Published var permissionMode: RACPPermissionMode = .ask
+    @Published var sessionMode: RACPSessionMode = .agent
+    @Published var thinkingLevel: RACPThinkingLevel?
+    @Published var selectedProviderId: String?
+    @Published var selectedModelId: String?
+    @Published var thinkingSupport = ThinkingLevelSupport(declared: [])
     /// 档位回落说明（AC-07.6）：非 nil 时界面必须展示。
-    @Published private(set) var thinkingFallbackNotice: String?
-    @Published private(set) var modelAvailability: SessionModelAvailability = .unknown(reason: "尚未检查")
+    @Published var thinkingFallbackNotice: String?
+    @Published var modelAvailability: SessionModelAvailability = .unknown(reason: "尚未检查")
     @Published private(set) var pendingAttachments: [RACPV2Attachment] = []
     @Published var draftText = "" {
         didSet { persistDraftIfNeeded() }
@@ -122,10 +122,10 @@ final class SessionController: ObservableObject {
     /// 不写日志；读取失败返回 nil，由服务端以 `PROVIDER_SECRET_MISSING` 明确拒绝。
     var providerCredential: ((String) -> KeychainStore.ProviderKeyRecord?)?
 
-    private var client: RACPClient?
-    private var bindGeneration = 0
-    private var attachedBindGeneration: Int?
-    private var sessionSelectionGeneration = 0
+    var client: RACPClient?
+    var bindGeneration = 0
+    var attachedBindGeneration: Int?
+    var sessionSelectionGeneration = 0
     var attachmentSelectionGeneration: Int { sessionSelectionGeneration }
     private var configurationGeneration = 0
     private var attachTask: Task<Void, Never>?
@@ -134,48 +134,19 @@ final class SessionController: ObservableObject {
     private var pendingUserEchoes: [PendingUserEcho] = []
     /// 最近一次仍在进行的打开请求目标；用于归档/删除时只取消自己的 pending attach。
     private var pendingAttachSessionId: String?
-    private var historyLoadID: UUID?
+    var historyLoadID: UUID?
     private var busyTokens: Set<UUID> = []
     private var attachmentUploads: Set<UUID> = []
     private var draftSessionID: String?
     private var isReplacingDraft = false
-    private var modelAvailabilityCheck: (date: Date, binding: String, bind: Int, selection: Int)?
+    var modelAvailabilityCheck: (date: Date, binding: String, bind: Int, selection: Int)?
 #if DEBUG
-    private var fixtureInterruptionEnabled = false
     var beforeRefreshReadForTesting: (() async -> Void)?
 #endif
     private let requestKeys: SessionRequestKeyStore
     private var attachedHostID: String?
     private var draftPreview: (text: String, key: String)?
-#if DEBUG
-    private var fixtureSnapshots: [String: RACPSessionView] = [:]
-    private var fixtureHistoryModel: SessionViewModel?
-    private var fixtureEarlierHistoryPages: [UITestEarlierHistoryPage] = []
-
-    private var fixtureFailedOpenSessions: Set<String> = []
-    func configureUITestSnapshots(_ snapshots: [String: RACPSessionView]) {
-        guard client == nil, !snapshots.isEmpty else { return }
-        fixtureSnapshots = snapshots
-    }
-
-    /// Explicitly invoked only by the opt-in stability UI fixture control. The
-    /// normal Published items change drives the production grouping/follow path.
-    func appendStabilityFixtureMessage() {
-        guard client == nil, UITestFixture.stabilityControlsEnabled,
-              let sessionID = attachedSessionId, sessionID == "S1",
-              var snapshot = fixtureSnapshots[sessionID], view.sessionId == sessionID else { return }
-        let ordinal = view.items.filter { $0.id.hasPrefix("stability-live-") }.count + 1
-        let id = "stability-live-\(ordinal)"
-        let item = RACPItem(id: id, payload: .object([
-            "id": .string(id),
-            "role": .string("assistant"),
-            "text": .string("Stability appended \(ordinal)"),
-        ]))
-        view.items.append(item)
-        snapshot.items = view.items
-        fixtureSnapshots[sessionID] = snapshot
-    }
-#endif
+    var fixtureState = SessionControllerFixtureState()
 
     init(requestKeys: SessionRequestKeyStore = SessionRequestKeyStore(fileURL: SessionCacheStore.defaultRequestKeyURL())) {
         self.requestKeys = requestKeys
@@ -183,7 +154,6 @@ final class SessionController: ObservableObject {
 
     var queuedTurns: [QueuedTurn] { view.queuedTurns }
     var pendingApprovals: [RACPApprovalRequest] { view.pendingApprovals }
-    var pendingInputs: [RACPInputRequest] { view.pendingInputs }
     var activeItems: [RACPItem] { view.activeItems }
 
     /// 发送准入：离线禁用；有 turn 在跑则排队（AC-13.1）。
@@ -441,38 +411,14 @@ final class SessionController: ObservableObject {
             operation.finish(outcome: outcome, fields: "items=\(view.items.count)")
             PILog.info("Session", "attach end source=\(source) session=\(sessionId.prefix(8)) op=\(operation.id) outcome=\(outcome) items=\(view.items.count) elapsedMs=\(operation.elapsedMilliseconds)")
         }
-#if DEBUG
-        if let snapshot = fixtureSnapshots[sessionId] {
-            if let behavior = UITestFixture.current?.sessionOpenBehavior {
-                try? await Task.sleep(for: .milliseconds(behavior.delayMilliseconds))
-                guard !Task.isCancelled, sessionSelectionGeneration == selection,
-                      bindGeneration == generation else { return }
-                if behavior.failingSessionID == sessionId, fixtureFailedOpenSessions.insert(sessionId).inserted {
-                    lastError = "会话同步失败，请重试"
-                    outcome = "failed"
-                    return
-                }
-            }
-            bind(client: nil, online: true)
-            view = snapshot
-            attachedSummary = snapshot.summary
-            attachedSessionId = sessionId
-            attachedBindGeneration = bindGeneration
-            runningTurnId = snapshot.runningTurnId
-            lastError = nil
-            if snapshot.hasMoreHistory,
-               let pages = UITestFixture.current?.earlierHistoryPages[sessionId],
-               !pages.isEmpty {
-                fixtureHistoryModel = Self.makeFixtureHistoryModel(from: snapshot)
-                fixtureEarlierHistoryPages = pages
-            } else {
-                fixtureHistoryModel = nil
-                fixtureEarlierHistoryPages = []
-            }
-            outcome = "success"
+        if let fixtureOutcome = await fixtureAttachOutcomeIfApplicable(
+            sessionId: sessionId,
+            selection: selection,
+            generation: generation
+        ) {
+            outcome = fixtureOutcome
             return
         }
-#endif
         guard client != nil else {
             lastError = "隧道未连接：无法打开会话"
             outcome = "failed"
@@ -525,17 +471,9 @@ final class SessionController: ObservableObject {
     /// 只读历史加载独立于发送/配置的 busy 状态；失败不会断开隧道或覆盖连接错误。
     @discardableResult
     func loadEarlierHistory() async -> Bool {
-#if DEBUG
-        if client == nil,
-           isOnline,
-           !isBusy,
-           !isLoadingEarlierHistory,
-           view.hasMoreHistory,
-           let sessionID = attachedSessionId,
-           view.sessionId == sessionID {
-            return await loadFixtureEarlierHistory(sessionID: sessionID)
+        if let fixtureResult = await fixtureLoadEarlierHistoryIfApplicable() {
+            return fixtureResult
         }
-#endif
         guard isOnline, !isBusy, !isLoadingEarlierHistory, view.hasMoreHistory,
               let sessionID = attachedSessionId, view.sessionId == sessionID,
               let client else { return false }
@@ -568,89 +506,6 @@ final class SessionController: ObservableObject {
             return false
         }
     }
-
-#if DEBUG
-    /// Test-only page loader. It follows the same loading/lifecycle gate as the
-    /// client path, stages pages until the earliest turn has its task boundary,
-    /// then performs one reducer prepend and one Published view assignment.
-    private func loadFixtureEarlierHistory(sessionID: String) async -> Bool {
-        guard let model = fixtureHistoryModel, !fixtureEarlierHistoryPages.isEmpty else {
-            return false
-        }
-        let generation = bindGeneration
-        let selection = sessionSelectionGeneration
-        let loadID = UUID()
-        historyLoadID = loadID
-        isLoadingEarlierHistory = true
-        historyError = nil
-        defer {
-            if historyLoadID == loadID {
-                historyLoadID = nil
-                isLoadingEarlierHistory = false
-            }
-        }
-        var staged: [RACPItem] = []
-        var hasMore = view.hasMoreHistory
-        while true {
-            guard !fixtureEarlierHistoryPages.isEmpty else {
-                // A malformed fixture must not expose its staged partial turn.
-                historyError = "测试历史缺少完整任务起点"
-                return false
-            }
-            let page = fixtureEarlierHistoryPages[0]
-            if page.delayMilliseconds > 0 {
-                do {
-                    try await Task.sleep(for: .milliseconds(page.delayMilliseconds))
-                } catch {
-                    return false
-                }
-            }
-            guard bindGeneration == generation,
-                  sessionSelectionGeneration == selection,
-                  attachedSessionId == sessionID,
-                  historyLoadID == loadID,
-                  fixtureHistoryModel === model
-            else { return false }
-            fixtureEarlierHistoryPages.removeFirst()
-            staged = page.items + staged
-            hasMore = page.hasMore
-            if ConversationTurnPolicy.hasTaskBoundary(staged + model.items) || !hasMore {
-                break
-            }
-        }
-        guard bindGeneration == generation,
-              sessionSelectionGeneration == selection,
-              attachedSessionId == sessionID,
-              historyLoadID == loadID,
-              fixtureHistoryModel === model
-        else { return false }
-        let inserted = model.prependHistory(staged, hasMore: hasMore)
-        var updatedView = view
-        updatedView.items = model.items
-        updatedView.hasMoreHistory = model.hasMoreHistory
-        view = updatedView
-        return inserted > 0
-    }
-
-    private static func makeFixtureHistoryModel(from snapshot: RACPSessionView) -> SessionViewModel {
-        let model = SessionViewModel()
-        guard let cursor = snapshot.cursor else { return model }
-        model.applySnapshot(
-            RACPSnapshot(
-                cursor: cursor,
-                revision: snapshot.revision,
-                items: snapshot.items,
-                activeItems: snapshot.activeItems,
-                queuedTurns: [],
-                pendingApprovals: snapshot.pendingApprovals,
-                pendingInputs: snapshot.pendingInputs,
-                hasMoreHistory: snapshot.hasMoreHistory
-            ),
-            replayComplete: snapshot.replayComplete
-        )
-        return model
-    }
-#endif
 
     private func resetHistoryLoad() {
         historyLoadID = nil
@@ -789,20 +644,9 @@ final class SessionController: ObservableObject {
             lastError = modelAvailability.displayText ?? "当前模型不可用，请重新选择模型"
             return
         }
-#if DEBUG
-        if client == nil, let delay = UITestFixture.current?.submissionFailureDelayMilliseconds {
-            let generation = bindGeneration
-            let selection = sessionSelectionGeneration
-            let busy = beginBusy()
-            defer { endBusy(busy) }
-            try? await Task.sleep(for: .milliseconds(delay))
-            guard !Task.isCancelled, generation == bindGeneration,
-                  selection == sessionSelectionGeneration else { return }
-            modelAvailabilityCheck = nil
-            lastError = "测试连接发送失败，草稿已保留"
+        if await fixtureSendFailureIfApplicable(generation: bindGeneration, selection: sessionSelectionGeneration) {
             return
         }
-#endif
         guard let client else {
             lastError = "隧道未连接"
             return
@@ -967,39 +811,14 @@ final class SessionController: ObservableObject {
 
     // MARK: 中止 / 取消排队（AC-09.1 / AC-13.2）
 
-#if DEBUG
-    func configureUITestInterruption(enabled: Bool) {
-        fixtureInterruptionEnabled = enabled
-    }
-#endif
-
     func interrupt() async {
         guard isOnline else {
             lastError = "隧道未连接：无法中止当前 turn"
             return
         }
-#if DEBUG
-        if fixtureInterruptionEnabled, let turnId = runningTurnId {
-            let generation = bindGeneration
-            let selection = sessionSelectionGeneration
-            let busy = beginBusy()
-            defer { endBusy(busy) }
-            do {
-                try await Task.sleep(for: .milliseconds(150))
-            } catch {
-                return
-            }
-            guard bindGeneration == generation,
-                  sessionSelectionGeneration == selection,
-                  self.runningTurnId == turnId
-            else { return }
-            self.runningTurnId = nil
-            self.view.activeItems = []
-            notice = "已中止"
-            lastError = nil
+        if await fixtureInterruptIfApplicable() {
             return
         }
-#endif
         guard let client, let sessionId = attachedSessionId else {
             lastError = "没有正在运行的 turn"
             return
@@ -1182,81 +1001,6 @@ final class SessionController: ObservableObject {
         }
     }
 
-    /// 回答 AskTool 提问；`answers` 顺序必须与该卡问题顺序对齐（AC-11.1）。
-    ///
-    /// 返回结构化结果供界面决定是否清空已选答案（U06）：只有成功或明确失效才清，
-    /// 普通失败必须保留用户的选择。失败重试复用 `requestKeys` 里已持久化的幂等键，
-    /// 不会把同一条回答当第二条提交。
-    @discardableResult
-    func answer(inputId: String, answers: [[String]?]) async -> InputAnswerOutcome {
-        guard isOnline, let client else {
-            let reason = "隧道未连接：回答现在提交会失败，已阻止"
-            lastError = reason
-            return .failed(reason: reason)
-        }
-        let generation = bindGeneration
-        let selection = sessionSelectionGeneration
-        await refreshView()
-        guard isCurrent(client, generation: generation, selection: selection),
-              let sessionId = attachedSessionId,
-              let hostID = currentRequestHostID()
-        else {
-            // 会话已切换或身份已变化：提交结果未知，保留草稿让用户重试。
-            return .failed(reason: lastError ?? "会话已切换：请重新提交回答")
-        }
-        let availability = DecisionPolicy.inputAvailability(id: inputId, pending: pendingInputs)
-        guard case let .actionable(cardRevision) = availability, let revision = cardRevision else {
-            if case .missing = availability {
-                let reason = "该提问已由其他端处理或不存在：请刷新后重试"
-                lastError = reason
-                await refreshView()
-                return .noLongerActionable(reason: reason)
-            }
-            let reason = "该提问缺少版本：请刷新后重试"
-            lastError = reason
-            return .failed(reason: reason)
-        }
-        let busy = beginBusy()
-        defer { endBusy(busy) }
-        do {
-            let attempt = try requestKeys.prepare(
-                SessionRequestIdentity(hostID: hostID, sessionID: sessionId, itemID: inputId, action: .input(answers: answers))
-            )
-            _ = try await client.respondInput(
-                inputId: inputId,
-                answers: answers,
-                expectedRevision: revision,
-                idempotencyKey: attempt.idempotencyKey
-            )
-            try requestKeys.acknowledge(attempt)
-            guard isCurrent(client, generation: generation, selection: selection) else {
-                // 服务器已受理；界面可以按作用域清掉这张卡的选择。
-                return .submitted
-            }
-            notice = "已回答提问"
-            lastError = nil
-            await refreshView()
-            return .submitted
-        } catch {
-            let described = ConnectionErrorText.describe(error)
-            guard isCurrent(client, generation: generation, selection: selection) else {
-                lastError = described
-                return .failed(reason: described)
-            }
-            await refreshView()
-            // 刷新后卡片消失 = 其他端已经回答/卡片失效；否则按错误码分诊。
-            let stillPending = pendingInputs.contains { $0.id == inputId }
-            let outcome = AnswerDraftPolicy.outcomeAfterFailure(
-                serverCode: Self.serverCode(from: error),
-                cardStillPending: stillPending,
-                reason: described
-            )
-            lastError = outcome.reason ?? described
-            await refreshView()
-            return outcome
-        }
-    }
-
     // MARK: 配置（AC-07）
 
     /// 切换会话模式/权限模式/档位；运行中的 turn 不允许改模型（AC-07.2）。
@@ -1365,14 +1109,14 @@ final class SessionController: ObservableObject {
             && sessionSelectionGeneration == selection
     }
 
-    private func beginBusy() -> UUID {
+    func beginBusy() -> UUID {
         let token = UUID()
         busyTokens.insert(token)
         isBusy = true
         return token
     }
 
-    private func endBusy(_ token: UUID) {
+    func endBusy(_ token: UUID) {
         busyTokens.remove(token)
         isBusy = !busyTokens.isEmpty
     }

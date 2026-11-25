@@ -54,13 +54,7 @@ struct ModelsScreen: View {
 
     /// 本机模型记录没有服务端 `authKind`，只能按本机 Keychain 判断密钥是否还在。
     private func hasLocalKey(_ provider: StoredModelProvider) -> Bool {
-        if KeychainStore.loadProviderKey(hostID: provider.hostID, providerId: provider.providerId) != nil {
-            return true
-        }
-        return provider.legacyProviderId.map { legacyProviderId in
-            legacyProviderId != provider.providerId
-                && KeychainStore.loadProviderKey(hostID: provider.hostID, providerId: legacyProviderId) != nil
-        } ?? false
+        KeychainStore.loadProviderKey(hostID: provider.hostID, providerId: provider.providerId) != nil
     }
 
     private func localKeyText(_ provider: StoredModelProvider) -> String {
@@ -403,10 +397,6 @@ struct ModelsScreen: View {
         if let supportsProviders = info.capabilities?.value(at: ["providers"])?.boolValue {
             return supportsProviders
         }
-        // 本机已经存着这个 host 的 v2 provider 镜像：入口必须可达，否则用户删不掉它们。
-        if model.currentModelProviders.contains(where: { $0.hostV2Mirror == true }) {
-            return true
-        }
         return info.serverName == PIAdaptorRelease.runtimeServerName
     }
 
@@ -690,8 +680,7 @@ struct ModelsScreen: View {
                                 context: operation,
                                 input: input,
                                 providerId: providerId,
-                                serverDefaultSet: success.defaultSet,
-                                hostV2Mirror: true
+                                serverDefaultSet: success.defaultSet
                             ) else { return }
                             // 服务器已导入后密钥只落本机 Keychain；写入失败必须可见，
                             // 不能只留下一条“已导入”让发送时才失败。

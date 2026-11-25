@@ -951,7 +951,7 @@ struct UITestFixture {
         )
         state.modelProviders = [
             StoredModelProvider(
-                providerId: "prv_alpha", hostV2Mirror: true, hostID: hostID,
+                providerId: "prv_alpha", hostID: hostID,
                 name: "Alpha Models", baseURL: "https://alpha.invalid",
                 apiStyle: "chat_completions",
                 models: [StoredModelBinding(spec: pro), StoredModelBinding(spec: mini)],
@@ -959,7 +959,7 @@ struct UITestFixture {
                 importedAt: Date(timeIntervalSince1970: 1_704_164_640)
             ),
             StoredModelProvider(
-                providerId: "prv_beta", hostV2Mirror: true, hostID: hostID,
+                providerId: "prv_beta", hostID: hostID,
                 name: "Beta Models", baseURL: "https://beta.invalid",
                 apiStyle: "chat_completions",
                 models: [StoredModelBinding(spec: beta)],

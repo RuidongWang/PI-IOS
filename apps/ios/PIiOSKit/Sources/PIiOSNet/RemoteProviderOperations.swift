@@ -2,8 +2,8 @@ import Foundation
 import PIiOSCore
 
 public protocol RACPV2Requesting: Sendable {
-    func v2Request<R: Decodable & Sendable>(
-        method: String,
+    func request<R: Decodable & Sendable>(
+        _ method: RACPMethod,
         params: JSONValue,
         timeout: TimeInterval
     ) async throws -> R
@@ -56,8 +56,8 @@ public enum RemoteProviderOperations {
         }
         let envelope: DiscoveryEnvelope
         do {
-            envelope = try await client.v2Request(
-                method: RACPV2Method.providerDiscover.rawValue,
+            envelope = try await client.request(
+                .providerDiscover,
                 params: .object(params),
                 timeout: timeout
             )
@@ -148,8 +148,8 @@ public enum RemoteProviderOperations {
         var defaultSet = false
         for entry in payload.providers {
             do {
-                let result: ProviderEnvelope = try await client.v2Request(
-                    method: RACPV2Method.providerCreate.rawValue,
+                let result: ProviderEnvelope = try await client.request(
+                    .providerCreate,
                     params: .object([
                         "provider": providerCreateValue(for: entry),
                         "context": writeContext(
@@ -202,8 +202,8 @@ public enum RemoteProviderOperations {
         }
         let budget = ProviderOperationBudget(timeout: timeout)
         do {
-            let result: DeleteEnvelope = try await client.v2Request(
-                method: RACPV2Method.providerDelete.rawValue,
+            let result: DeleteEnvelope = try await client.request(
+                .providerDelete,
                 params: .object([
                     "providerId": .string(providerId),
                     "confirmProviderId": .string(providerId),
@@ -289,8 +289,8 @@ public enum RemoteProviderOperations {
         }
         let budget = ProviderOperationBudget(timeout: timeout)
         do {
-            let session: SessionEnvelope = try await client.v2Request(
-                method: RACPV2Method.sessionGet.rawValue,
+            let session: SessionEnvelope = try await client.request(
+                .sessionGet,
                 params: .object(["sessionId": .string(sessionId)]),
                 timeout: try budget.remaining()
             )
@@ -393,8 +393,8 @@ public enum RemoteProviderOperations {
         client: any RACPV2Requesting,
         timeout: TimeInterval
     ) async throws -> [RACPV2Provider] {
-        let result: ProviderListEnvelope = try await client.v2Request(
-            method: RACPV2Method.providerList.rawValue,
+        let result: ProviderListEnvelope = try await client.request(
+            .providerList,
             params: .object([:]),
             timeout: timeout
         )
@@ -483,77 +483,4 @@ public enum RemoteProviderOperations {
         }
     }
 
-}
-
-/// Explicit compatibility path for pre-PI-adaptor `pi-host` installations.
-/// PI-adaptor installs and normal provider operations must never call this CLI.
-public enum LegacyRemoteProviderOperations {
-    public static func importProviders(
-        transport: SSHTransport,
-        payload: Data,
-        dataDir: String? = nil,
-        timeout: TimeInterval = RemoteProviderOperations.userVisibleTimeout
-    ) async throws -> ProviderImportReceipt {
-        let result = try await transport.exec(
-            command("provider-import", dataDir: dataDir),
-            stdin: payload,
-            timeout: timeout
-        )
-        return ProviderImportReceiptParser.parse(
-            stdout: result.stdoutText,
-            exitCode: Int32(clamping: result.exitStatus)
-        )
-    }
-
-    public static func removeProvider(
-        transport: SSHTransport,
-        payload: Data,
-        dataDir: String? = nil,
-        timeout: TimeInterval = RemoteProviderOperations.userVisibleTimeout
-    ) async throws -> ProviderRemoveReceipt {
-        let result = try await transport.exec(
-            command("provider-remove", dataDir: dataDir),
-            stdin: payload,
-            timeout: timeout
-        )
-        return ProviderRemoveReceiptParser.parse(
-            stdout: result.stdoutText,
-            exitCode: Int32(clamping: result.exitStatus)
-        )
-    }
-
-    public static func bindingStatus(
-        transport: SSHTransport,
-        sessionId: String,
-        dataDir: String? = nil,
-        timeout: TimeInterval = RemoteProviderOperations.userVisibleTimeout
-    ) async throws -> ProviderBindingReceipt {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let payload = try encoder.encode(BindingStatusInput(sessionId: sessionId))
-        let result = try await transport.exec(
-            command("provider-binding-status", dataDir: dataDir),
-            stdin: payload,
-            timeout: timeout
-        )
-        return ProviderBindingReceiptParser.parse(
-            stdout: result.stdoutText,
-            exitCode: Int32(clamping: result.exitStatus)
-        )
-    }
-
-    private struct BindingStatusInput: Codable {
-        var version = 1
-        var sessionId: String
-    }
-
-    private static func command(_ subcommand: String, dataDir: String?) -> String {
-        var command =
-            "node \"$HOME/.pi-desktop/pi-host/current/pi-host.js\" \(subcommand)"
-        if let dataDir {
-            let quoted = "'" + dataDir.replacingOccurrences(of: "'", with: "'\\''") + "'"
-            command += " --data-dir \(quoted)"
-        }
-        return command
-    }
 }

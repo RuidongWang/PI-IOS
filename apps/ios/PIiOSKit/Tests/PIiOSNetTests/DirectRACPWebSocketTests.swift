@@ -29,12 +29,12 @@ final class DirectRACPWebSocketTests: XCTestCase {
         }
     }
 
-    func testRequestUsesBearerAuthorizationAndV1SubprotocolWithoutURLToken() throws {
+    func testRequestUsesBearerAuthorizationAndV2SubprotocolWithoutURLToken() throws {
         let token = "pdt" + "2.example-token"
         let endpoint = try XCTUnwrap(URL(string: "wss://localhost:9443/v1/racp/ws"))
         let request = try DirectRACPWebSocket.authorizedRequest(endpoint: endpoint, bearerToken: token)
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(token)")
-        XCTAssertEqual(request.value(forHTTPHeaderField: "Sec-WebSocket-Protocol"), "pi-racp.v1.jsonrpc")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Sec-WebSocket-Protocol"), "pi-racp.v2.jsonrpc")
         XCTAssertNil(request.url?.query)
         XCTAssertEqual(request.url?.path, "/v1/racp/ws")
     }

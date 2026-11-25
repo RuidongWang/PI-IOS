@@ -97,7 +97,6 @@ final class RACPRouteFallbackTests: XCTestCase {
             activeItems: [],
             queuedTurns: [],
             pendingApprovals: [],
-            pendingInputs: [],
             hasMoreHistory: false
         )
         let context = RACPRecoveryContext(
@@ -126,8 +125,8 @@ final class RACPRouteFallbackTests: XCTestCase {
             for await data in socket.inbound { await client.receiveForTesting(data) }
         }
         do {
-            let _: JSONValue = try await client.v2Request(
-                method: RACPV2Method.providerDiscover.rawValue,
+            let _: JSONValue = try await client.request(
+                .providerDiscover,
                 params: .object([:])
             )
             XCTFail("应返回上游错误")
@@ -404,8 +403,8 @@ final class RACPRouteFallbackTests: XCTestCase {
         // the state stream as a local cancel.
         first.stallSends()
         let request = Task { () -> JSONValue in
-            try await client.v2Request(
-                method: "provider/list",
+            try await client.request(
+                .providerList,
                 params: .object([:]),
                 timeout: 0.2
             )
@@ -692,7 +691,7 @@ private final class ScriptedSocket: RACPSocket, @unchecked Sendable {
                 capabilities["directTransport"] = directTransportCapability
             }
             yieldResult(id: id, result: [
-                "protocolVersion": "1.0",
+                "protocolVersion": "2.0.0",
                 "server": ["name": "test", "version": "1", "hostId": "untrusted-initialize-id"],
                 "connectionId": "connection_1",
                 "principal": ["roles": ["owner"]],

@@ -48,8 +48,8 @@ public final class OfflineSessionCacheSQLite {
         database = handle
         sqlite3_busy_timeout(handle, 5_000)
         do {
-            try execute("PRAGMA journal_mode=DELETE")
-            try execute("PRAGMA synchronous=FULL")
+            try execute("PRAGMA journal_mode=WAL")
+            try execute("PRAGMA synchronous=NORMAL")
             try execute("PRAGMA secure_delete=ON")
             try migrate()
             Self.applyFileProtection(to: url)
@@ -108,15 +108,17 @@ public final class OfflineSessionCacheSQLite {
             else {
                 throw OfflineSessionCacheSQLiteError.migrationIncomplete
             }
+            try database.flattenWALAndClose()
             if FileManager.default.fileExists(atPath: databaseURL.path) {
                 _ = try FileManager.default.replaceItemAt(databaseURL, withItemAt: tempURL)
             } else {
                 try FileManager.default.moveItem(at: tempURL, to: databaseURL)
             }
         } catch {
-            try? FileManager.default.removeItem(at: tempURL)
+            Self.removeSQLiteFiles(at: tempURL)
             throw error
         }
+        Self.removeSQLiteFiles(at: tempURL)
         try FileManager.default.removeItem(at: legacyURL)
         return document.snapshot
     }
@@ -664,19 +666,49 @@ public final class OfflineSessionCacheSQLite {
         hostID?.uuidString ?? "none"
     }
 
+    private func flattenWALAndClose() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireDatabase()
+        try execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        try execute("PRAGMA journal_mode=DELETE")
+        if let database {
+            sqlite3_close(database)
+            self.database = nil
+        }
+    }
+
+    private static func removeSQLiteFiles(at url: URL) {
+        for candidate in [
+            url,
+            URL(fileURLWithPath: url.path + "-wal"),
+            URL(fileURLWithPath: url.path + "-shm"),
+        ] {
+            try? FileManager.default.removeItem(at: candidate)
+        }
+    }
+
     private static func applyFileProtection(to url: URL) {
+        let sidecars = [
+            url,
+            URL(fileURLWithPath: url.path + "-wal"),
+            URL(fileURLWithPath: url.path + "-shm"),
+        ]
 #if os(iOS)
-        for protectedURL in [url.deletingLastPathComponent(), url] {
+        for protectedURL in [url.deletingLastPathComponent()] + sidecars {
+            guard FileManager.default.fileExists(atPath: protectedURL.path) else { continue }
             try? FileManager.default.setAttributes(
                 [.protectionKey: FileProtectionType.completeUnlessOpen],
                 ofItemAtPath: protectedURL.path
             )
         }
 #endif
-        var resourceURL = url
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        try? resourceURL.setResourceValues(values)
+        for target in sidecars where FileManager.default.fileExists(atPath: target.path) {
+            var resourceURL = target
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try? resourceURL.setResourceValues(values)
+        }
     }
 }
 

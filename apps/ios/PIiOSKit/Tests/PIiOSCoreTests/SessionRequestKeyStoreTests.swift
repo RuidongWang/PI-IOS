@@ -26,7 +26,7 @@ final class SessionRequestKeyStoreTests: XCTestCase {
     func testTimeoutAndRestartReusePendingKeyForEveryAction() throws {
         let actions: [SessionRequestAction] = [
             .turn(text: "fixture message"), .approval(decision: .allowOnce, permissionMode: nil),
-            .contract(decision: .approve, permissionMode: .ask), .input(answers: [["fixture answer"], nil]),
+            .contract(decision: .approve, permissionMode: .ask),
         ]
         for action in actions {
             let request = identity(item: "item-fixture", action: action)
@@ -80,19 +80,8 @@ final class SessionRequestKeyStoreTests: XCTestCase {
         XCTAssertEqual(Set(keys).count, actions.count)
     }
 
-    func testChangedAnswersIncludingSkipsOrderAndArrayBoundariesGetNewKeys() throws {
-        let variants: [[[String]?]] = [
-            [["a"], nil], [["b"], nil], [nil, ["a"]], [["a"], []],
-            [["a", "b"]], [["a"], ["b"]], [["a,b"]],
-        ]
-        let keys = try variants.map {
-            try store.prepare(identity(item: "input-fixture", action: .input(answers: $0))).idempotencyKey
-        }
-        XCTAssertEqual(Set(keys).count, variants.count)
-    }
-
     func testAcknowledgementRetiresKeysForEveryActionAcrossRestart() throws {
-        let actions: [SessionRequestAction] = [.turn(text: "fixture"), .input(answers: [nil]),
+        let actions: [SessionRequestAction] = [.turn(text: "fixture"),
                                                .contract(decision: .approve, permissionMode: .ask), .approval(decision: .deny, permissionMode: nil)]
         for action in actions {
             let request = identity(item: "item", action: action)
@@ -231,7 +220,7 @@ final class SessionRequestKeyStoreTests: XCTestCase {
     }
 
     func testDiskContainsOnlyDigestsRandomKeysAndAdmission() throws {
-        _ = try store.prepare(identity(item: "item-fixture", action: .input(answers: [["fixture answer"]])))
+        _ = try store.prepare(identity(item: "item-fixture", action: .approval(decision: .allowOnce, permissionMode: nil)))
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
         XCTAssertEqual(Set(object.keys), ["version", "pending"])
         let pending = try XCTUnwrap(object["pending"] as? [String: [String: Any]])
@@ -250,7 +239,7 @@ final class SessionRequestKeyStoreTests: XCTestCase {
     }
 
     func testSnapshotRebuildDoesNotDiscardPendingRequestIdentity() throws {
-        let request = identity(item: "item-fixture", action: .input(answers: [["fixture"]]))
+        let request = identity(item: "item-fixture", action: .approval(decision: .allowOnce, permissionMode: nil))
         let attempt = try store.prepare(request)
         let model = SessionViewModel()
         model.beginDraft(idempotencyKey: "draft-fixture", text: "fixture")

@@ -1092,7 +1092,6 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
     private func generatedScript(
         _ environment: Environment,
         force: Bool = false,
-        allowLegacyPPT1: Bool = false,
         direct: BootstrapDirectConfiguration? = nil,
         attemptId: String? = nil
     ) throws -> URL {
@@ -1106,7 +1105,6 @@ final class BootstrapScriptIntegrationTests: XCTestCase {
             stopTimeoutSeconds: 5,
             verifyTimeoutSeconds: 15,
             force: force,
-            allowLegacyPPT1: allowLegacyPPT1,
             direct: direct
         )
         let url = environment.root.appendingPathComponent("bootstrap-\(UUID().uuidString).sh")

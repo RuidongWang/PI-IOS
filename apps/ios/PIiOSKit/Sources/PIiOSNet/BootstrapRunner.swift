@@ -65,10 +65,6 @@ public struct BootstrapRunnerConfiguration: Sendable {
     public var commandTimeout: TimeInterval
     public var pairingCallbackTimeout: TimeInterval
     public var verificationCallbackTimeout: TimeInterval
-    /// New PI-adaptor installs must use a token produced by this attempt.
-    /// Legacy `ppt1` support exists only for an explicitly selected
-    /// compatibility flow and must never be enabled by the default installer.
-    public var allowLegacyPPT1: Bool
 
     public init(
         pollInterval: TimeInterval = 1,
@@ -76,8 +72,7 @@ public struct BootstrapRunnerConfiguration: Sendable {
         stallThreshold: TimeInterval = BootstrapStallDetector.defaultThreshold,
         commandTimeout: TimeInterval = 30,
         pairingCallbackTimeout: TimeInterval = 2 * 60,
-        verificationCallbackTimeout: TimeInterval = 60,
-        allowLegacyPPT1: Bool = false
+        verificationCallbackTimeout: TimeInterval = 60
     ) {
         self.pollInterval = max(0.01, pollInterval)
         self.overallTimeout = max(0.01, overallTimeout)
@@ -85,7 +80,6 @@ public struct BootstrapRunnerConfiguration: Sendable {
         self.commandTimeout = max(1, commandTimeout)
         self.pairingCallbackTimeout = max(0.1, pairingCallbackTimeout)
         self.verificationCallbackTimeout = max(0.1, verificationCallbackTimeout)
-        self.allowLegacyPPT1 = allowLegacyPPT1
     }
 }
 
@@ -374,7 +368,6 @@ public final class BootstrapRunner {
                     }
                     let result = try await pair(
                         deviceLabel: deviceLabel,
-                        allowLegacyPPT1: configuration.allowLegacyPPT1,
                         attemptId: attemptId
                     )
                     switch result {
@@ -472,7 +465,6 @@ public final class BootstrapRunner {
 
     private func pair(
         deviceLabel: String?,
-        allowLegacyPPT1: Bool,
         attemptId: String
     ) async throws -> PairAttempt {
         let rawPairing = try await exec(
@@ -488,8 +480,7 @@ public final class BootstrapRunner {
         let material: BootstrapPairingMaterial
         do {
             material = try JSONDecoder().decode(BootstrapPairingMaterial.self, from: rawPairing)
-            guard material.token.hasPrefix("ppt2.")
-                    || (allowLegacyPPT1 && material.token.hasPrefix("ppt1.")) else {
+            guard material.token.hasPrefix("ppt2.") else {
                 return .failed(
                     "配对令牌类型已过期。重试安装。"
                 )
@@ -498,8 +489,7 @@ public final class BootstrapRunner {
                 token: material.token,
                 expiresAt: material.expiresAt,
                 host: material.host,
-                port: material.port,
-                allowLegacyPPT1: allowLegacyPPT1
+                port: material.port
             )
         } catch {
             throw BootstrapRunnerError.malformedPairingFile

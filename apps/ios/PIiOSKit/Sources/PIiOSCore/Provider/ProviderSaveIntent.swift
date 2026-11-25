@@ -50,8 +50,6 @@ public struct ProviderSaveIntent: Equatable, Sendable {
     public let apiKeyChange: ProviderAPIKeyChange
     /// 提交时输入框里的原始文本，只用于判断「保存期间是否又被编辑」。
     public let apiKeyDraft: String
-    public let legacyProviderId: String?
-    public let hostV2Mirror: Bool?
     public let defaultModelID: String?
 
     public init(
@@ -62,8 +60,6 @@ public struct ProviderSaveIntent: Equatable, Sendable {
         models: [ProviderModelSpec],
         apiKey: String?,
         apiKeyDraft: String? = nil,
-        legacyProviderId: String? = nil,
-        hostV2Mirror: Bool? = nil,
         defaultModelID: String? = nil
     ) {
         self.kind = kind
@@ -73,8 +69,6 @@ public struct ProviderSaveIntent: Equatable, Sendable {
         self.models = models
         self.apiKeyChange = ProviderAPIKeyChange(input: apiKey)
         self.apiKeyDraft = apiKeyDraft ?? apiKey ?? ""
-        self.legacyProviderId = legacyProviderId
-        self.hostV2Mirror = hostV2Mirror
         self.defaultModelID = defaultModelID
     }
 

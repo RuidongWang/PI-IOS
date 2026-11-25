@@ -97,9 +97,7 @@ final class ProviderDeletionOutcomeTests: XCTestCase {
             )
         ))
         let stages = ProviderDeletionStages(
-            v2Requested: true,
             v2Removed: true,
-            legacyCleared: true,
             localRecordRemoved: true,
             localKeyCleared: true
         )
@@ -112,7 +110,6 @@ final class ProviderDeletionOutcomeTests: XCTestCase {
         XCTAssertEqual(presentation.headline, "已删除模型服务「DeepSeek」")
         XCTAssertTrue(presentation.message.contains("服务器已删除记录与密钥"))
         XCTAssertTrue(presentation.message.contains("默认模型已转给"))
-        XCTAssertTrue(presentation.message.contains("旧版服务记录也已一并清理"))
         XCTAssertTrue(presentation.message.contains("本机记录已清理"))
         XCTAssertTrue(presentation.message.contains("本机密钥已清除"))
     }
@@ -122,7 +119,6 @@ final class ProviderDeletionOutcomeTests: XCTestCase {
         let presentation = ProviderDeletionPresenter.present(
             outcome: outcome,
             stages: ProviderDeletionStages(
-                v2Requested: true,
                 v2Removed: true,
                 localRecordRemoved: true,
                 localKeyCleared: true
@@ -151,13 +147,12 @@ final class ProviderDeletionOutcomeTests: XCTestCase {
                 removedProviderId: providerID,
                 secretCleared: true
             ),
-            stages: ProviderDeletionStages(v2Removed: true, legacyCleared: true),
+            stages: ProviderDeletionStages(v2Removed: true),
             providerName: "DeepSeek"
         )
         XCTAssertEqual(presentation.tone, .needsAttention)
         XCTAssertEqual(presentation.headline, "已删除模型服务「DeepSeek」")
         XCTAssertTrue(presentation.message.contains("默认模型因创建时间不可比未转移"))
-        XCTAssertTrue(presentation.message.contains("旧版服务记录也已一并清理"))
     }
 
     func testSecretNotClearedVariantIsExplained() {
@@ -166,7 +161,7 @@ final class ProviderDeletionOutcomeTests: XCTestCase {
                 removedProviderId: providerID,
                 secretCleared: false
             ),
-            stages: ProviderDeletionStages(v2Removed: true, legacyCleared: true),
+            stages: ProviderDeletionStages(v2Removed: true),
             providerName: "DeepSeek"
         )
         XCTAssertEqual(presentation.tone, .needsAttention)
@@ -176,7 +171,7 @@ final class ProviderDeletionOutcomeTests: XCTestCase {
     func testFailurePresentationKeepsRecoveryContextVisible() {
         let presentation = ProviderDeletionPresenter.present(
             outcome: .failure(.removeFailed),
-            stages: ProviderDeletionStages(v2Requested: true),
+            stages: ProviderDeletionStages(),
             providerName: "DeepSeek"
         )
         XCTAssertEqual(presentation.tone, .failure)

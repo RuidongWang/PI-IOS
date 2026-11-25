@@ -26,6 +26,7 @@ final class StatePersistenceTests: XCTestCase {
     func testFlushPersistsReadingPositionAndNewerSetting() async throws {
         let model = AppModel(seed: .empty, stateFileURL: stateURL)
         let hostID = UUID()
+        let positionsURL = root.appendingPathComponent("reading-positions-v1.json")
 
         model.rememberReadingPosition(
             hostID: hostID,
@@ -35,9 +36,8 @@ final class StatePersistenceTests: XCTestCase {
         )
         let firstSaved = await model.flushPersistentState()
         XCTAssertTrue(firstSaved)
-        let first = StateFile.load(from: stateURL)
         XCTAssertEqual(
-            first.state.readingPositionsByHost[hostID.uuidString]?["session-1"],
+            ReadingPositionStore.load(from: positionsURL)?[hostID.uuidString]?["session-1"],
             ConversationReadingPosition(lastVisibleItemID: "item-42", isNearBottom: false)
         )
 
@@ -52,7 +52,7 @@ final class StatePersistenceTests: XCTestCase {
         XCTAssertTrue(outcome.canSave)
         XCTAssertEqual(outcome.state.offlineCacheLimit, 400)
         XCTAssertEqual(
-            outcome.state.readingPositionsByHost[hostID.uuidString]?["session-1"],
+            ReadingPositionStore.load(from: positionsURL)?[hostID.uuidString]?["session-1"],
             ConversationReadingPosition(lastVisibleItemID: "item-42", isNearBottom: false)
         )
     }
@@ -192,6 +192,7 @@ final class StatePersistenceTests: XCTestCase {
         let model = AppModel(seed: .empty, stateFileURL: stateURL)
         let hostID = UUID()
         let target = try XCTUnwrap(stateURL)
+        let positionsURL = root.appendingPathComponent("reading-positions-v1.json")
         let evidence = StateWriteEvidence()
         let entered = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
@@ -213,11 +214,8 @@ final class StatePersistenceTests: XCTestCase {
                                       lastVisibleItemID: "position-0", isNearBottom: false)
         var flushes = [Task { await model.flushPersistentState() }]
         let reached = await Task.detached { entered.wait(timeout: .now() + 2) == .success }.value
-        guard reached else { return XCTFail("first position write did not reach its real adapter") }
+        guard reached else { return XCTFail("first state write did not reach its real adapter") }
         for revision in 1..<100 {
-            // Wait for actual queue admission before changing the UI snapshot
-            // again; this proves 100 distinct inputs, rather than 100 copies of
-            // the snapshot captured after a loop has already finished.
             for _ in 0..<1_000 where evidence.accepted < revision { await Task.yield() }
             XCTAssertEqual(evidence.accepted, revision)
             model.rememberReadingPosition(hostID: hostID, sessionID: "hundred",
@@ -226,14 +224,8 @@ final class StatePersistenceTests: XCTestCase {
         }
         for _ in 0..<1_000 where evidence.accepted < 100 { await Task.yield() }
         XCTAssertEqual(evidence.accepted, 100)
-        // AC-C1 针对 250ms 热路径写：这部分全部经 saveAsync 入队，不得在主线程执行。
-        // 其后的 `setOfflineCacheLimit` 是显式同步提交（契约 §2.3 允许同步桥接），
-        // 且 libdispatch 可能在调用线程内联执行 sync 块，故不在本条断言范围内。
         XCTAssertFalse(evidence.sawMainThreadIO)
         release.signal()
-        // Explicit settings remain an actual synchronous commit. Its snapshot
-        // contains the newest reading position, and is ordered after all older
-        // async snapshots already admitted while the first adapter was paused.
         model.setOfflineCacheLimit(500)
         for flush in flushes { let result = await flush.value; XCTAssertTrue(result) }
         let result = await model.flushPersistentState()
@@ -242,7 +234,7 @@ final class StatePersistenceTests: XCTestCase {
         XCTAssertEqual(evidence.maximumConcurrent, 1)
         XCTAssertGreaterThanOrEqual(evidence.completed, 101)
         XCTAssertEqual(disk.state.offlineCacheLimit, 500)
-        XCTAssertEqual(disk.state.readingPositionsByHost[hostID.uuidString]?["hundred"]?.lastVisibleItemID, "position-99")
+        XCTAssertEqual(ReadingPositionStore.load(from: positionsURL)?[hostID.uuidString]?["hundred"]?.lastVisibleItemID, "position-99")
         XCTAssertEqual(model.readingPosition(hostID: hostID, sessionID: "hundred")?.lastVisibleItemID, "position-99")
         XCTAssertNil(model.saveError)
     }

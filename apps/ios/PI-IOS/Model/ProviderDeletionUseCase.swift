@@ -16,17 +16,9 @@ enum ProviderDeletionNotice: Equatable {
 /// 之后的分支判断、文案与「是否清本机」全部由 `ProviderDeletionUseCase` 统一决定。
 struct ProviderDeletionTarget {
     let host: HostRecord
-    /// v2 PI-adaptor 上的 provider id。
     let providerId: String
-    /// legacy SSH 存储里的 provider id（镜像记录可能与 v2 id 不同）。
-    let legacyProviderId: String?
-    /// `true` = v2 记录，`false` = 仅 legacy，`nil` = 旧记录需要探测。
-    let hostV2Mirror: Bool?
-    /// 本机映射记录的 `StoredModelProvider.id`；没有本机记录时为 nil。
     let localRecordId: String?
-    /// 用于结果提示的服务名称。
     let displayName: String
-    /// 删除成功后应清除的本机 Keychain 密钥 id（v2 id 与 legacy id）。
     let keychainProviderIds: [String]
 }
 
@@ -76,84 +68,25 @@ struct ProviderDeletionUseCase {
 
         var stages = ProviderDeletionStages()
 
-        // 1) v2 PI-adaptor 镜像。
-        if target.hostV2Mirror ?? true {
-            stages.v2Requested = true
-            guard connection.state.isOnline else {
-                return report(.blocked(.offline), stages: stages, target: target)
-            }
-            do {
-                try await connection.deleteAdaptorProvider(id: target.providerId)
-                stages.v2Removed = true
-            } catch let error as RACPV2Error {
-                if case .server(let code, _) = error, code == "NOT_FOUND" {
-                    // 幂等删除：服务器上已经查不到这条记录，继续清理其余部分。
-                    stages.v2AlreadyAbsent = true
-                } else {
-                    return failureReport(error, stages: stages, target: target)
-                }
-            } catch {
+        guard connection.state.isOnline else {
+            return report(.blocked(.offline), stages: stages, target: target)
+        }
+        do {
+            try await connection.deleteAdaptorProvider(id: target.providerId)
+            stages.v2Removed = true
+        } catch let error as RACPV2Error {
+            if case .server(let code, _) = error, code == "NOT_FOUND" {
+                stages.v2AlreadyAbsent = true
+            } else {
                 return failureReport(error, stages: stages, target: target)
             }
-            guard model.canApplyProviderOperation(operation) else {
-                return report(.blocked(.hostChanged), stages: stages, target: target)
-            }
+        } catch {
+            return failureReport(error, stages: stages, target: target)
+        }
+        guard model.canApplyProviderOperation(operation) else {
+            return report(.blocked(.hostChanged), stages: stages, target: target)
         }
 
-        // 2) legacy SSH 存储。旧记录没有 `hostV2Mirror` 标记时要探测：
-        //    未执行过 v2 删除的旧记录，其 id 就是 legacy id。
-        var legacyId = target.legacyProviderId
-        if legacyId == nil, target.hostV2Mirror != true, !stages.v2Removed {
-            legacyId = target.providerId
-        }
-        var serverOutcome: ProviderDeletionOutcome?
-        if let legacyProviderId = legacyId {
-            do {
-                let receipt = try await connection.removeProvider(
-                    record: target.host,
-                    providerId: legacyProviderId
-                )
-                guard model.canApplyProviderOperation(operation) else {
-                    return report(.blocked(.hostChanged), stages: stages, target: target)
-                }
-                let outcome = ProviderDeletionOutcome(receipt: receipt)
-                switch outcome {
-                case .success(let summary):
-                    // 回执必须对应本次请求的 provider。串线/错误回执不能被当作
-                    // 已删除目标，否则会清掉本机映射与密钥却留下服务器记录。
-                    if let summary, summary.providerId.caseInsensitiveCompare(legacyProviderId) != .orderedSame {
-                        return report(
-                            .unparseable(reason: "删除回执的 providerId 与请求目标不一致"),
-                            stages: stages,
-                            target: target
-                        )
-                    }
-                    stages.legacyCleared = summary?.effect == .deleted
-                    stages.legacyAlreadyAbsent = summary?.effect == .absent
-                    serverOutcome = outcome
-                case .alreadyAbsent:
-                    stages.legacyAlreadyAbsent = true
-                    serverOutcome = outcome
-                case .defaultTransferOrderUnknown(let removedProviderId, _):
-                    guard removedProviderId.caseInsensitiveCompare(legacyProviderId) == .orderedSame else {
-                        return report(
-                            .unparseable(reason: "删除回执的 providerId 与请求目标不一致"),
-                            stages: stages,
-                            target: target
-                        )
-                    }
-                    stages.legacyCleared = true
-                    serverOutcome = outcome
-                case .failure, .unparseable, .blocked:
-                    // 业务失败 / 回执不可解析：本机映射与密钥线索必须保留。
-                    return report(outcome, stages: stages, target: target)
-                }
-            } catch {
-                return failureReport(error, stages: stages, target: target)
-            }
-        }
-
-        // 3) 本机映射与 Keychain。只有前面所有服务器阶段都确定完成才会到这里。
         if let localRecordId = target.localRecordId {
             guard model.removeLocalProvider(id: localRecordId, context: operation) else {
                 return report(.blocked(.hostChanged), stages: stages, target: target)
@@ -161,14 +94,7 @@ struct ProviderDeletionUseCase {
             stages.localRecordRemoved = true
         }
 
-        let finalOutcome: ProviderDeletionOutcome
-        if let serverOutcome {
-            finalOutcome = serverOutcome
-        } else if stages.v2AlreadyAbsent {
-            finalOutcome = .alreadyAbsent
-        } else {
-            finalOutcome = .success(summary: nil)
-        }
+        let finalOutcome: ProviderDeletionOutcome = stages.v2AlreadyAbsent ? .alreadyAbsent : .success(summary: nil)
         if finalOutcome.clearsLocalKey {
             stages.localKeyCleared = clearLocalKeys(target)
         }

@@ -29,8 +29,8 @@ final class ExtensionsWireTests: XCTestCase {
         XCTAssertNil(result.latestAttempt)
         XCTAssertFalse(result.userLoadingEnabled)
         XCTAssertEqual(result.latestLabel, "尚未运行")
-        XCTAssertEqual(RACPV2Method.extensionList.rawValue, "extension/list")
-        XCTAssertEqual(RACPV2Method.sessionExtensions.rawValue, "session/extensions")
+        XCTAssertEqual(RACPMethod.extensionList.rawValue, "extension/list")
+        XCTAssertEqual(RACPMethod.sessionExtensions.rawValue, "session/extensions")
     }
 
     func testUnknownRuntimeStatesAndDiagnosticStagesRemainDecodable() throws {

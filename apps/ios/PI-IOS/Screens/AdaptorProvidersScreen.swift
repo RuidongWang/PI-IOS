@@ -544,9 +544,7 @@ struct AdaptorProvidersScreen: View {
             context: context,
             input: input,
             providerId: provider.id,
-            serverDefaultSet: true,
-            legacyProviderId: existing?.legacyProviderId,
-            hostV2Mirror: true
+            serverDefaultSet: true
         )
     }
 
@@ -561,17 +559,13 @@ struct AdaptorProvidersScreen: View {
             return
         }
         deleteAlert = nil
-        // Capture the local mapping (legacy id + local record id) before deleting.
         let existing = model.storedProvider(hostID: host.id, providerId: provider.id)
-        // U07：与模型服务详情页共用同一套删除分支与文案；不再丢弃 legacy 回执。
         let target = ProviderDeletionTarget(
             host: host,
             providerId: provider.id,
-            legacyProviderId: existing?.legacyProviderId,
-            hostV2Mirror: existing?.hostV2Mirror ?? true,
             localRecordId: existing?.id,
             displayName: provider.name,
-            keychainProviderIds: [provider.id, existing?.legacyProviderId].compactMap { $0 }
+            keychainProviderIds: [provider.id]
         )
         let report = await ProviderDeletionUseCase(model: model, connection: connection)
             .delete(target)

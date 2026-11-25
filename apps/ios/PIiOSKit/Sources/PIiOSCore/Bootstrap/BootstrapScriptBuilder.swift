@@ -1,139 +1,5 @@
 import Foundation
 
-/// Inputs for the POSIX bootstrap script that runs on the target Linux host.
-///
-/// The script is generated entirely on the client. Every value that can reach a
-/// shell is validated here and then emitted as a single-quoted shell literal.
-public struct BootstrapScriptConfiguration: Equatable, Sendable {
-    public static let defaultPairingLifetimeMilliseconds = 10 * 60 * 1_000
-    public static let defaultReadyTimeoutSeconds = 90
-    public static let defaultPairTimeoutSeconds = 12 * 60
-    public static let defaultStopTimeoutSeconds = 20
-    public static let defaultVerifyTimeoutSeconds = 90
-
-    public let release: PIAdaptorRelease
-    public let attemptId: String
-    public let hostPlatform: String
-    public let hostArchitecture: String
-    public let port: Int
-    public let pairingLifetimeMilliseconds: Int
-    public let readyTimeoutSeconds: Int
-    public let pairTimeoutSeconds: Int
-    public let stopTimeoutSeconds: Int
-    public let verifyTimeoutSeconds: Int
-    /// 强制重装：命中本地 receipt 也重新下载并激活，用于「版本没变但字节变了」的场景。
-    public let force: Bool
-    /// PI-adaptor installations default to PPT2 only. A separate legacy path may
-    /// opt into PPT1; the normal install UI never exposes that override.
-    public let allowLegacyPPT1: Bool
-    public let direct: BootstrapDirectConfiguration?
-
-    public init(
-        release: PIAdaptorRelease,
-        attemptId: String,
-        hostPlatform: String = "linux",
-        hostArchitecture: String,
-        port: Int,
-        pairingLifetimeMilliseconds: Int = BootstrapScriptConfiguration.defaultPairingLifetimeMilliseconds,
-        readyTimeoutSeconds: Int = BootstrapScriptConfiguration.defaultReadyTimeoutSeconds,
-        pairTimeoutSeconds: Int = BootstrapScriptConfiguration.defaultPairTimeoutSeconds,
-        stopTimeoutSeconds: Int = BootstrapScriptConfiguration.defaultStopTimeoutSeconds,
-        verifyTimeoutSeconds: Int = BootstrapScriptConfiguration.defaultVerifyTimeoutSeconds,
-        force: Bool = false,
-        allowLegacyPPT1: Bool = false,
-        direct: BootstrapDirectConfiguration? = nil
-    ) throws {
-        guard BootstrapScriptValidation.isAttemptId(attemptId) else {
-            throw BootstrapScriptError.invalidAttemptId
-        }
-        guard (1...65_535).contains(port) else {
-            throw BootstrapScriptError.invalidPort
-        }
-        let architecture = hostArchitecture.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard hostPlatform.lowercased() == BootstrapPlatformProbe.supportedPlatform,
-              BootstrapScriptValidation.isSafeLabel(hostPlatform),
-              BootstrapScriptValidation.isSafeLabel(architecture),
-              BootstrapPlatformProbe.target(forUnameMachine: architecture) == release.target else {
-            throw BootstrapScriptError.invalidHostIdentity
-        }
-        guard (60_000...15 * 60 * 1_000).contains(pairingLifetimeMilliseconds) else {
-            throw BootstrapScriptError.invalidPairingLifetime
-        }
-        for timeout in [
-            readyTimeoutSeconds,
-            pairTimeoutSeconds,
-            stopTimeoutSeconds,
-            verifyTimeoutSeconds,
-        ] {
-            guard (1...3_600).contains(timeout) else {
-                throw BootstrapScriptError.invalidTimeout
-            }
-        }
-
-        self.release = release
-        self.attemptId = attemptId
-        self.hostPlatform = hostPlatform.lowercased()
-        self.hostArchitecture = architecture
-        self.port = port
-        self.pairingLifetimeMilliseconds = pairingLifetimeMilliseconds
-        self.readyTimeoutSeconds = readyTimeoutSeconds
-        self.pairTimeoutSeconds = pairTimeoutSeconds
-        self.stopTimeoutSeconds = stopTimeoutSeconds
-        self.verifyTimeoutSeconds = verifyTimeoutSeconds
-        self.force = force
-        self.allowLegacyPPT1 = allowLegacyPPT1
-        self.direct = direct
-    }
-}
-
-public enum BootstrapScriptError: Error, Equatable, CustomStringConvertible {
-    case invalidAttemptId
-    case invalidPort
-    case invalidHostIdentity
-    case invalidPairingLifetime
-    case invalidTimeout
-    case invalidDirectConfiguration
-
-    public var description: String {
-        switch self {
-        case .invalidAttemptId:
-            return "安装任务标识不合法。"
-        case .invalidPort:
-            return "端口必须在 1–65535 之间。"
-        case .invalidHostIdentity:
-            return "运行平台或架构不合法。"
-        case .invalidPairingLifetime:
-            return "配对令牌有效期必须在 1–15 分钟之间。"
-        case .invalidTimeout:
-            return "安装超时必须在 1–3600 秒之间。"
-        case .invalidDirectConfiguration:
-            return "直连主机必须是 DNS 或 IP，直连端口需与本地端口不同。"
-        }
-    }
-}
-
-enum BootstrapScriptValidation {
-    private static let attemptCharacters = CharacterSet(
-        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
-    )
-    private static let labelCharacters = CharacterSet(
-        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
-    )
-
-    static func isAttemptId(_ value: String) -> Bool {
-        !value.isEmpty && value != "." && value != ".."
-            && value.utf8.count <= 96 && value.unicodeScalars.allSatisfy {
-            $0.isASCII && attemptCharacters.contains($0)
-        }
-    }
-
-    static func isSafeLabel(_ value: String) -> Bool {
-        !value.isEmpty && value.utf8.count <= 32 && value.unicodeScalars.allSatisfy {
-            $0.isASCII && labelCharacters.contains($0)
-        }
-    }
-}
-
 /// Generates the only script executed on the remote host.
 ///
 /// Pairing-token stdout is consumed through an owner-only FIFO. It is never
@@ -164,7 +30,6 @@ public enum BootstrapScriptBuilder {
             shellQuote(configuration.hostPlatform),
             shellQuote(configuration.hostArchitecture),
             configuration.force ? "1" : "0",
-            configuration.allowLegacyPPT1 ? "1" : "0",
             configuration.direct == nil ? "0" : "1",
             shellQuote(configuration.direct?.directName ?? ""),
             String(configuration.direct?.directPort ?? 0),
@@ -191,7 +56,6 @@ public enum BootstrapScriptBuilder {
             "HOST_PLATFORM",
             "HOST_ARCH",
             "FORCE_INSTALL",
-            "ALLOW_LEGACY_PPT1",
             "DIRECT_REQUESTED",
             "DIRECT_NAME",
             "DIRECT_PORT",
@@ -1361,10 +1225,8 @@ chmod 600 "$WORK/manual.pid" 2>/dev/null || die "bootstrap-permissions"
         case "$candidate" in
           ppt2.*) ;;
           ppt1.*)
-            if [ "$ALLOW_LEGACY_PPT1" != 1 ]; then
-              printf '%s\n' legacy-pairing-token >"$PAIR_REJECT"
-              continue
-            fi
+            printf '%s\n' legacy-pairing-token >"$PAIR_REJECT"
+            continue
             ;;
           *) candidate="" ;;
         esac
@@ -1469,89 +1331,3 @@ clear_transaction || true
     }
 }
 
-/// The non-secret progress commands used between polling reads.
-public enum BootstrapRemoteCommand {
-    /// One exec performs the only platform probe used by the whole run.
-    public static let probe = #"printf 'platform=%s\narch=%s\n' "$(uname -s)" "$(uname -m)""#
-
-    public static func scoped(_ command: String, attemptId: String) -> String {
-        guard BootstrapScriptValidation.isAttemptId(attemptId) else { return "exit 64" }
-        return #"attempt="$HOME/.pi-adaptor/.bootstrap/attempts/\#(attemptId)""# + "\n" + command
-    }
-
-    public static let installScript = #"umask 077; mkdir -p "${attempt%/*}" && mkdir "$attempt" && cat > "$attempt/bootstrap.sh" && chmod 700 "$attempt/bootstrap.sh""#
-
-    public static let launch = #"""
-    umask 077
-    for tool in setsid nohup flock; do command -v "$tool" >/dev/null 2>&1 || exit 69; done
-    cd "$attempt" || exit 1
-    setsid nohup /bin/sh ./bootstrap.sh >bootstrap.log 2>&1 </dev/null &
-    launcher_pid=$!
-    waited=0
-    while [ "$waited" -lt 60 ]; do
-      case "$(cat start 2>/dev/null)" in
-        ready) printf 'pid=%s\n' "$launcher_pid"; exit 0 ;;
-        busy) cd / && rm -rf "$attempt"; exit 75 ;;
-      esac
-      sleep 0.1
-      waited=$((waited + 1))
-    done
-    : >cancel
-    exit 1
-    """#
-
-    public static let readState = #"cat "$attempt/state.json" 2>/dev/null || true"#
-
-    public static let readPairing = #"cat "$attempt/pair.json" 2>/dev/null || true"#
-
-    public static let writePairingOK = #"umask 077; printf '%s\n' ok > "$attempt/pair.result" && chmod 600 "$attempt/pair.result""#
-
-    public static let writePairingFailed = #"umask 077; printf '%s\n' failed > "$attempt/pair.result" && chmod 600 "$attempt/pair.result""#
-
-    public static let writeVerificationOK = #"umask 077; printf '%s\n' ok > "$attempt/verify.result" && chmod 600 "$attempt/verify.result""#
-
-    public static let writeVerificationFailed = #"umask 077; printf '%s\n' failed > "$attempt/verify.result" && chmod 600 "$attempt/verify.result""#
-
-    public static let cancel = #"umask 077; printf '%s\n' cancel > "$attempt/cancel" && chmod 600 "$attempt/cancel""#
-}
-
-/// Token material handed from the owner-only remote file to the pairing
-/// callback. This value must never be logged or persisted on the client.
-public struct BootstrapPairingMaterial: Codable, Equatable, Sendable {
-    public let token: String
-    public let expiresAt: Int64
-    public let host: String
-    public let port: Int
-
-    public init(
-        token: String,
-        expiresAt: Int64,
-        host: String,
-        port: Int,
-        allowLegacyPPT1: Bool = false
-    ) throws {
-        let isPPT2 = token.hasPrefix("ppt2.")
-        let isPPT1 = allowLegacyPPT1 && token.hasPrefix("ppt1.")
-        guard isPPT2 || isPPT1,
-              token.utf8.count > "ppt2.".count,
-              token.unicodeScalars.allSatisfy({
-                  $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "._-".unicodeScalars.contains($0))
-              }),
-              host == "127.0.0.1" || host == "::1",
-              (1...65_535).contains(port) else {
-            throw BootstrapPairingMaterialError.invalid
-        }
-        self.token = token
-        self.expiresAt = expiresAt
-        self.host = host
-        self.port = port
-    }
-
-    public var redactedDescription: String {
-        "配对令牌（已隐藏），目标 \(host):\(port)"
-    }
-}
-
-public enum BootstrapPairingMaterialError: Error, Equatable {
-    case invalid
-}

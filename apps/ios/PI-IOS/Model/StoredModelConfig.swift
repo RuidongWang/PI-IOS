@@ -49,17 +49,6 @@ struct StoredModelBinding: Codable, Equatable, Identifiable {
 /// Local provider metadata. The API key lives in the device Keychain.
 struct StoredModelProvider: Codable, Equatable, Identifiable {
     var providerId: String
-    /// The provider id the legacy SSH `provider-import` assigned, when this
-    /// record was imported over SSH and mirrored into the v2 PI-adaptor under a
-    /// different id. Kept so deletion can still clean up the legacy store.
-    var legacyProviderId: String?
-    /// Whether this record has a mirror in the v2 PI-adaptor provider store.
-    ///
-    /// `true` = v2 PI-adaptor record (either created there directly or mirrored from a
-    /// legacy import); `false` = legacy-only. `nil` for records persisted before
-    /// this field existed — deletion then probes the v2 PI-adaptor to decide, so an
-    /// old record is never misclassified.
-    var hostV2Mirror: Bool?
     var hostID: UUID
     var name: String
     var baseURL: String
@@ -67,9 +56,6 @@ struct StoredModelProvider: Codable, Equatable, Identifiable {
     var models: [StoredModelBinding]
     var defaultModelId: String?
     var importedAt: Date
-    /// Older Keychain records contain just the key. Keep their original URL across local edits.
-    var legacyKeyBaseURL: String? = nil
-    var endpointForLegacyKey: String { legacyKeyBaseURL ?? baseURL }
 
     var id: String { "\(hostID.uuidString):\(providerId)" }
 

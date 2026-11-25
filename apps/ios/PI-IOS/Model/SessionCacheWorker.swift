@@ -93,6 +93,7 @@ final class SessionCacheWorker: @unchecked Sendable {
     private var status = Status()
     private var mirrorPublishPending = false
     private var observers: [UUID: @Sendable (Status) -> Void] = [:]
+    private var readyWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var mirror = OfflineSessionCacheSnapshot()
     private var sessionsByHost: [UUID: [String: OfflineCachedSession]] = [:]
     private var idsByHost: [UUID: [String]] = [:]
@@ -244,12 +245,24 @@ final class SessionCacheWorker: @unchecked Sendable {
     func itemLimit() -> Int { turnLimit() }
 
     func waitUntilReady() async {
-        while !currentStatus().ready {
-            do {
-                try await Task.sleep(for: .milliseconds(20))
-            } catch {
-                return
+        if currentStatus().ready || Task.isCancelled { return }
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if status.ready || Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume()
+                    return
+                }
+                readyWaiters[waiterID] = continuation
+                lock.unlock()
             }
+        } onCancel: {
+            lock.lock()
+            let waiter = readyWaiters.removeValue(forKey: waiterID)
+            lock.unlock()
+            waiter?.resume()
         }
     }
 
@@ -662,10 +675,20 @@ final class SessionCacheWorker: @unchecked Sendable {
         let previousStatus = status
         lock.unlock()
         if previous == value && previousStatus.ready == ready && previousStatus.error == error {
-            lock.lock(); defer { lock.unlock() }
-            if let permit, !validLocked(permit) { return false }
-            if let expectedPending, pendingOperations != expectedPending { return false }
+            let readyCallbacks: [CheckedContinuation<Void, Never>]
+            lock.lock()
+            if let permit, !validLocked(permit) {
+                lock.unlock()
+                return false
+            }
+            if let expectedPending, pendingOperations != expectedPending {
+                lock.unlock()
+                return false
+            }
             mirrorPublishPending = false
+            readyCallbacks = ready ? drainReadyWaitersLocked() : []
+            lock.unlock()
+            for waiter in readyCallbacks { waiter.resume() }
             return true
         }
         // Build lookup indexes on the worker, never while a SwiftUI getter runs.
@@ -696,8 +719,18 @@ final class SessionCacheWorker: @unchecked Sendable {
         status = next
         mirrorPublishPending = false
         let callbacks = Array(observers.values)
+        let readyCallbacks = ready ? drainReadyWaitersLocked() : []
         lock.unlock()
         for callback in callbacks { callback(next) }
+        for waiter in readyCallbacks { waiter.resume() }
         return true
+    }
+
+    /// Caller must hold `lock`.
+    private func drainReadyWaitersLocked() -> [CheckedContinuation<Void, Never>] {
+        guard !readyWaiters.isEmpty else { return [] }
+        let waiters = Array(readyWaiters.values)
+        readyWaiters.removeAll()
+        return waiters
     }
 }

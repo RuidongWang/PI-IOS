@@ -61,14 +61,6 @@ public enum DecisionPolicy {
         return .contract(decision: decision, permissionMode: allowed.contains(currentMode) ? currentMode : allowed[0])
     }
 
-    public static func inputAvailability(
-        id: String,
-        pending: [RACPInputRequest]
-    ) -> DecisionAvailability {
-        guard let card = pending.first(where: { $0.id == id }) else { return .missing }
-        return .actionable(revision: card.revision)
-    }
-
     /// 审批失败后是否应把卡片标为失效：只有这两种错误码能证明该请求已经不能被处理。
     public static func marksCardStale(after error: RACPErrorCode) -> Bool {
         error == .approvalExpired || error == .approvalStale || error == .notFound

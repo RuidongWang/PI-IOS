@@ -3,7 +3,7 @@ import XCTest
 import PIiOSCore
 @testable import PIiOSNet
 
-/// Boundary tests model pinned v0.21.0 approval results and input consumption.
+/// Boundary tests model pinned v0.21.0 approval results.
 final class SessionIdempotencyRetryTests: XCTestCase {
     private var directory: URL!
     private var fileURL: URL { directory.appendingPathComponent("request-keys.json") }
@@ -23,7 +23,6 @@ final class SessionIdempotencyRetryTests: XCTestCase {
     private func itemID(_ action: SessionRequestAction) -> String? {
         switch action {
         case .sessionCreate, .turn: return nil
-        case .input: return "input"
         default: return "approval"
         }
     }
@@ -79,37 +78,6 @@ final class SessionIdempotencyRetryTests: XCTestCase {
         XCTAssertEqual(host.executionCount, 1)
     }
 
-    func testAcceptedInputRetryReturnsNotFoundInsteadOfFakeDedupSuccess() throws {
-        let action = SessionRequestAction.input(answers: [["fixture answer"], nil])
-        let first = try store.prepare(identity(action))
-        let model = SessionViewModel()
-        applySnapshot(to: model, revision: 3)
-        var host = FixtureHost()
-        XCTAssertThrowsError(try host.receive(frame(action, attempt: first, model: model), dropResponse: true))
-        let retry = try store.prepare(identity(action))
-        assertCode(.notFound) { try host.receive(frame(action, attempt: retry, model: model)) }
-        XCTAssertEqual(host.executionCount, 1)
-        XCTAssertEqual(try store.prepare(identity(action)), first, "NOT_FOUND is not a success acknowledgement")
-    }
-
-    func testUndeliveredInputRetryCarriesCurrentRevisionAndUnchangedAnswers() throws {
-        let action = SessionRequestAction.input(answers: [["fixture answer"], nil])
-        let first = try store.prepare(identity(action))
-        let model = SessionViewModel()
-        applySnapshot(to: model, revision: 3)
-        let original = try frame(action, attempt: first, model: model)
-        // The first request never reached the PI-adaptor, so it has no remembered result.
-        applySnapshot(to: model, revision: 9)
-        let retry = try store.prepare(identity(action))
-        let updated = try frame(action, attempt: retry, model: model, requestID: "retry")
-        XCTAssertEqual(first, retry)
-        XCTAssertEqual(original.value(at: ["params", "answers"]), updated.value(at: ["params", "answers"]))
-        XCTAssertEqual(updated.value(at: ["params", "context", "expectedRevision"])?.intValue, 9)
-        var host = FixtureHost()
-        XCTAssertEqual(try host.receive(updated).value(at: ["status"])?.stringValue, "resolved")
-        try store.acknowledge(retry)
-    }
-
     func testMissingDisallowedPermissionAndInvalidToolDecisionAreRejected() throws {
         let model = SessionViewModel()
         applySnapshot(to: model, revision: 3)
@@ -122,26 +90,6 @@ final class SessionIdempotencyRetryTests: XCTestCase {
         var tool = FixtureHost()
         assertCode(.invalidArgument) { try tool.receive(frame(action, attempt: attempt, model: model)) }
         XCTAssertEqual(host.executionCount + tool.executionCount, 0)
-    }
-
-    func testInvalidInputCountAndPayloadShapeAreRejected() throws {
-        let model = SessionViewModel()
-        applySnapshot(to: model, revision: 3)
-        var host = FixtureHost()
-        let action = SessionRequestAction.input(answers: [["one question"]])
-        let attempt = try store.prepare(identity(action))
-        assertCode(.invalidArgument) { try host.receive(frame(action, attempt: attempt, model: model)) }
-        let malformed = try JSONDecoder().decode(JSONValue.self, from: Data(#"{"method":"input/respond","params":{"inputId":"input","answers":["wrong",null],"context":{"requestId":"request","idempotencyKey":"key"}}}"#.utf8))
-        assertCode(.invalidArgument) { try host.receive(malformed) }
-        XCTAssertEqual(host.executionCount, 0)
-    }
-
-    func testPinnedHostDoesNotCompareInputExpectedRevision() throws {
-        // v0.21.0 checks answer count but ignores input expectedRevision; do not invent a guard.
-        let params = RACPInputRespondParams(inputId: "input", answers: [nil, nil], context: RACPContext(requestId: "request", idempotencyKey: "key", expectedRevision: 999))
-        var host = FixtureHost()
-        _ = try host.receive(encoded(.inputRespond, params, requestID: "request"))
-        XCTAssertEqual(host.executionCount, 1)
     }
 
     func testTurnKeyReusedWithChangedPayloadConflicts() throws {
@@ -163,8 +111,7 @@ final class SessionIdempotencyRetryTests: XCTestCase {
 
     private func applySnapshot(to model: SessionViewModel, revision: Int) {
         model.applySnapshot(RACPSnapshot(cursor: RACPCursor(epoch: "fixture", sequence: revision), revision: 1000,
-            pendingApprovals: [RACPApprovalRequest(id: "approval", payload: .object(["revision": .number(Double(revision))]))],
-            pendingInputs: [RACPInputRequest(id: "input", payload: .object(["revision": .number(Double(revision))]))]), replayComplete: false)
+            pendingApprovals: [RACPApprovalRequest(id: "approval", payload: .object(["revision": .number(Double(revision))]))]), replayComplete: false)
     }
 
     private func encoded<P: Encodable>(_ method: RACPMethod, _ params: P, requestID: String) throws -> JSONValue {
@@ -172,7 +119,7 @@ final class SessionIdempotencyRetryTests: XCTestCase {
     }
 
     private func frame(_ action: SessionRequestAction, attempt: SessionRequestAttempt, model: SessionViewModel, requestID: String = "first") throws -> JSONValue {
-        let revision = itemID(action) == "input" ? model.expectedRevisionForInput(id: "input") : model.expectedRevisionForApproval(id: "approval")
+        let revision = model.expectedRevisionForApproval(id: "approval")
         let context = RACPContext(requestId: requestID, idempotencyKey: attempt.idempotencyKey, expectedRevision: revision)
         switch action {
         case .sessionCreate(var params):
@@ -196,8 +143,6 @@ final class SessionIdempotencyRetryTests: XCTestCase {
             )
         case .approval, .contract:
             return try encoded(.approvalRespond, RACPApprovalRespondParams(approvalId: "approval", action: action, context: context), requestID: requestID)
-        case .input(let answers):
-            return try encoded(.inputRespond, RACPInputRespondParams(inputId: "input", answers: answers, context: context), requestID: requestID)
         }
     }
 }
@@ -207,7 +152,6 @@ private struct FixtureHost {
     let approvalRevision: Int
     private var turnInputs: [String: JSONValue] = [:]
     private var approvalResolved = false
-    private var inputOpen = true
     private(set) var executionCount = 0
 
     init(contract: Bool = false, approvalRevision: Int = 3) {
@@ -248,17 +192,6 @@ private struct FixtureHost {
                 approvalResolved = true
                 executionCount += 1
             }
-        case "input/respond":
-            guard inputOpen, params.value(at: ["inputId"])?.stringValue == "input" else { throw fail(.notFound) }
-            guard let answers = params.value(at: ["answers"])?.arrayValue, answers.count == 2,
-                  answers.allSatisfy({ answer in
-                      if answer == .null { return true }
-                      guard let choices = answer.arrayValue else { return false }
-                      return choices.allSatisfy { $0.stringValue != nil }
-                  }) else { throw fail(.invalidArgument) }
-            inputOpen = false
-            executionCount += 1
-            result = .object(["inputId": .string("input"), "status": .string("resolved")])
         default: throw fail(.methodNotFound)
         }
         if dropResponse { throw RACPClientError.timedOut("fixture response") }

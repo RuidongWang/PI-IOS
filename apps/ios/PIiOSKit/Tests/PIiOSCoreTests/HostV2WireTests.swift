@@ -19,7 +19,7 @@ final class HostV2WireTests: XCTestCase {
     }
 
     func testMethodInventoryIncludesEveryV2Family() {
-        let methods = Set(RACPV2Method.allCases.map(\.rawValue))
+        let methods = Set(RACPMethod.allCases.map(\.rawValue))
         XCTAssertTrue(methods.contains("device/list"))
         XCTAssertTrue(methods.contains("session/attach"))
         XCTAssertTrue(methods.contains("provider/create"))
@@ -29,7 +29,7 @@ final class HostV2WireTests: XCTestCase {
         // 扩展 V1 的两个只读查询（契约 2.0.0 加法字段）。
         XCTAssertTrue(methods.contains("extension/list"))
         XCTAssertTrue(methods.contains("session/extensions"))
-        XCTAssertEqual(methods.count, 51)
+        XCTAssertEqual(methods.count, 52)
     }
 
     /// v2 `turn/start` 的冻结响应体只有 `turn`（见 golden），不带 v1 的 `accepted`。

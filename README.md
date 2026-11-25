@@ -26,7 +26,7 @@ SSH 凭证、设备令牌、直连证书指纹和模型 API Key 只存本机 Key
 ### 安装与升级
 
 - 从手机把 PI-adaptor 安装到空服务器：下载对应架构的发布包、校验 SHA-256、解包、原子切换 `current`。
-- 引导安装选择与当前 PI-IOS 兼容的最新稳定版。PI-adaptor 发布说明可用独立一行 `<!-- pi-ios-min-version: 0.0.7 -->` 声明最低 App 版本。没有声明时，最低 App 版本与 Host 版本相同。
+- 引导安装选择与当前 PI-IOS 兼容的最新稳定版。PI-adaptor 发布说明可用独立一行 `<!-- pi-ios-min-version: 0.0.8 -->` 声明最低 App 版本。没有声明时，最低 App 版本与 Host 版本相同。
 - 自动生成并启动 `pi-adaptor.service`（systemd user unit）。引导安装在服务器上使用 `setsid`、`nohup` 和 `flock`。失败可重试或重新授权 sudo。
 - 安装前检查磁盘版本和 systemd 服务的运行版本。运行版本通过当前服务实例的启动日志核实，无法确认版本时会提示并暂停安装。
 

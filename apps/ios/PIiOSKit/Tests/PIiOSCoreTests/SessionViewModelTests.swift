@@ -40,16 +40,13 @@ final class SessionViewModelTests: XCTestCase {
             model.applySnapshot(
                 RACPSnapshot(
                     cursor: RACPCursor(epoch: "fixture", sequence: revision), revision: 1000,
-                    pendingApprovals: [approval("approval", revision: revision)],
-                    pendingInputs: [RACPInputRequest(id: "input", payload: .object(["revision": .number(Double(revision + 1))]))]
+                    pendingApprovals: [approval("approval", revision: revision)]
                 ), replayComplete: false
             )
             XCTAssertEqual(model.expectedRevisionForApproval(id: "approval"), revision)
-            XCTAssertEqual(model.expectedRevisionForInput(id: "input"), revision + 1)
         }
         model.applySnapshot(RACPSnapshot(cursor: RACPCursor(epoch: "fixture", sequence: 20), revision: 2000), replayComplete: true)
         XCTAssertNil(model.expectedRevisionForApproval(id: "approval"))
-        XCTAssertNil(model.expectedRevisionForInput(id: "input"))
     }
 
     // MARK: - 去重与游标（AC-14.1）
@@ -216,7 +213,6 @@ final class SessionViewModelTests: XCTestCase {
                 revision: 22,
                 items: [item("itm_1", text: "a"), item("itm_2", text: "b"), item("itm_3", text: "c")],
                 activeItems: [item("itm_3", text: "c")],
-                pendingInputs: [RACPInputRequest(id: "inp_1", payload: .object(["id": .string("inp_1")]))],
                 hasMoreHistory: true
             ),
             replayComplete: true
@@ -236,7 +232,6 @@ final class SessionViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.items.map(\.id), ["itm_9"], "必须整体替换，不做合并")
         XCTAssertEqual(viewModel.activeItems, [])
-        XCTAssertEqual(viewModel.pendingInputs, [])
         XCTAssertFalse(viewModel.hasMoreHistory)
         XCTAssertEqual(viewModel.revision, 23)
         XCTAssertEqual(viewModel.cursor, RACPCursor(epoch: "ep_80", sequence: 1))
@@ -352,48 +347,6 @@ final class SessionViewModelTests: XCTestCase {
         ])
         XCTAssertEqual(viewModel.activeTurnId, "turn_q")
         XCTAssertTrue(viewModel.queuedTurns.isEmpty)
-    }
-
-    func testInputRequestedAndResolvedReduceIntoPendingInputs() {
-        let viewModel = SessionViewModel()
-        viewModel.applySnapshot(
-            RACPSnapshot(cursor: RACPCursor(epoch: "ep_input", sequence: 40), revision: 1),
-            replayComplete: true
-        )
-
-        viewModel.applyEvents([
-            RACPEvent(
-                sequence: 41,
-                epoch: "ep_input",
-                payload: .object([
-                    "kind": .string("input.requested"),
-                    "payload": .object([
-                        "input": .object([
-                            "id": .string("inp_1"),
-                            "revision": .number(5),
-                            "questions": .array([]),
-                        ])
-                    ]),
-                ])
-            )
-        ])
-        XCTAssertEqual(viewModel.pendingInputs.map(\.id), ["inp_1"])
-        XCTAssertEqual(viewModel.expectedRevisionForInput(id: "inp_1"), 5)
-
-        viewModel.applyEvents([
-            RACPEvent(
-                sequence: 42,
-                epoch: "ep_input",
-                payload: .object([
-                    "kind": .string("input.resolved"),
-                    "payload": .object([
-                        "inputId": .string("inp_1"),
-                        "status": .string("answered"),
-                    ]),
-                ])
-            )
-        ])
-        XCTAssertTrue(viewModel.pendingInputs.isEmpty)
     }
 
     func testAC14_1_sequenceGapInGlobalCursorDoesNotForceRebuild() {
@@ -588,7 +541,6 @@ final class SessionViewModelTests: XCTestCase {
           "activeItems": [],
           "queuedTurns": [],
           "pendingApprovals": [],
-          "pendingInputs": [],
           "hasMoreHistory": true
         }
         """

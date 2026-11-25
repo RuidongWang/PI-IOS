@@ -194,8 +194,8 @@ final class RACPSendDeadlineTests: XCTestCase {
             subscribedSessionId: nil
         )
         let call = Task { () -> JSONValue in
-            try await client.v2Request(
-                method: "provider/list",
+            try await client.request(
+                .providerList,
                 params: .object([:]),
                 timeout: 0.25
             )
@@ -275,8 +275,8 @@ final class RACPSendDeadlineTests: XCTestCase {
             let call = Task {
                 defer { completions.increment() }
                 if raw {
-                    let _: JSONValue = try await client.v2Request(
-                        method: "connection/ping", params: .object([:]), timeout: 1
+                    let _: JSONValue = try await client.request(
+                        .ping, params: .object([:]), timeout: 1
                     )
                 } else {
                     let _: JSONValue = try await client.request(
@@ -559,7 +559,7 @@ private final class StallingSocket: RACPSocket, @unchecked Sendable {
         switch method {
         case "connection/initialize":
             result = .object([
-                "protocolVersion": .string("1.0"),
+                "protocolVersion": .string("2.0.0"),
                 "server": .object(["name": .string("test"), "version": .string("1")]),
                 "connectionId": .string("test_connection"),
                 "principal": .object(["roles": .array([.string("owner")])]),

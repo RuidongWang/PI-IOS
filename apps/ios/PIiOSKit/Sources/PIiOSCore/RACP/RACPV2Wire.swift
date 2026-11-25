@@ -1,64 +1,5 @@
 import Foundation
 
-public enum RACPV2Method: String, CaseIterable, Sendable {
-    case initialize = "connection/initialize"
-    case ping = "connection/ping"
-    case pair = "connection/pair"
-    case revoke = "connection/revoke"
-    case rotateToken = "connection/rotate-token"
-    case confirmRotation = "connection/confirm-rotation"
-    case deviceList = "device/list"
-    case pairingToken = "device/pairing-token"
-    case projectList = "project/list"
-    case projectBrowse = "project/browse"
-    case projectRegister = "project/register"
-    case projectUpdate = "project/update"
-    case projectDelete = "project/delete"
-    case sessionList = "session/list"
-    case sessionSearch = "session/search"
-    case sessionGet = "session/get"
-    case sessionCreate = "session/create"
-    case sessionAttach = "session/attach"
-    case sessionHistory = "session/history"
-    case sessionConfigure = "session/configure"
-    case sessionRename = "session/rename"
-    case sessionSuggestTitle = "session/suggest-title"
-    case sessionArchive = "session/archive"
-    case sessionBranch = "session/branch"
-    case sessionDelete = "session/delete"
-    case eventsSubscribe = "events/subscribe"
-    case eventsUnsubscribe = "events/unsubscribe"
-    case eventsAck = "events/ack"
-    case turnStart = "turn/start"
-    case turnGet = "turn/get"
-    case turnInterrupt = "turn/interrupt"
-    case turnCancel = "turn/cancel"
-    case approvalRespond = "approval/respond"
-    case inputRespond = "input/respond"
-    case providerList = "provider/list"
-    case providerCreate = "provider/create"
-    case providerUpdate = "provider/update"
-    case providerDelete = "provider/delete"
-    case providerTest = "provider/test"
-    case providerDiscover = "provider/discover"
-    case skillList = "skill/list"
-    case skillGet = "skill/get"
-    case skillInstall = "skill/install"
-    case skillUpdate = "skill/update"
-    case skillDelete = "skill/delete"
-    case extensionList = "extension/list"
-    case sessionExtensions = "session/extensions"
-    case attachmentCreate = "attachment/create"
-    case attachmentChunk = "attachment/chunk"
-    case attachmentComplete = "attachment/complete"
-    case attachmentRead = "attachment/read"
-}
-
-public enum RACPV2Protocol {
-    public static let version = "2.0.0"
-    public static let subprotocol = "pi-racp.v2.jsonrpc"
-}
-
 public struct RACPV2ServerInfo: Codable, Equatable, Sendable {
     public struct Server: Codable, Equatable, Sendable {
         public var name: String
@@ -180,19 +121,6 @@ public struct RACPV2RevokeParams: Encodable, Equatable, Sendable {
     public init(deviceId: String, context: RACPV2Context) {
         self.deviceId = deviceId
         self.context = context
-    }
-}
-
-public struct RACPV2RawRequest<Params: Encodable & Sendable>: Encodable, Sendable {
-    public let jsonrpc = "2.0"
-    public let id: RACPIdentifier
-    public let method: String
-    public let params: Params
-
-    public init(id: RACPIdentifier, method: String, params: Params) {
-        self.id = id
-        self.method = method
-        self.params = params
     }
 }
 

@@ -9,10 +9,10 @@ final class RACPExtensionEventsTests: XCTestCase {
         let pump = Task {
             for await data in socket.inbound { await client.receiveForTesting(data) }
         }
-        let inventory: RACPExtensionInventory = try await client.v2Request(
-            method: RACPV2Method.extensionList.rawValue, params: .object([:]), timeout: 2)
-        let result: RACPSessionExtensions = try await client.v2Request(
-            method: RACPV2Method.sessionExtensions.rawValue, params: .object(["sessionId": .string("s")]), timeout: 2)
+        let inventory: RACPExtensionInventory = try await client.request(
+            .extensionList, params: .object([:]), timeout: 2)
+        let result: RACPSessionExtensions = try await client.request(
+            .sessionExtensions, params: .object(["sessionId": .string("s")]), timeout: 2)
         XCTAssertEqual(inventory.hostId, "h")
         XCTAssertNil(result.latestAttempt)
         XCTAssertEqual(socket.params("extension/list"), .object([:]))

@@ -25,35 +25,59 @@ public enum RACPIdentifier: Hashable, Codable, Sendable {
     }
 }
 
-/// P0 使用的 RACP 操作子集（契约 §3.1 与 spec §6.0）。
+/// RACP 2.0.0 操作集合。
 public enum RACPMethod: String, CaseIterable, Sendable {
     case initialize = "connection/initialize"
     case ping = "connection/ping"
     case pair = "connection/pair"
+    case revoke = "connection/revoke"
+    case rotateToken = "connection/rotate-token"
+    case confirmRotation = "connection/confirm-rotation"
+    case pairingToken = "device/pairing-token"
+    case deviceList = "device/list"
     case projectList = "project/list"
     case projectBrowse = "project/browse"
     case projectRegister = "project/register"
+    case projectUpdate = "project/update"
+    case projectDelete = "project/delete"
     case sessionList = "session/list"
+    case sessionSearch = "session/search"
     case sessionGet = "session/get"
     case sessionCreate = "session/create"
     case sessionAttach = "session/attach"
     case sessionHistory = "session/history"
     case sessionConfigure = "session/configure"
-    case sessionRevoke = "session/revoke"
     case sessionRename = "session/rename"
     case sessionSuggestTitle = "session/suggest-title"
+    case sessionArchive = "session/archive"
+    case sessionBranch = "session/branch"
+    case sessionDelete = "session/delete"
     case eventsSubscribe = "events/subscribe"
     case eventsUnsubscribe = "events/unsubscribe"
     case eventsAck = "events/ack"
     case turnStart = "turn/start"
     case turnGet = "turn/get"
-    case turnStop = "turn/stop"
     case turnInterrupt = "turn/interrupt"
     case turnCancel = "turn/cancel"
-    case turnPrioritize = "turn/prioritize"
     case approvalRespond = "approval/respond"
     case approvalRead = "approval/read"
-    case inputRespond = "input/respond"
+    case providerList = "provider/list"
+    case providerCreate = "provider/create"
+    case providerUpdate = "provider/update"
+    case providerDelete = "provider/delete"
+    case providerTest = "provider/test"
+    case providerDiscover = "provider/discover"
+    case skillList = "skill/list"
+    case skillGet = "skill/get"
+    case skillInstall = "skill/install"
+    case skillUpdate = "skill/update"
+    case skillDelete = "skill/delete"
+    case attachmentCreate = "attachment/create"
+    case attachmentChunk = "attachment/chunk"
+    case attachmentComplete = "attachment/complete"
+    case attachmentRead = "attachment/read"
+    case extensionList = "extension/list"
+    case sessionExtensions = "session/extensions"
     /// 通知，无 `id`、无响应。
     case initializedNotification = "notifications/initialized"
 }
@@ -385,16 +409,14 @@ public struct RACPClientInfo: Codable, Equatable, Sendable {
 public struct RACPClientCapabilities: Codable, Equatable, Sendable {
     public var eventReplay: Bool?
     public var approvals: Bool?
-    public var inputRequests: Bool?
     public var turnQueue: Bool?
     public var hostEvents: Bool?
     public var history: Bool?
 
-    /// P0 口径：除 `attachments` 外全为 true（契约 §2.2）。
+    /// 2.0.0 口径：支持回放、审批、队列、主机事件与历史。
     public static let p0 = RACPClientCapabilities(
         eventReplay: true,
         approvals: true,
-        inputRequests: true,
         turnQueue: true,
         hostEvents: true,
         history: true
@@ -403,14 +425,12 @@ public struct RACPClientCapabilities: Codable, Equatable, Sendable {
     public init(
         eventReplay: Bool? = nil,
         approvals: Bool? = nil,
-        inputRequests: Bool? = nil,
         turnQueue: Bool? = nil,
         hostEvents: Bool? = nil,
         history: Bool? = nil
     ) {
         self.eventReplay = eventReplay
         self.approvals = approvals
-        self.inputRequests = inputRequests
         self.turnQueue = turnQueue
         self.hostEvents = hostEvents
         self.history = history
@@ -424,7 +444,7 @@ public struct RACPInitializeParams: Codable, Equatable, Sendable {
     public var capabilities: RACPClientCapabilities
     public var maxReceiveBytes: Int
 
-    public static let protocolVersion = "1.0"
+    public static let protocolVersion = "2.0.0"
 
     public init(
         protocolVersion: String = RACPInitializeParams.protocolVersion,
@@ -594,14 +614,6 @@ public struct RACPSessionConfigureParams: Codable, Equatable, Sendable {
 
 public struct RACPSessionConfigureResult: Codable, Equatable, Sendable {
     public var session: RACPSessionSummary
-}
-
-public struct RACPSessionRevokeParams: Codable, Equatable, Sendable {
-    public var deviceId: String
-
-    public init(deviceId: String) {
-        self.deviceId = deviceId
-    }
 }
 
 public struct RACPSessionRevokeResult: Codable, Equatable, Sendable {
@@ -846,62 +858,5 @@ public struct RACPApprovalReadParams: Codable, Equatable, Sendable {
         self.approvalId = approvalId
         self.revision = revision
         self.offset = offset
-    }
-}
-
-public struct RACPInputRespondParams: Codable, Equatable, Sendable {
-    public var inputId: String
-    /// 契约 §3.1：`answers` 是 `(string[] | null)[]`，`null` 表示跳过该问题，
-    /// 顺序与快照 `pendingInputs` 对齐。每个元素是一组选中标签，不是单个标签。
-    public var answers: [[String]?]
-    public var context: RACPContext
-
-    public init(inputId: String, answers: [[String]?], context: RACPContext) {
-        self.inputId = inputId
-        self.answers = answers
-        self.context = context
-    }
-}
-
-/// `input/respond` 的返回体。
-///
-/// v2 契约（`docs/api/pi-adaptor.md` §8.4）冻结为 `{ "resolved": true, "alreadyResolved": false }`；
-/// 早期 v1 golden 形状为 `{ "inputId": …, "status": "resolved" }`。这里两种都接受，
-/// 否则严格按 v2 返回时 `JSONDecoder` 会因缺少 `inputId`/`status` 抛 `keyNotFound`，
-/// 用户回答 AskTool 提问时表现为「未能读取数据」——与已修的 `turn/start` 属同一类缺陷。
-public struct RACPInputRespondResult: Codable, Equatable, Sendable {
-    public var resolved: Bool
-    public var alreadyResolved: Bool
-    /// 仅 v1 形状携带；仅用于诊断，不参与判定。
-    public var inputId: String?
-
-    public init(resolved: Bool = true, alreadyResolved: Bool = false, inputId: String? = nil) {
-        self.resolved = resolved
-        self.alreadyResolved = alreadyResolved
-        self.inputId = inputId
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case resolved, alreadyResolved, inputId, status
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.alreadyResolved = try container.decodeIfPresent(Bool.self, forKey: .alreadyResolved) ?? false
-        self.inputId = try container.decodeIfPresent(String.self, forKey: .inputId)
-        if let resolved = try container.decodeIfPresent(Bool.self, forKey: .resolved) {
-            self.resolved = resolved
-        } else {
-            // v1 形状：没有 `resolved`，用 `status` 推导；缺省或 "resolved" 视为已解决。
-            let status = try container.decodeIfPresent(String.self, forKey: .status)
-            self.resolved = (status == nil || status == "resolved")
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(resolved, forKey: .resolved)
-        try container.encode(alreadyResolved, forKey: .alreadyResolved)
-        try container.encodeIfPresent(inputId, forKey: .inputId)
     }
 }

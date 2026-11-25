@@ -127,7 +127,7 @@ final class BootstrapInstallAdaptersTests: XCTestCase {
                 device: receivedDevice
             )
             return RACPServerInfo(
-                protocolVersion: "1.0",
+                protocolVersion: "2.0.0",
                 serverName: "pi-adaptor",
                 serverVersion: "2.0.1",
                 hostId: "host_1",
@@ -182,7 +182,7 @@ final class BootstrapInstallAdaptersTests: XCTestCase {
                     )
                 }
                 return RACPServerInfo(
-                    protocolVersion: "1.0",
+                    protocolVersion: "2.0.0",
                     serverName: "pi-adaptor",
                     serverVersion: "2.0.1",
                     hostId: "host_install",

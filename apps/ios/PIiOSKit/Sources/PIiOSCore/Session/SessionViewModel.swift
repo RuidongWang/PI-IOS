@@ -9,7 +9,6 @@ public enum SessionRequestAction: Codable, Equatable, Sendable {
     case turnAttachments(text: String, attachmentIds: [String])
     case approval(decision: RACPApprovalDecision, permissionMode: RACPPermissionMode?)
     case contract(decision: RACPContractDecision, permissionMode: RACPPermissionMode? = nil)
-    case input(answers: [[String]?])
 }
 
 public struct SessionRequestIdentity: Codable, Equatable, Sendable {
@@ -397,7 +396,6 @@ public final class SessionViewModel {
     public private(set) var failedQueueStartID: String?
     private var queuedTurnIDs: Set<String> = []
     public private(set) var pendingApprovals: [RACPApprovalRequest] = []
-    public private(set) var pendingInputs: [RACPInputRequest] = []
     public private(set) var hasMoreHistory: Bool = false
     /// 快照/会话边界；历史页只能补入发起请求时的同一视图，不能穿过快照重建。
     public private(set) var historySnapshotGeneration: UInt64 = 0
@@ -428,7 +426,6 @@ public final class SessionViewModel {
             activeTurn: activeTurnId.map { RACPTurnRef(id: $0) },
             queuedTurns: queuedTurns,
             pendingApprovals: pendingApprovals,
-            pendingInputs: pendingInputs,
             hasMoreHistory: hasMoreHistory
         )
     }
@@ -447,7 +444,6 @@ public final class SessionViewModel {
         queuedTurnIDs = []
         failedQueueStartID = nil
         pendingApprovals = []
-        pendingInputs = []
         hasMoreHistory = false
         draft = nil
         lastReplayComplete = false
@@ -527,7 +523,6 @@ public final class SessionViewModel {
             $0.value(at: ["id"])?.stringValue
         })
         pendingApprovals = snapshot.pendingApprovals
-        pendingInputs = snapshot.pendingInputs
         hasMoreHistory = snapshot.hasMoreHistory
         revision = snapshot.revision
         cursor = snapshot.cursor
@@ -646,7 +641,6 @@ public final class SessionViewModel {
 
             reduceTurnLifecycle(event)
             reduceApprovalLifecycle(event)
-            reduceInputLifecycle(event)
             guard let item = event.item else { continue }
             // PI-adaptor v1 events nest the delta under `payload.event.deltaText`; the
             // v2 contract flattens it to `payload.delta`. Accept both shapes.
@@ -706,14 +700,6 @@ public final class SessionViewModel {
     /// 不拿会话 revision 顶替——那会让一个已失效的请求看起来还能提交。
     public func expectedRevisionForApproval(id: String) -> Int? {
         approval(id: id)?.revision
-    }
-
-    public func input(id: String) -> RACPInputRequest? {
-        pendingInputs.first { $0.id == id }
-    }
-
-    public func expectedRevisionForInput(id: String) -> Int? {
-        input(id: id)?.revision
     }
 
     /// 用户确认过「已过期」提示后清空该集合（只清展示标记，不恢复卡片）。
@@ -809,35 +795,6 @@ public final class SessionViewModel {
             pendingApprovals.removeAll { $0.id == approvalId }
             expiredApprovalIds.remove(approvalId)
             explicitlyExpiredApprovals[approvalId] = nil
-        default:
-            break
-        }
-    }
-
-    /// Reduce live `input.*` frames into `pendingInputs`.
-    ///
-    /// Contract §7.2 defines `input.requested` / `input.resolved` as live session
-    /// events, not history items. Without this an online follow-up question never
-    /// appears, and a resolved card never disappears.
-    private func reduceInputLifecycle(_ event: RACPEvent) {
-        guard let kind = event.payload.value(at: ["kind"])?.stringValue else { return }
-        switch kind {
-        case "input.requested":
-            guard let inputValue = event.payload.value(at: ["payload", "input"]),
-                  let request = try? RACPInputRequest(payload: inputValue)
-            else { return }
-            if let index = pendingInputs.firstIndex(where: { $0.id == request.id }) {
-                pendingInputs[index] = request
-            } else {
-                pendingInputs.append(request)
-            }
-        case "input.resolved":
-            // Contract payload is `{inputId, status}`; accept a nested id too for
-            // PI-adaptor versions that echo the whole input object.
-            guard let inputId = event.payload.value(at: ["payload", "inputId"])?.stringValue
-                ?? event.payload.value(at: ["payload", "input", "id"])?.stringValue
-            else { return }
-            pendingInputs.removeAll { $0.id == inputId }
         default:
             break
         }

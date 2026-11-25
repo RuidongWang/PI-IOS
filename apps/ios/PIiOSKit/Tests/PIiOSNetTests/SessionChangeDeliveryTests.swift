@@ -11,7 +11,7 @@ final class SessionChangeDeliveryTests: XCTestCase {
         await client.enableSessionChangeCoalescing()
         var expected = ["sessionChanged"]
         let info = RACPServerInfo(
-            protocolVersion: "1.0", serverName: "test", serverVersion: "1",
+            protocolVersion: "2.0.0", serverName: "test", serverVersion: "1",
             hostId: "host", connectionId: "connection", roles: ["owner"]
         )
         for index in 0..<1_000 {

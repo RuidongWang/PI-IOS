@@ -77,50 +77,6 @@ final class SessionFlowPolicyTests: XCTestCase {
         XCTAssertEqual(merged[0].text, "服务端正文", "服务端给了正文时以服务端为准")
     }
 
-    // MARK: - 回答草稿（U06）
-
-    func testAnswerDraftScopeIsolatesHostSessionAndInput() {
-        let base = AnswerDraftScope(hostID: "host-a", sessionID: "s1", inputID: "in_1")
-        XCTAssertEqual(base, AnswerDraftScope(hostID: "host-a", sessionID: "s1", inputID: "in_1"))
-        XCTAssertNotEqual(base.storageKey, AnswerDraftScope(hostID: "host-b", sessionID: "s1", inputID: "in_1").storageKey)
-        XCTAssertNotEqual(base.storageKey, AnswerDraftScope(hostID: "host-a", sessionID: "s2", inputID: "in_1").storageKey)
-        XCTAssertNotEqual(base.storageKey, AnswerDraftScope(hostID: "host-a", sessionID: "s1", inputID: "in_2").storageKey)
-        // 分隔符不会让不同作用域撞键。
-        XCTAssertNotEqual(
-            AnswerDraftScope(hostID: "a\u{1F}b", sessionID: "c", inputID: "d").storageKey,
-            AnswerDraftScope(hostID: "a", sessionID: "b\u{1F}c", inputID: "d").storageKey
-        )
-    }
-
-    func testAnswerOutcomeOnlyClearsDraftOnSuccessOrDefinitiveFailure() {
-        XCTAssertTrue(InputAnswerOutcome.submitted.clearsDraft)
-        XCTAssertTrue(InputAnswerOutcome.noLongerActionable(reason: "版本冲突").clearsDraft)
-        XCTAssertTrue(InputAnswerOutcome.stale(reason: "其他端已回答").clearsDraft)
-        XCTAssertFalse(InputAnswerOutcome.failed(reason: "超时").clearsDraft)
-    }
-
-    func testAnswerFailureTriageKeepsDraftForRetryableErrors() {
-        XCTAssertEqual(
-            AnswerDraftPolicy.outcomeAfterFailure(serverCode: nil, cardStillPending: true, reason: "网络超时"),
-            .failed(reason: "网络超时")
-        )
-        XCTAssertEqual(
-            AnswerDraftPolicy.outcomeAfterFailure(serverCode: .notFound, cardStillPending: true, reason: "服务器未找到"),
-            .noLongerActionable(
-                reason: "该提问已失效：\(ConnectionFailureClassifier.userMessage(forRACPCode: .notFound))"
-            )
-        )
-        XCTAssertEqual(
-            AnswerDraftPolicy.outcomeAfterFailure(serverCode: nil, cardStillPending: false, reason: "刷新后卡片消失"),
-            .stale(reason: "该提问已由其他端处理：刷新后卡片消失")
-        )
-        // 明确失效优先于「仍在快照里」的暂时状态。
-        XCTAssertEqual(
-            AnswerDraftPolicy.outcomeAfterFailure(serverCode: .approvalExpired, cardStillPending: false, reason: "过期"),
-            .stale(reason: "该提问已由其他端处理：过期")
-        )
-    }
-
     // MARK: - 发送意图冻结（U11）
 
     private func intent(

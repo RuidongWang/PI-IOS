@@ -50,10 +50,8 @@ final class ProviderKeyLookupTests: XCTestCase {
     }
 }
 
-/// 「provider 已同步到服务器、key 是否同步」的回归：legacy 映射记录可能把明文
-/// 只留在 `legacyProviderId` 下，发送路径按会话绑定的 v2 id 取 key 时必须回退。
 @MainActor
-final class ProviderKeyLegacyFallbackTests: XCTestCase {
+final class ProviderKeyDirectLookupTests: XCTestCase {
     private let hostID = UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
     private var root: URL!
 
@@ -65,59 +63,36 @@ final class ProviderKeyLegacyFallbackTests: XCTestCase {
 
     override func tearDownWithError() throws {
         _ = KeychainStore.deleteProviderKey(hostID: hostID, providerId: "prv_v2")
-        _ = KeychainStore.deleteProviderKey(hostID: hostID, providerId: "prv_legacy")
         try? FileManager.default.removeItem(at: root)
     }
 
-    func testTurnKeyFallsBackToLegacyProviderID() throws {
-        let key = "sk-legacy-only"
+    func testTurnKeyResolvesDirectProviderIDAndStoredEndpoint() throws {
+        let key = "sk-direct-key"
         guard KeychainStore.set(
             Data(key.utf8),
             service: "dev.piios.providerkey",
-            account: "provider-key:\(hostID.uuidString.lowercased()):prv_legacy"
+            account: "provider-key:\(hostID.uuidString.lowercased()):prv_v2"
         ) else {
-            throw XCTSkip("模拟器 Keychain 不可写，跳过 provider key fallback 用例")
+            throw XCTSkip("模拟器 Keychain 不可写，跳过 provider key lookup 用例")
         }
 
         let model = makeModel()
-        XCTAssertEqual(
-            model.providerCredentialForTurn(providerId: "prv_v2", hostID: hostID)?.value,
-            key,
-            "v2 id 没有明文时必须回退到本机记录里的 legacy id"
-        )
-        XCTAssertEqual(
-            model.connection.session.providerCredential?("prv_v2")?.value,
-            key,
-            "会话发送注入的解析器也必须走同一回退"
-        )
-        XCTAssertEqual(model.connection.session.providerCredential?("prv_v2")?.baseURL, "https://legacy.invalid")
+        XCTAssertEqual(model.providerCredentialForTurn(providerId: "prv_v2", hostID: hostID)?.value, key)
+        XCTAssertEqual(model.connection.session.providerCredential?("prv_v2")?.value, key)
+        XCTAssertEqual(model.connection.session.providerCredential?("prv_v2")?.baseURL, "https://v2.invalid")
         XCTAssertNil(model.providerCredentialForTurn(providerId: "prv_unknown", hostID: hostID))
 
         let host = try XCTUnwrap(model.currentHost)
         let context = try XCTUnwrap(model.providerOperationContext(for: host))
         let changed = ProviderCreateInput(
-            name: "Edited mirror", vendorKey: "fixture", type: "openai_compatible",
+            name: "Edited service", vendorKey: "fixture", type: "openai_compatible",
             protocol: "openai_completions", authKind: "api_key", baseUrl: "https://new.invalid",
             models: []
         )
         XCTAssertTrue(model.recordImportedProvider(
-            context: context, input: changed, providerId: "prv_v2", serverDefaultSet: false,
-            legacyProviderId: "prv_legacy", hostV2Mirror: true
+            context: context, input: changed, providerId: "prv_v2", serverDefaultSet: false
         ))
-        XCTAssertEqual(model.connection.session.providerCredential?("prv_v2")?.baseURL, "https://legacy.invalid")
-    }
-
-    func testDirectProviderIDKeyWinsOverLegacyFallback() throws {
-        guard KeychainStore.saveProviderKey("sk-legacy", hostID: hostID, providerId: "prv_legacy", baseURL: "https://legacy.invalid"),
-              KeychainStore.saveProviderKey("sk-v2", hostID: hostID, providerId: "prv_v2", baseURL: "https://v2.invalid")
-        else {
-            throw XCTSkip("模拟器 Keychain 不可写，跳过 provider key fallback 用例")
-        }
-
-        let model = makeModel()
-        let credential = model.providerCredentialForTurn(providerId: "prv_v2", hostID: hostID)
-        XCTAssertEqual(credential?.value, "sk-v2")
-        XCTAssertEqual(credential?.baseURL, "https://v2.invalid")
+        XCTAssertEqual(model.connection.session.providerCredential?("prv_v2")?.baseURL, "https://new.invalid")
     }
 
     private func makeModel() -> AppModel {
@@ -134,14 +109,12 @@ final class ProviderKeyLegacyFallbackTests: XCTestCase {
         )
         let provider = StoredModelProvider(
             providerId: "prv_v2",
-            legacyProviderId: "prv_legacy",
-            hostV2Mirror: true,
             hostID: hostID,
-            name: "Legacy Mirror",
-            baseURL: "https://legacy.invalid",
+            name: "Primary Service",
+            baseURL: "https://v2.invalid",
             apiStyle: "chat_completions",
             models: [StoredModelBinding(spec: ProviderModelSpec(
-                id: "legacy-model",
+                id: "model-1",
                 contextWindow: 32_000,
                 maxTokens: 4_096,
                 thinkingLevels: []
