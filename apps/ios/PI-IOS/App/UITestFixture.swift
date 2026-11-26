@@ -1361,7 +1361,8 @@ struct UITestFixture {
                 info: RACPServerInfo(
                     protocolVersion: "1", serverName: "UI Fixture",
                     serverVersion: "fixture-only", hostId: hostID.uuidString,
-                    connectionId: "fixture-connection", roles: []
+                    connectionId: "fixture-connection", roles: [],
+                    piVersion: "1.6.0"
                 )
             )
         )

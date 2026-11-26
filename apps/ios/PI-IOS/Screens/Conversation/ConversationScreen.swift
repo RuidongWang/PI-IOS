@@ -109,6 +109,15 @@ struct ConversationScreen: View {
 
     var currentHost: HostRecord? { model.currentHost }
 
+    /// 已有当前会话的实时视图且仍在同一个上下文时，短暂断连/自动重连期间保持实时列表，
+    /// 避免在 `threadSection` 与 `offlineThread` 之间反复切换并重渲染缓存内容。
+    var shouldShowLiveThread: Bool {
+        guard let attachedSessionId = session.attachedSessionId else { return false }
+        if connection.state.isOnline { return true }
+        return session.view.sessionId == attachedSessionId
+            && (cachedSessionId == nil || cachedSessionId == attachedSessionId)
+    }
+
     var historyTextLoader: @MainActor (RACPItem) async -> String? {
         let selection = session.attachmentSelectionGeneration
         return { item in
@@ -156,7 +165,7 @@ struct ConversationScreen: View {
                                     openingThread(sessionID: target, proxy: proxy)
                                 } else {
                                     statusArea
-                                    if connection.state.isOnline, session.attachedSessionId != nil {
+                                    if shouldShowLiveThread {
                                         queueSection
                                         threadSection(proxy: proxy)
                                     } else if !connection.state.isOnline, let sessionId = cachedSessionId {

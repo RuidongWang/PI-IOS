@@ -237,7 +237,7 @@ final class SessionController: ObservableObject {
     // MARK: 生命周期
 
     /// 连接建立/断开时由 `ConnectionModel` 调用。
-    func bind(client: RACPClient?, online: Bool) {
+    func bind(client: RACPClient?, online: Bool, preserveView: Bool = false) {
         bindGeneration &+= 1
         sessionSelectionGeneration &+= 1
         pendingUserEchoes.removeAll()
@@ -251,13 +251,15 @@ final class SessionController: ObservableObject {
         modelAvailabilityCheck = nil
         self.client = client
         attachedHostID = nil
-        draftSessionID = nil
-        draftPreview = nil
+        if !preserveView {
+            draftSessionID = nil
+            draftPreview = nil
+        }
         isOnline = online
         busyTokens.removeAll()
         attachmentUploads.removeAll()
         isBusy = false
-        if client == nil {
+        if client == nil, !preserveView {
             view = .empty
             attachedSessionId = nil
             attachedSummary = nil
@@ -356,15 +358,24 @@ final class SessionController: ObservableObject {
     }
 
     /// Synchronous feedback before navigation or the first cache/network await.
-    func prepareToOpen(sessionId: String) {
-        if isAttaching && pendingAttachSessionId == sessionId { return }
+    func prepareToOpen(sessionId: String, showPreview: Bool = true) {
+        if isAttaching && pendingAttachSessionId == sessionId {
+            if showPreview && openingSessionID == nil {
+                openingSessionID = sessionId
+            }
+            return
+        }
         if alreadyAttached(to: sessionId) { return }
         cancelPendingAttach()
         resetHistoryLoad()
         pendingAttachSessionId = sessionId
-        openingSessionID = sessionId
+        openingSessionID = showPreview ? sessionId : nil
         isAttaching = true
         lastError = nil
+    }
+
+    func isAttachedCurrent(to sessionID: String) -> Bool {
+        alreadyAttached(to: sessionID)
     }
 
     /// 打开会话：`session/attach` 拉快照并订阅。
@@ -378,7 +389,11 @@ final class SessionController: ObservableObject {
             await task.value
             return
         }
-        prepareToOpen(sessionId: sessionId)
+        // 断线重连/回到前台恢复同一会话时，保持当前已展示的离线缓存或实时消息列表，
+        // 避免切换到 openingThread 重新渲染一份缓存历史再跳回实时线程。
+        let isReconnectRestore = source == "connectionRestore" || source == "foreground"
+        let keepCurrentThreadVisible = isReconnectRestore && (attachedSessionId == nil || attachedSessionId == sessionId)
+        prepareToOpen(sessionId: sessionId, showPreview: !keepCurrentThreadVisible)
         let selection = sessionSelectionGeneration
         let generation = bindGeneration
         // Register before the first await, including the outgoing cache barrier.
@@ -1232,5 +1247,20 @@ final class SessionController: ObservableObject {
         }
         return merged
     }
+
+#if DEBUG
+    func installViewForTesting(
+        _ view: RACPSessionView,
+        sessionId: String,
+        summary: RACPSessionSummary? = nil
+    ) {
+        self.view = view
+        self.attachedSessionId = sessionId
+        self.attachedSummary = summary ?? view.summary
+        self.attachedBindGeneration = bindGeneration
+        self.openingSessionID = nil
+        prepareDraft(for: sessionId)
+    }
+#endif
 
 }

@@ -40,7 +40,6 @@ final class ConnectionModel: ObservableObject {
     var onBootstrapPairingCommit: ((BootstrapPairingCommit) -> BootstrapPairingCommitResult)?
     var onPrepareHostConnection: ((UUID) -> HostRecord?)?
     var activeAdaptorInstalls: Set<UUID> = []
-    var activePiCLIAccounts: Set<String> = []
     @Published var hasLoadedCatalog = false
     @Published var isRefreshingCatalog = false
     @Published var catalogError: String?

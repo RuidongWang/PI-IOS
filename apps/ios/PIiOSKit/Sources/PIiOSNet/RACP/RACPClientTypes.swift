@@ -46,6 +46,8 @@ public struct RACPServerInfo: Equatable, Sendable {
     public var applyCeilingToPairedDevices: Bool?
     /// `capabilities` 原始值：入口可用性按它裁剪（契约 §2.2 / §8）。
     public var capabilities: JSONValue?
+    /// `server.piVersion`：PI-adaptor 自带并返回的 Pi 版本。
+    public var piVersion: String?
 
     public init(
         protocolVersion: String,
@@ -56,7 +58,8 @@ public struct RACPServerInfo: Equatable, Sendable {
         roles: [String],
         remoteMaxPermissionMode: String? = nil,
         applyCeilingToPairedDevices: Bool? = nil,
-        capabilities: JSONValue? = nil
+        capabilities: JSONValue? = nil,
+        piVersion: String? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.serverName = serverName
@@ -67,6 +70,7 @@ public struct RACPServerInfo: Equatable, Sendable {
         self.remoteMaxPermissionMode = remoteMaxPermissionMode
         self.applyCeilingToPairedDevices = applyCeilingToPairedDevices
         self.capabilities = capabilities
+        self.piVersion = piVersion
     }
 }
 
@@ -550,6 +554,7 @@ struct RACPInitializeResult: Decodable {
         var name: String?
         var version: String?
         var hostId: String?
+        var piVersion: String?
     }
 
     struct Principal: Decodable {
@@ -571,7 +576,8 @@ struct RACPInitializeResult: Decodable {
     var capabilities: JSONValue?
 
     func serverInfo() -> RACPServerInfo {
-        RACPServerInfo(
+        let trimmedPiVersion = server?.piVersion?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return RACPServerInfo(
             protocolVersion: protocolVersion,
             serverName: server?.name ?? "",
             serverVersion: server?.version ?? "",
@@ -580,7 +586,8 @@ struct RACPInitializeResult: Decodable {
             roles: roles ?? principal?.roles ?? [],
             remoteMaxPermissionMode: policy?.remoteMaxPermissionMode,
             applyCeilingToPairedDevices: policy?.applyCeilingToPairedDevices,
-            capabilities: capabilities
+            capabilities: capabilities,
+            piVersion: trimmedPiVersion?.isEmpty == false ? trimmedPiVersion : nil
         )
     }
 }

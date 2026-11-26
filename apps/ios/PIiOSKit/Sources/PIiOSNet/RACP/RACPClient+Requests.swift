@@ -204,7 +204,7 @@ extension RACPClient {
             }
             staged.insert(contentsOf: newItems, at: 0)
 
-            if !hasMore || ConversationTurnPolicy.hasUsableTaskBoundary(staged + viewModel.items) {
+            if !hasMore || ConversationTurnPolicy.hasUsableTaskBoundary(staged) {
                 break
             }
         }
@@ -213,11 +213,15 @@ extension RACPClient {
             PILog.warn("History", "history exhausted without task boundary stagedItems=\(staged.count)")
         }
         // No await occurs between the final ownership check and this single commit.
-        let inserted = viewModel.prependHistory(staged, hasMore: hasMore)
-        let hidden = viewModel.trimIncompleteLeadingTurn()
-        if hidden > 0 {
-            PILog.debug("History", "trimmed incomplete leading turn items=\(hidden) hasMore=\(hasMore)")
+        let beforeCount = viewModel.items.count
+        _ = viewModel.prependHistory(staged, hasMore: hasMore)
+        if hasMore {
+            let hidden = viewModel.trimIncompleteLeadingTurn()
+            if hidden > 0 {
+                PILog.debug("History", "trimmed incomplete leading turn items=\(hidden) hasMore=\(hasMore)")
+            }
         }
+        let inserted = max(0, viewModel.items.count - beforeCount)
         if emitUpdate { await emit(.sessionChanged) }
         return inserted
     }

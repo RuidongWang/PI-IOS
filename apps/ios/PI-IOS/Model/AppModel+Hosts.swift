@@ -617,13 +617,16 @@ extension AppModel {
     func setCurrentHost(id: UUID, waitForOnline: Bool = true) async {
         guard hosts.contains(where: { $0.id == id }) else { return }
         let previousHostID = currentHost?.id
+        let preserveSameHostSession = previousHostID == id
+            && connection.session.attachedSessionId != nil
+            && connection.session.view.sessionId == connection.session.attachedSessionId
         hostSwitchGeneration &+= 1
         let generation = hostSwitchGeneration
         pendingHostID = id
         PILog.info("Connection", "切换服务器 host=\(id.uuidString.prefix(8))")
         // 先清空旧连接的目录与隧道，避免旧 PI-adaptor 的列表在新 PI-adaptor 标记生效后到达本机元数据合并。
         if let previousHostID {
-            await connection.disconnect(ifHostID: previousHostID)
+            await connection.disconnect(ifHostID: previousHostID, preserveSessionView: preserveSameHostSession)
         }
         guard hostSwitchGeneration == generation,
               hosts.contains(where: { $0.id == id })
@@ -634,7 +637,7 @@ extension AppModel {
         connection.setCacheHostID(id)
         persist()
         guard let host = currentHost else { return }
-        await connection.connect(record: host)
+        await connection.connect(record: host, preserveSessionView: preserveSameHostSession)
         if hostSwitchGeneration == generation {
             pendingHostID = nil
         }

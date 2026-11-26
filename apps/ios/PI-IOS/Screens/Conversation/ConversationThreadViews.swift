@@ -97,80 +97,7 @@ extension ConversationScreen {
 
     @ViewBuilder
     func conversationRowView(_ row: ConversationRow) -> some View {
-        switch row {
-        case let .item(item):
-            itemRow(item)
-        case let .toolGroup(group):
-            ToolRunCard(group: group)
-        }
-    }
-
-    @ViewBuilder
-    func itemRow(_ item: RACPItem) -> some View {
-        if item.isToolItem {
-            ToolItemCard(item: item)
-        } else if item.role == "user" {
-            // 用户消息：右对齐、accentSoft 底、无头像无角色标签；不画描边、不画阴影。
-            // quiet-v2 §2：accent 只表达「可交互」，所以气泡只用选中底，不用 accent 描边。
-            HStack(alignment: .top, spacing: 0) {
-                Spacer(minLength: 0)
-                VStack(alignment: .leading, spacing: PISpacing.s8) {
-                    if !item.attachments.isEmpty {
-                        VStack(alignment: .leading, spacing: PISpacing.s8) {
-                            ForEach(item.attachments, id: \.id) { attachment in
-                                AttachmentThumbnailView(attachment: attachment)
-                            }
-                        }
-                    }
-                    Text(item.text ?? item.kind ?? "条目")
-                        .font(PIFont.body)
-                        .foregroundStyle(PIColor.text)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                        .accessibilityIdentifier("conversation.userMessage.\(item.id)")
-                    if let status = item.status {
-                        Text(status)
-                            .font(PIFont.meta)
-                            .foregroundStyle(PIColor.text3)
-                    }
-                }
-                .padding(.horizontal, PISpacing.s16)
-                .padding(.vertical, PISpacing.s12)
-                .frame(maxWidth: 320, alignment: .leading)
-                .background(
-                    PIColor.accentSoft,
-                    in: RoundedRectangle(cornerRadius: PIRadius.card, style: .continuous)
-                )
-                copyMessageButton(item)
-            }
-        } else {
-            // Agent / 系统消息：直接排在页面上，无气泡、无头像、无角色标签。
-            HStack(alignment: .top, spacing: 0) {
-                VStack(alignment: .leading, spacing: PISpacing.s8) {
-                    if !item.attachments.isEmpty {
-                        VStack(alignment: .leading, spacing: PISpacing.s8) {
-                            ForEach(item.attachments, id: \.id) { attachment in
-                                AttachmentThumbnailView(attachment: attachment)
-                            }
-                        }
-                    }
-                    // Agent 输出几乎都是 Markdown（表格、围栏代码块、粗体、列表），
-                    // 纯 Text 会把标记原样画出来；用户气泡保持纯文本，避免把用户输入的
-                    // `*`、`_` 当成语法解释。
-                    PIMarkdownView(
-                        text: item.text ?? item.kind ?? "条目",
-                        identifier: "conversation.agentMessage.\(item.id)"
-                    )
-                    if let status = item.status {
-                        Text(status)
-                            .font(PIFont.meta)
-                            .foregroundStyle(PIColor.text3)
-                    }
-                }
-                Spacer(minLength: 0)
-                copyMessageButton(item)
-            }
-        }
+        ConversationRowContentView(row: row)
     }
 
     /// Coalesce message, status and queue updates without restarting animations.
@@ -616,37 +543,165 @@ extension ConversationScreen {
         let anchorID = model.currentHost.flatMap {
             model.readingPosition(hostID: $0.id, sessionID: sessionID)?.lastVisibleItemID
         }
+        return ConversationOpeningThreadView(
+            sessionID: sessionID,
+            entries: entries,
+            anchorID: anchorID,
+            previewWindowLimit: previewWindowLimit,
+            isAttaching: session.isAttaching,
+            lastError: session.lastError,
+            onRetry: {
+                Task { await session.attach(sessionId: sessionID, source: "previewRetry") }
+            },
+            onLoadMore: { anchor in
+                previewWindowLimit = min(entries.count, previewWindowLimit + 80)
+                Task { @MainActor in
+                    await Task.yield()
+                    guard session.openingSessionID == sessionID, let anchor else { return }
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) { proxy.scrollTo("preview-\(anchor)", anchor: .top) }
+                }
+            }
+        )
+        .equatable()
+    }
+
+    func offlineThread(sessionId: String) -> some View {
+        ConversationOfflineThreadView(
+            sessionId: sessionId,
+            cached: connection.cachedSession(sessionId: sessionId),
+            offlineCacheReady: connection.offlineCacheReady,
+            offlineCacheLoadError: connection.offlineCacheLoadError
+        )
+        .equatable()
+    }
+
+}
+
+private struct ConversationRowContentView: View {
+    let row: ConversationRow
+
+    var body: some View {
+        switch row {
+        case let .item(item):
+            itemRow(item)
+        case let .toolGroup(group):
+            ToolRunCard(group: group)
+        }
+    }
+
+    @ViewBuilder
+    private func itemRow(_ item: RACPItem) -> some View {
+        if item.isToolItem {
+            ToolItemCard(item: item)
+        } else if item.role == "user" {
+            // 用户消息：右对齐、accentSoft 底、无头像无角色标签；不画描边、不画阴影。
+            // quiet-v2 §2：accent 只表达「可交互」，所以气泡只用选中底，不用 accent 描边。
+            HStack(alignment: .top, spacing: 0) {
+                Spacer(minLength: 0)
+                VStack(alignment: .leading, spacing: PISpacing.s8) {
+                    if !item.attachments.isEmpty {
+                        VStack(alignment: .leading, spacing: PISpacing.s8) {
+                            ForEach(item.attachments, id: \.id) { attachment in
+                                AttachmentThumbnailView(attachment: attachment)
+                            }
+                        }
+                    }
+                    Text(item.text ?? item.kind ?? "条目")
+                        .font(PIFont.body)
+                        .foregroundStyle(PIColor.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("conversation.userMessage.\(item.id)")
+                    if let status = item.status {
+                        Text(status)
+                            .font(PIFont.meta)
+                            .foregroundStyle(PIColor.text3)
+                    }
+                }
+                .padding(.horizontal, PISpacing.s16)
+                .padding(.vertical, PISpacing.s12)
+                .frame(maxWidth: 320, alignment: .leading)
+                .background(
+                    PIColor.accentSoft,
+                    in: RoundedRectangle(cornerRadius: PIRadius.card, style: .continuous)
+                )
+                copyMessageButton(item)
+            }
+        } else {
+            // Agent / 系统消息：直接排在页面上，无气泡、无头像、无角色标签。
+            HStack(alignment: .top, spacing: 0) {
+                VStack(alignment: .leading, spacing: PISpacing.s8) {
+                    if !item.attachments.isEmpty {
+                        VStack(alignment: .leading, spacing: PISpacing.s8) {
+                            ForEach(item.attachments, id: \.id) { attachment in
+                                AttachmentThumbnailView(attachment: attachment)
+                            }
+                        }
+                    }
+                    // Agent 输出几乎都是 Markdown（表格、围栏代码块、粗体、列表），
+                    // 纯 Text 会把标记原样画出来；用户气泡保持纯文本，避免把用户输入的
+                    // `*`、`_` 当成语法解释。
+                    PIMarkdownView(
+                        text: item.text ?? item.kind ?? "条目",
+                        identifier: "conversation.agentMessage.\(item.id)"
+                    )
+                    if let status = item.status {
+                        Text(status)
+                            .font(PIFont.meta)
+                            .foregroundStyle(PIColor.text3)
+                    }
+                }
+                Spacer(minLength: 0)
+                copyMessageButton(item)
+            }
+        }
+    }
+}
+
+/// 隔离打开会话前的本地预览，避免连接状态、目录或扩展轮询更新时重排缓存历史。
+struct ConversationOpeningThreadView: View, Equatable {
+    let sessionID: String
+    let entries: [SessionCacheStore.Entry]
+    let anchorID: String?
+    let previewWindowLimit: Int
+    let isAttaching: Bool
+    let lastError: String?
+    let onRetry: () -> Void
+    let onLoadMore: (String?) -> Void
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.sessionID == rhs.sessionID
+            && lhs.entries == rhs.entries
+            && lhs.anchorID == rhs.anchorID
+            && lhs.previewWindowLimit == rhs.previewWindowLimit
+            && lhs.isAttaching == rhs.isAttaching
+            && lhs.lastError == rhs.lastError
+    }
+
+    var body: some View {
         let anchorIndex = anchorID.flatMap { id in entries.firstIndex { $0.id == id } }
         let range = ConversationPreviewWindow.range(count: entries.count, anchorIndex: anchorIndex, limit: previewWindowLimit)
         let rows = Array(entries[range].reversed())
         let previewRows = ToolCallGroupingPolicy.rows(for: rows.map(\.conversationItem))
         return LazyVStack(alignment: .leading, spacing: PISpacing.s12) {
-            if session.isAttaching {
+            if isAttaching {
                 ProgressView("正在同步会话…")
                     .font(PIFont.meta)
                     .accessibilityIdentifier("conversation.sessionOpening")
             } else {
-                PIInlineMessage(kind: .danger, text: session.lastError ?? "会话尚未同步")
+                PIInlineMessage(kind: .danger, text: lastError ?? "会话尚未同步")
                     .accessibilityIdentifier("conversation.sessionOpenError")
-                Button("重试同步") {
-                    Task { await session.attach(sessionId: sessionID, source: "previewRetry") }
-                }
-                .accessibilityIdentifier("conversation.retrySessionOpen")
+                Button("重试同步", action: onRetry)
+                    .accessibilityIdentifier("conversation.retrySessionOpen")
             }
             if !rows.isEmpty {
                 Text("本机历史 · 同步完成后更新")
                     .font(PIFont.meta).foregroundStyle(PIColor.text2)
                 if rows.count < entries.count {
                     Button("加载更多本机历史") {
-                        let anchor = previewRows.first?.anchorItemID
-                        previewWindowLimit = min(entries.count, previewWindowLimit + 80)
-                        Task { @MainActor in
-                            await Task.yield()
-                            guard session.openingSessionID == sessionID, let anchor else { return }
-                            var transaction = Transaction()
-                            transaction.disablesAnimations = true
-                            withTransaction(transaction) { proxy.scrollTo("preview-\(anchor)", anchor: .top) }
-                        }
+                        onLoadMore(previewRows.first?.anchorItemID)
                     }
                     .font(PIFont.meta)
                     .accessibilityIdentifier("conversation.loadMoreCachedPreview")
@@ -656,7 +711,7 @@ extension ConversationScreen {
                     cachedConversationRow(row, namespace: "previewMessage")
                         .id("preview-\(row.anchorItemID)")
                 }
-            } else if session.isAttaching {
+            } else if isAttaching {
                 ForEach(0..<3) { index in
                     RoundedRectangle(cornerRadius: PIRadius.control)
                         .fill(PIColor.surface2)
@@ -673,9 +728,36 @@ extension ConversationScreen {
         }
     }
 
+    /// Tool cards own their button identifiers; an outer identifier would replace
+    /// the collapsed header's toggle identity in SwiftUI's accessibility tree.
     @ViewBuilder
-    func offlineThread(sessionId: String) -> some View {
-        let cached = connection.cachedSession(sessionId: sessionId)
+    private func cachedConversationRow(_ row: ConversationRow, namespace: String) -> some View {
+        if row.isToolLike {
+            ConversationRowContentView(row: row)
+        } else {
+            ConversationRowContentView(row: row)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("conversation.\(namespace).\(row.anchorItemID)")
+        }
+    }
+}
+
+/// 隔离离线缓存列表，重连阶段连接状态频繁变化时只要缓存快照未变就跳过视图重算。
+struct ConversationOfflineThreadView: View, Equatable {
+    let sessionId: String
+    let cached: OfflineCachedSession?
+    let offlineCacheReady: Bool
+    let offlineCacheLoadError: String?
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.sessionId == rhs.sessionId
+            && lhs.cached == rhs.cached
+            && lhs.offlineCacheReady == rhs.offlineCacheReady
+            && lhs.offlineCacheLoadError == rhs.offlineCacheLoadError
+    }
+
+    var body: some View {
         // 缓存按新→旧读取；会话阅读与在线线程一致，按旧→新展示。
         let entries = (cached?.entries ?? []).reversed().filter { !$0.conversationItem.isBlankNonToolItem }
         LazyVStack(alignment: .leading, spacing: PISpacing.s8) {
@@ -704,10 +786,10 @@ extension ConversationScreen {
                     }
                 }
             }
-            if !connection.offlineCacheReady {
+            if !offlineCacheReady {
                 ProgressView("正在读取本机历史…")
                     .accessibilityIdentifier("conversation.offlineCacheLoading")
-            } else if let error = connection.offlineCacheLoadError {
+            } else if let error = offlineCacheLoadError {
                 PIInlineMessage(kind: .danger, text: "本机历史读取失败：\(error)")
                     .accessibilityIdentifier("conversation.offlineCacheError")
             } else if cached == nil {
@@ -753,20 +835,7 @@ extension ConversationScreen {
         }
     }
 
-    /// Tool cards own their button identifiers; an outer identifier would replace
-    /// the collapsed header's toggle identity in SwiftUI's accessibility tree.
-    @ViewBuilder
-    func cachedConversationRow(_ row: ConversationRow, namespace: String) -> some View {
-        if row.isToolLike {
-            conversationRowView(row)
-        } else {
-            conversationRowView(row)
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("conversation.\(namespace).\(row.anchorItemID)")
-        }
-    }
-
-    func offlineApprovalCard(_ approval: OfflineSessionApproval) -> some View {
+    private func offlineApprovalCard(_ approval: OfflineSessionApproval) -> some View {
         let contract = cachedApprovalIsContract(approval)
         return PICard {
             VStack(alignment: .leading, spacing: PISpacing.s8) {
@@ -814,12 +883,12 @@ extension ConversationScreen {
         }
     }
 
-    func cachedApprovalIsContract(_ approval: OfflineSessionApproval) -> Bool {
+    private func cachedApprovalIsContract(_ approval: OfflineSessionApproval) -> Bool {
         let kind = approval.payload.value(at: ["kind"])?.stringValue?.lowercased() ?? ""
         return kind.contains("plan") || kind.contains("goal") || kind.contains("contract")
     }
 
-    func cachedApprovalSummary(_ approval: OfflineSessionApproval) -> String {
+    private func cachedApprovalSummary(_ approval: OfflineSessionApproval) -> String {
         var lines: [String] = []
         if let tool = approval.payload.value(at: ["toolName"])?.stringValue {
             lines.append("工具：\(tool)")
@@ -836,7 +905,6 @@ extension ConversationScreen {
         }
         return "服务器没有给出摘要"
     }
-
 }
 
 struct ConversationContentBottomKey: PreferenceKey {

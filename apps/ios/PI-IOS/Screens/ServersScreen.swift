@@ -79,7 +79,7 @@ struct ServersScreen: View {
                 if let host = existingHost {
                     fingerprintSection(for: host)
                     pairingSection(for: host)
-                    RemotePiSection(host: host, isEnabled: !isSaving && !isDeleting && !isPairing)
+                    RemotePiSection(host: host)
                         .id(host.address)
                     dangerSection(for: host)
                 }

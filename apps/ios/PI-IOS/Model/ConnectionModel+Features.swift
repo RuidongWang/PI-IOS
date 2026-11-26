@@ -519,47 +519,6 @@ extension ConnectionModel {
         }
     }
 
-    func installedPiVersion(record: HostRecord) async throws -> RemotePiVersion {
-        try await withPiCLISSH(record: record) { transport in
-            try await RemotePiMaintenance.installedVersion(using: transport)
-        }
-    }
-
-    func upgradePiCLI(record: HostRecord, from installed: RemotePiVersion, toAtLeast latest: RemotePiVersion) async throws -> RemotePiVersion {
-        try await withPiCLISSH(record: record) { transport in
-            try await RemotePiMaintenance.upgrade(from: installed, toAtLeast: latest, using: transport)
-        }
-    }
-
-    func withPiCLISSH(
-        record: HostRecord,
-        _ operation: (SSHTransport) async throws -> RemotePiVersion
-    ) async throws -> RemotePiVersion {
-        func matchesSavedAccount() -> Bool {
-            guard let current = prepareHostConnection(record) else { return false }
-            return current.host == record.host && current.port == record.port
-                && current.username == record.username && current.authKind == record.authKind
-        }
-        guard matchesSavedAccount() else { throw ConnectionLifecycleError.connectionChanged }
-        let account = KeychainStore.account(username: record.username, host: record.host, port: record.port)
-        guard let credential = KeychainStore.loadCredential(account: account) else {
-            throw ConnectionPairingError.missingCredential
-        }
-        guard activePiCLIAccounts.insert(account).inserted else { throw RemotePiMaintenanceError.busy }
-        defer { activePiCLIAccounts.remove(account) }
-        let connection = try await connectSSH(record: record, credential: credential, account: account)
-        defer { releaseHostKeyBroker(connection.operationID) }
-        do {
-            guard matchesSavedAccount() else { throw ConnectionLifecycleError.connectionChanged }
-            let version = try await operation(connection.transport)
-            await connection.transport.close()
-            return version
-        } catch {
-            await connection.transport.close()
-            throw error
-        }
-    }
-
     func makeHostKeyBroker(
         account: String,
         address: String

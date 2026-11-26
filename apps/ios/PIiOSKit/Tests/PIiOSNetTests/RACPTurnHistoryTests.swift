@@ -305,6 +305,62 @@ final class RACPTurnHistoryTests: XCTestCase {
         await client.stop()
     }
 
+    func testManualHistoryWithNilTurnIDPagesPastNonUserPrefixAndTrimsOnlyIncompletePrefix() async throws {
+        let socket = TurnHistorySocket()
+        socket.queueAttach("session", items: [item("current-u", role: "user"), item("current-a", role: "assistant")], hasMore: true)
+        socket.queueHistory(before: "current-u", [
+            HistoryReply(items: [item("old-t2", role: "tool"), item("old-a2", role: "assistant")], hasMore: true),
+        ])
+        socket.queueHistory(before: "old-t2", [
+            HistoryReply(items: [item("older-a0", role: "assistant"), item("old-u", role: "user"), item("old-a1", role: "assistant")], hasMore: true),
+        ])
+        let client = RACPClient(testingSocket: socket, subscriptionId: nil, subscribedSessionId: nil)
+        let pump = startPump(client: client, socket: socket)
+        let recorder = UpdateRecorder()
+        let collector = await startCollector(client: client, recorder: recorder)
+        let initialIncluded = try await client.attach(sessionId: "session")
+        XCTAssertEqual(initialIncluded, true)
+        await waitUntil { recorder.sessionChangedCount == 1 }
+
+        let inserted = try await client.loadEarlierHistory()
+        XCTAssertEqual(inserted, 4)
+        await waitUntil { recorder.sessionChangedCount == 2 }
+        let view = await client.sessionView()
+        XCTAssertEqual(view.items.map(\.id), ["old-u", "old-a1", "old-t2", "old-a2", "current-u", "current-a"])
+        XCTAssertEqual(socket.historyRequests.map(\.beforeItemID), ["current-u", "old-t2"])
+        XCTAssertTrue(view.hasMoreHistory)
+
+        collector.cancel()
+        pump.cancel()
+        await client.stop()
+    }
+
+    func testManualHistoryKeepsLeadingNonUserItemsWhenSessionStartIsReached() async throws {
+        let socket = TurnHistorySocket()
+        socket.queueAttach("session", items: [item("current-u", role: "user")], hasMore: true)
+        socket.queueHistory(before: "current-u", [
+            HistoryReply(items: [item("initial-system", role: "system"), item("initial-a", role: "assistant")], hasMore: false),
+        ])
+        let client = RACPClient(testingSocket: socket, subscriptionId: nil, subscribedSessionId: nil)
+        let pump = startPump(client: client, socket: socket)
+        let recorder = UpdateRecorder()
+        let collector = await startCollector(client: client, recorder: recorder)
+        let initialIncluded = try await client.attach(sessionId: "session")
+        XCTAssertEqual(initialIncluded, true)
+        await waitUntil { recorder.sessionChangedCount == 1 }
+
+        let inserted = try await client.loadEarlierHistory()
+        XCTAssertEqual(inserted, 2)
+        await waitUntil { recorder.sessionChangedCount == 2 }
+        let view = await client.sessionView()
+        XCTAssertEqual(view.items.map(\.id), ["initial-system", "initial-a", "current-u"])
+        XCTAssertFalse(view.hasMoreHistory)
+
+        collector.cancel()
+        pump.cancel()
+        await client.stop()
+    }
+
     func testDuplicatePageFailsWithoutPrependOrPublication() async throws {
         let socket = TurnHistorySocket()
         socket.queueAttach("session", items: [item("current-u", role: "user")], hasMore: true)

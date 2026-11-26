@@ -376,11 +376,12 @@ final class AppModel: ObservableObject {
             projects: connection.projects,
             sessions: connection.sessions
         )
-        if connection.session.attachedSessionId == nil,
-           let sessionID = lastSessionByHost[hostID.uuidString] {
-            await connection.session.attach(sessionId: sessionID, source: "foreground")
-        } else {
-            await connection.session.refreshView(source: "foreground")
+        if let sessionID = connection.session.attachedSessionId ?? lastSessionByHost[hostID.uuidString] {
+            if connection.session.isAttachedCurrent(to: sessionID) {
+                await connection.session.refreshView(source: "foreground")
+            } else {
+                await connection.session.attach(sessionId: sessionID, source: "foreground")
+            }
         }
 
         guard !Task.isCancelled,

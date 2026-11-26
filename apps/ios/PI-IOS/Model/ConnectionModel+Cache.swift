@@ -42,7 +42,7 @@ extension ConnectionModel {
     /// 建立隧道并拉取 `project/list` / `session/list`。
     ///
     /// 前提是 Keychain 里已有凭证与设备令牌；缺任何一项都直接给出原因，不假装在线。
-    func connect(record requested: HostRecord) async {
+    func connect(record requested: HostRecord, preserveSessionView: Bool = false) async {
         // 日志：连接开始只落 host UUID 前 8 位与 hostPort，不落用户名/密码/私钥/令牌。
         let hostLabel = requested.id.uuidString.prefix(8)
         let logStartedAt = Date()
@@ -52,7 +52,7 @@ extension ConnectionModel {
         )
         connectionIntentGeneration &+= 1
         let intent = connectionIntentGeneration
-        await disconnectCurrent(expectedIntent: intent)
+        await disconnectCurrent(expectedIntent: intent, preserveSessionView: preserveSessionView)
         guard intent == connectionIntentGeneration,
               cacheHostID == requested.id
         else {
@@ -170,7 +170,7 @@ extension ConnectionModel {
         cacheClientID = UUID()
         let generation = connectionGeneration
         invalidateCatalogLoads()
-        session.bind(client: newClient, online: false)
+        session.bind(client: newClient, online: false, preserveView: preserveSessionView)
         let stream = await newClient.start()
         guard self.client === newClient, connectionGeneration == generation else {
             connectLogStartedAt = nil
@@ -455,7 +455,7 @@ extension ConnectionModel {
 
     /// Only close the connection if the PI-adaptor that requested teardown is still active.
     /// A stale PI-adaptor action must never disconnect the connection installed by a newer switch.
-    func disconnect(ifHostID expectedHostID: UUID) async {
+    func disconnect(ifHostID expectedHostID: UUID, preserveSessionView: Bool = false) async {
         guard cacheHostID == expectedHostID else {
             PILog.debug(
                 "Connection",
@@ -468,7 +468,8 @@ extension ConnectionModel {
         connectionIntentGeneration &+= 1
         await disconnectCurrent(
             expectedIntent: connectionIntentGeneration,
-            expectedHostID: expectedHostID
+            expectedHostID: expectedHostID,
+            preserveSessionView: preserveSessionView
         )
         PILog.info(
             "Connection",
@@ -478,7 +479,8 @@ extension ConnectionModel {
 
     func disconnectCurrent(
         expectedIntent: Int,
-        expectedHostID: UUID? = nil
+        expectedHostID: UUID? = nil,
+        preserveSessionView: Bool = false
     ) async {
         let generation = connectionGeneration
         guard expectedIntent == connectionIntentGeneration,
@@ -521,7 +523,7 @@ extension ConnectionModel {
             brokers.removeValue(forKey: connectionBrokerID)
         }
         connectionBrokerID = nil
-        session.bind(client: nil, online: false)
+        session.bind(client: nil, online: false, preserveView: preserveSessionView)
         connectedAccount = nil
         connectionStatus = ConnectionStatus()
         state = .offline(reason: nil)

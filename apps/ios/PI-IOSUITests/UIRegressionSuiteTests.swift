@@ -293,7 +293,7 @@ final class UIRegressionSuiteTests: XCTestCase {
         openSettings()
         app.buttons["settings.addServer"].firstMatch.tap()
         expect("SRV-05", app.navigationBars["服务器"].waitForExistence(timeout: 5), "新增服务器页")
-        expect("SRV-05", !text("主机指纹") && !text("PI-adaptor 连接") && !text("Pi CLI") && !text("危险操作"), "新增页隐藏已有主机区块")
+        expect("SRV-05", !text("主机指纹") && !text("PI-adaptor 连接") && !app.staticTexts["servers.pi.version"].exists && !text("危险操作"), "新增页隐藏已有主机区块")
         goBack()
         let host = hostRow("Fixture PI-adaptor B")
         expect("SRV-05", host.waitForExistence(timeout: 5), "已有 host 行")
@@ -309,10 +309,10 @@ final class UIRegressionSuiteTests: XCTestCase {
         )
         scrollUntil(text: "主机指纹")
         expect("SRV-05", text("主机指纹") && text("PI-adaptor 连接") && text("危险操作"), "编辑页显示已有主机区块")
-        let checkPi = app.buttons["servers.pi.check"].firstMatch
-        scrollUntilHittable(checkPi)
-        expect("SRV-05", checkPi.isHittable && checkPi.isEnabled, "已有服务器可查询 Pi CLI 版本")
-        expect("SRV-05", !app.buttons["servers.pi.upgrade"].exists, "查询到可用升级前不能执行升级")
+        let piVersionRow = app.staticTexts["servers.pi.version"].firstMatch
+        scrollUntilHittable(piVersionRow)
+        expect("SRV-05", piVersionRow.exists && piVersionRow.label.contains("未连接"), "未连接时 Pi 版本展示未连接")
+        expect("SRV-05", !app.buttons["servers.pi.check"].exists && !app.buttons["servers.pi.upgrade"].exists, "不再显示独立 Pi CLI 查询/升级操作")
 
         switchToPrivateKey()
         let paste = app.buttons["servers.pasteKey"].firstMatch
@@ -349,6 +349,16 @@ final class UIRegressionSuiteTests: XCTestCase {
         expect("SRV-06", app.navigationBars["设置"].waitForExistence(timeout: 8), "删除后返回设置")
         expect("SRV-06", hostRow("Fixture PI-adaptor B").waitForNonExistence(timeout: 5), "删除后行消失")
         snapshot("SRV-06", step: 1)
+
+        launch("online-two-sessions")
+        openSettings()
+        let onlineHost = hostRow("Fixture Online PI-adaptor")
+        expect("SRV-05", onlineHost.waitForExistence(timeout: 5), "在线 host 行")
+        onlineHost.tap()
+        expect("SRV-05", app.navigationBars["服务器"].waitForExistence(timeout: 5), "在线服务器页")
+        let onlinePiVersion = app.staticTexts["servers.pi.version"].firstMatch
+        scrollUntilHittable(onlinePiVersion)
+        expect("SRV-05", onlinePiVersion.exists && onlinePiVersion.label.contains("1.6.0"), "在线时展示 PI-adaptor 返回的 Pi 版本")
     }
 
     func testInstallValidationAndFailurePages() {

@@ -57,6 +57,40 @@ final class RACPRouteFallbackTests: XCTestCase {
         await client.stop()
     }
 
+    func testInitializeResultDecodesPiVersionFromAdaptor() throws {
+        let payload = Data("""
+        {
+          "protocolVersion": "2.0.0",
+          "server": {
+            "name": "pi-adaptor",
+            "version": "0.0.9",
+            "hostId": "host-1",
+            "piVersion": " 1.6.0 "
+          },
+          "connectionId": "conn-1",
+          "roles": ["owner"]
+        }
+        """.utf8)
+        let info = try JSONDecoder().decode(RACPInitializeResult.self, from: payload).serverInfo()
+        XCTAssertEqual(info.serverName, "pi-adaptor")
+        XCTAssertEqual(info.serverVersion, "0.0.9")
+        XCTAssertEqual(info.piVersion, "1.6.0")
+
+        let emptyPiPayload = Data("""
+        {
+          "protocolVersion": "2.0.0",
+          "server": {
+            "name": "pi-adaptor",
+            "version": "0.0.8",
+            "hostId": "host-1",
+            "piVersion": "   "
+          }
+        }
+        """.utf8)
+        let emptyInfo = try JSONDecoder().decode(RACPInitializeResult.self, from: emptyPiPayload).serverInfo()
+        XCTAssertNil(emptyInfo.piVersion)
+    }
+
     func testPromotionFenceBlocksBusinessWriteButKeepsReadOnlyPing() async throws {
         let socket = ScriptedSocket()
         let client = RACPClient(testingSocket: socket, subscriptionId: nil, subscribedSessionId: nil)
