@@ -1000,6 +1000,10 @@ final class SessionController: ObservableObject {
             try requestKeys.acknowledge(attempt)
             guard isCurrent(client, generation: generation, selection: selection) else { return }
             let alreadyResolved = result.value(at: ["alreadyResolved"])?.boolValue ?? false
+            if alreadyResolved {
+                await client.removeResolvedApproval(id: approvalId, sessionID: sessionId)
+                guard isCurrent(client, generation: generation, selection: selection) else { return }
+            }
             notice = alreadyResolved ? "该审批已被处理过，未重复执行" : "已提交审批结果"
             lastError = nil
             await refreshView()
@@ -1077,7 +1081,12 @@ final class SessionController: ObservableObject {
             attachedSummary = summary
             if let newMode = summary.mode { sessionMode = newMode }
             if let newPermission = summary.permissionMode { self.permissionMode = newPermission }
-            thinkingLevel = resolution.level
+            if (permissionMode != nil && permissionMode != summary.permissionMode) || (mode != nil && mode != summary.mode) {
+                lastError = "服务器未应用所选模式，请检查当前会话配置。"
+                notice = nil
+                return
+            }
+            thinkingLevel = summary.thinkingLevel.flatMap(RACPThinkingLevel.init(rawValue:))
             if let providerId { selectedProviderId = providerId }
             if let modelId { selectedModelId = modelId }
             if support != nil { thinkingSupport = nextSupport }
@@ -1085,7 +1094,7 @@ final class SessionController: ObservableObject {
             thinkingFallbackNotice = resolution.didFallback
                 ? ThinkingLevelPolicy.fallbackExplanation(
                     from: currentThinkingLevel,
-                    to: resolution.level,
+                    to: thinkingLevel,
                     fallbackSource: resolution.fallbackSource
                 )
                 : nil
@@ -1170,8 +1179,8 @@ final class SessionController: ObservableObject {
         if let modelId = status.pinnedModelId {
             selectedModelId = modelId
         }
-        if let rawLevel = status.pinnedThinkingLevel {
-            thinkingLevel = RACPThinkingLevel(rawValue: rawLevel)
+        if !status.unknownInputs.contains("session.get") {
+            thinkingLevel = status.pinnedThinkingLevel.flatMap(RACPThinkingLevel.init(rawValue:))
         }
         if status.available == true {
             modelAvailabilityCheck = (Date(), selectedBindingKey, bindGeneration, sessionSelectionGeneration)

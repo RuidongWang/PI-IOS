@@ -121,12 +121,6 @@ extension AppModel {
             next.sessionBindings[index].updatedAt = now
         }
         let hostKey = hostID.uuidString
-        for sessionID in removedSessionIDs {
-            next.readingPositionsByHost[hostKey]?.removeValue(forKey: sessionID)
-        }
-        if next.readingPositionsByHost[hostKey]?.isEmpty == true {
-            next.readingPositionsByHost.removeValue(forKey: hostKey)
-        }
         if next.lastProjectByHost[hostKey] == projectID {
             next.lastProjectByHost.removeValue(forKey: hostKey)
         }
@@ -143,7 +137,10 @@ extension AppModel {
 
         projectBindings = next.projectBindings
         sessionBindings = next.sessionBindings
-        readingPositionsByHost = next.readingPositionsByHost
+        for sessionID in removedSessionIDs {
+            readingPositionsByHost[hostKey]?.removeValue(forKey: sessionID)
+        }
+        if readingPositionsByHost[hostKey]?.isEmpty == true { readingPositionsByHost[hostKey] = nil }
         persistReadingPositionsIfNeeded()
         lastProjectByHost = next.lastProjectByHost
         lastSessionByHost = next.lastSessionByHost
@@ -206,12 +203,24 @@ extension AppModel {
     }
 
     func persistReadingPositionsIfNeeded() {
+        deferredReadingPositionTask?.cancel()
+        deferredReadingPositionTask = nil
+        readingPositionWriteGeneration &+= 1
         guard !usesUITestFixture, seedOnlyPositionsCheck else { return }
-        readingPositionsDirty = false
-        _ = ReadingPositionStore.save(readingPositionsByHost, to: readingPositionsFileURL)
+        readingPositionsDirty = !ReadingPositionStore.save(readingPositionsByHost, to: readingPositionsFileURL)
     }
 
     var seedOnlyPositionsCheck: Bool { canPersistLoadedState }
+
+    private func savePendingReadingPositions() async -> Bool {
+        guard readingPositionsDirty, !usesUITestFixture else { return true }
+        guard canPersistLoadedState else { return false }
+        readingPositionWriteGeneration &+= 1
+        let generation = readingPositionWriteGeneration
+        let saved = await ReadingPositionStore.saveAsync(readingPositionsByHost, to: readingPositionsFileURL)
+        if generation == readingPositionWriteGeneration { readingPositionsDirty = !saved }
+        return saved
+    }
 
     func rememberReadingPosition(
         hostID: UUID,
@@ -233,10 +242,9 @@ extension AppModel {
         let current = readingPositionsByHost[hostKey]?[sessionID]
         guard current != next else { return }
         readingPositionsByHost[hostKey, default: [:]][sessionID] = next
+        readingPositionWriteGeneration &+= 1
         readingPositionsDirty = true
         guard !usesUITestFixture else { return }
-        let snapshot = readingPositionsByHost
-        let targetURL = readingPositionsFileURL
         deferredReadingPositionTask?.cancel()
         deferredReadingPositionTask = Task { @MainActor [weak self] in
             do {
@@ -246,8 +254,7 @@ extension AppModel {
             }
             guard !Task.isCancelled, let self else { return }
             self.deferredReadingPositionTask = nil
-            self.readingPositionsDirty = false
-            _ = await ReadingPositionStore.saveAsync(snapshot, to: targetURL)
+            _ = await self.savePendingReadingPositions()
         }
     }
 
@@ -255,21 +262,14 @@ extension AppModel {
     func flushPersistentState() async -> Bool {
         deferredReadingPositionTask?.cancel()
         deferredReadingPositionTask = nil
-        let flushedReadingPositions = readingPositionsDirty && !usesUITestFixture && canPersistLoadedState
-        if flushedReadingPositions {
-            readingPositionsDirty = false
-            ReadingPositionStore.enqueueSave(readingPositionsByHost, to: readingPositionsFileURL)
-        }
         automaticStatePersistenceTask?.cancel()
         automaticStatePersistenceTask = nil
         automaticStatePersistencePending = false
 
 #if DEBUG
         if let persistenceOverrideForTesting {
-            if flushedReadingPositions {
-                await ReadingPositionStore.waitForPendingWrites()
-            }
-            return persistenceOverrideForTesting()
+            let positionsSaved = await savePendingReadingPositions()
+            return persistenceOverrideForTesting() && positionsSaved
         }
 #endif
         guard !usesUITestFixture else { return true }
@@ -283,9 +283,7 @@ extension AppModel {
         // suspended instead of returning the first write's stale `true`.
         let attempt = await persistAsyncTracked()
         let result = await StateFile.waitForPendingWritesResult()
-        if flushedReadingPositions {
-            await ReadingPositionStore.waitForPendingWrites()
-        }
+        let positionsSaved = await savePendingReadingPositions()
 #if DEBUG
         afterPersistBarrierHookForTesting?()
 #endif
@@ -295,8 +293,8 @@ extension AppModel {
         let mayPublish = !Task.isCancelled && attempt.generation == persistenceGeneration
         switch result {
         case .committed:
-            if mayPublish { saveError = nil }
-            return true
+            if mayPublish { saveError = positionsSaved ? nil : "阅读位置保存失败，将在下次保存时重试。" }
+            return positionsSaved
         case .failed(let message):
             if mayPublish { saveError = "保存本机记录失败：\(message)" }
             return false

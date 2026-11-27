@@ -4,6 +4,25 @@ import XCTest
 @testable import PIiOSNet
 
 final class RACPTurnHistoryTests: XCTestCase {
+    func testSlowSessionSubscriptionRebuildsSnapshotOnTheSameSocket() async throws {
+        let socket = TurnHistorySocket()
+        socket.queueAttach("session", items: [item("old", role: "user")], hasMore: false)
+        socket.queueAttach("session", items: [item("new", role: "user")], hasMore: false, revision: 2)
+        let client = RACPClient(testingSocket: socket, subscriptionId: nil, subscribedSessionId: nil)
+        let pump = startPump(client: client, socket: socket)
+        let recorder = UpdateRecorder()
+        let collector = await startCollector(client: client, recorder: recorder)
+        _ = try await client.attach(sessionId: "session")
+        await waitUntil { recorder.sessionChangedCount == 1 }
+        socket.enqueue(Data(#"{"jsonrpc":"2.0","method":"events/closed","params":{"subscriptionId":"sub-1","code":"CLIENT_TOO_SLOW","lastSafeCursor":{"epoch":"epoch","sequence":0}}}"#.utf8))
+        await waitUntil { recorder.sessionChangedCount == 2 }
+        let view = await client.sessionView()
+        XCTAssertEqual(view.items.map(\.id), ["new"])
+        XCTAssertEqual(socket.abortCallCount, 0)
+        collector.cancel()
+        pump.cancel()
+        await client.stop()
+    }
     func testAttachStagesMultiplePagesAndSuppressesReplayUntilOneFinalPublication() async throws {
         let socket = TurnHistorySocket()
         socket.queueAttach("session", items: [item("a3", role: "assistant", turnID: "turn-1")], hasMore: true)

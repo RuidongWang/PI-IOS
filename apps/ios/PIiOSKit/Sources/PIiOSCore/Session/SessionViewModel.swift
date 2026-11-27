@@ -713,6 +713,12 @@ public final class SessionViewModel {
         expiredApprovalIds.insert(id)
     }
 
+    public func removeResolvedApproval(id: String) {
+        pendingApprovals.removeAll { $0.id == id }
+        expiredApprovalIds.remove(id)
+        explicitlyExpiredApprovals[id] = nil
+    }
+
     // MARK: 内部
 
     /// Apply a turn lifecycle event only after its durable sequence has been
@@ -752,6 +758,8 @@ public final class SessionViewModel {
             if activeTurnId == turnId {
                 activeTurnId = nil
                 activeItems.removeAll()
+            } else {
+                activeItems.removeAll { $0.turnId == turnId || (activeTurnId == nil && $0.turnId == nil) }
             }
             removeQueuedTurn(id: turnId)
         default:
@@ -792,9 +800,7 @@ public final class SessionViewModel {
         case "approval.resolved":
             guard let approvalId = event.payload.value(at: ["payload", "approvalId"])?.stringValue
             else { return }
-            pendingApprovals.removeAll { $0.id == approvalId }
-            expiredApprovalIds.remove(approvalId)
-            explicitlyExpiredApprovals[approvalId] = nil
+            removeResolvedApproval(id: approvalId)
         default:
             break
         }

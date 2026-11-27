@@ -41,6 +41,7 @@ final class AppModel: ObservableObject {
     }
 
     @Published var hosts: [HostRecord] = []
+    var pendingHostCredentialCleanup: [UUID: String] = [:]
     @Published var offlineCacheLimit: Int = PersistedState.defaultOfflineCacheLimit
     /// 运行日志配置（设置 → 日志）。读取自本机状态文件，改动立即生效并持久化。
     @Published var logConfiguration: PILogConfiguration = .default
@@ -70,6 +71,7 @@ final class AppModel: ObservableObject {
     var foregroundNotificationTransitionID: UUID?
     var deferredReadingPositionTask: Task<Void, Never>?
     var readingPositionsDirty = false
+    var readingPositionWriteGeneration: UInt64 = 0
     var automaticStatePersistenceTask: Task<Void, Never>?
     var automaticStatePersistencePending = false
     var canPersistLoadedState = true
@@ -125,6 +127,7 @@ final class AppModel: ObservableObject {
             outcome = StateFile.load()
         }
         hosts = outcome.state.hosts
+        pendingHostCredentialCleanup = outcome.state.pendingHostCredentialCleanup ?? [:]
         offlineCacheLimit = outcome.state.offlineCacheLimit
         modelProviders = outcome.state.modelProviders
         lastSessionId = outcome.state.lastSessionId
@@ -162,6 +165,7 @@ final class AppModel: ObservableObject {
             logStore.log(level: .warn, category: "StateFile", message: warning)
         }
         if seed == nil, !usesUITestFixture {
+            retryHostCredentialCleanup()
             migrateLegacyDeviceTokens()
             recoverPromotedInstallReceipts()
         }

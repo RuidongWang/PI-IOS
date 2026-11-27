@@ -7,6 +7,19 @@ import XCTest
 /// 断言走解码后的结构，而不是原始字符串：`JSONEncoder` 会把 `/` 转义成 `\/`，
 /// 拿字符串比对会把「编码器行为」当成契约失败。
 final class RACPCommandWireTests: XCTestCase {
+    func testConfigureUsesReturnedThinkingLevelIncludingExplicitNull() async throws {
+        for (session, expected) in [(#"{"id":"s","thinkingLevel":"low"}"#, "low"),
+                                    (#"{"id":"s","thinkingLevel":null}"#, nil),
+                                    (#"{"id":"s"}"#, "high")] as [(String, String?)] {
+            let socket = RevokeRecordingSocket(sessionReply: session)
+            let client = RACPClient(testingSocket: socket, subscriptionId: nil, subscribedSessionId: nil)
+            let pump = Task { for await data in socket.inbound { await client.receiveForTesting(data) } }
+            defer { pump.cancel() }
+            let result = try await client.configureSession(sessionId: "s", modelId: "target", thinkingLevel: .high)
+            XCTAssertEqual(result.thinkingLevel, expected)
+            await socket.close()
+        }
+    }
     func testContractApprovalGoldenUsesTheResolvedActionModeAndCardRevision() throws {
         let card = RACPApprovalRequest(id: "contract_1", payload: .object([
             "revision": .number(7), "allowedPermissionModes": .array([.string("ask"), .string("auto")]),
@@ -188,7 +201,9 @@ private final class RevokeRecordingSocket: RACPSocket, @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: RecordedRevokeRequest?
 
-    init() {
+    private let sessionReply: String?
+    init(sessionReply: String? = nil) {
+        self.sessionReply = sessionReply
         var sink: AsyncStream<Data>.Continuation!
         inbound = AsyncStream { sink = $0 }
         continuation = sink
@@ -210,10 +225,12 @@ private final class RevokeRecordingSocket: RACPSocket, @unchecked Sendable {
                 idempotencyKey: context?["idempotencyKey"] as? String
             )
         }
+        var result: [String: Any] = ["revoked": true]
+        if let sessionReply { result = ["session": try JSONSerialization.jsonObject(with: Data(sessionReply.utf8))] }
         let response = try JSONSerialization.data(withJSONObject: [
             "jsonrpc": "2.0",
             "id": id,
-            "result": ["revoked": true],
+            "result": result,
         ])
         continuation.yield(response)
     }

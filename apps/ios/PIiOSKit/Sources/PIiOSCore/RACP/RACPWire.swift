@@ -529,11 +529,7 @@ public struct RACPSessionSummary: Codable, Equatable, Sendable {
     public var readOnlyReason: String? = nil
     public var mode: RACPSessionMode?
     public var permissionMode: RACPPermissionMode?
-    // 注意：此处**不**声明 providerId / modelId / thinkingLevel。
-    // 上游 RacpSessionSchema（packages/shared/src/racp.ts）没有这三个字段，
-    // `session/get` 也不会返回它们——它们只是 session/create 与 session/configure 的入参。
-    // 「会话当前绑定哪个模型、是否可用」必须走删除增量里新增的只读查询能力，
-    // 不要在这个投影上建 AC-05.2 / AC-06.2 的 UI，否则拿到的恒为 nil。
+    public var thinkingLevel: String?
 }
 
 public struct RACPSessionListResult: Codable, Equatable, Sendable {

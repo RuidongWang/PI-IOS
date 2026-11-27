@@ -140,26 +140,34 @@ extension AppModel {
         next.hosts.removeAll { $0.id == id }
         if wasCurrent, !next.hosts.isEmpty { next.hosts[0].isCurrent = true }
         next.removeHostDerivedData(id, wasCurrent: wasCurrent)
-        guard persist(next) else { return false }
-
-        // 删除 host 只删本地记录与凭证（契约 §2.4），不动服务器上的任何东西。
         let account = KeychainStore.account(username: host.username, host: host.host, port: host.port)
-        let anotherHostUsesAccount = usesSSHAccount(account, excluding: id)
-        if !anotherHostUsesAccount {
-            KeychainStore.deleteCredential(account: account)
-            KeychainStore.deleteHostKey(account: account)
-        }
-        KeychainStore.deleteDeviceToken(
-            hostID: id,
-            legacyAccount: account,
-            deleteLegacy: !anotherHostUsesAccount
-        )
-        KeychainStore.deleteDirectTLSTrustPin(hostID: id)
-        applyHostDataRemoval(next, hostID: id, wasCurrent: wasCurrent)
+        var pending = pendingHostCredentialCleanup
+        pending[id] = account
+        next.pendingHostCredentialCleanup = pending
+        guard persist(next) else { return false }
+        pendingHostCredentialCleanup = pending
+        applyHostDataRemoval(next, hostID: id, wasCurrent: wasCurrent, cleanProviderKeys: false)
         if wasCurrent { connection.setCacheHostID(currentHost?.id) }
         if pendingHostID == id { pendingHostID = nil }
+        retryHostCredentialCleanup()
+        let cleaned = pendingHostCredentialCleanup[id] == nil
         await connection.flushPendingCacheWrites()
-        return true
+        return cleaned
+    }
+
+    func retryHostCredentialCleanup() {
+        guard !pendingHostCredentialCleanup.isEmpty else { return }
+        for (id, account) in pendingHostCredentialCleanup {
+            guard !hosts.contains(where: { $0.id == id }) else { continue }
+            let shared = usesSSHAccount(account, excluding: id)
+            guard shared || (KeychainStore.deleteCredential(account: account) && KeychainStore.deleteHostKey(account: account)),
+                  KeychainStore.deleteDeviceToken(hostID: id, legacyAccount: account, deleteLegacy: !shared),
+                  KeychainStore.deleteDirectTLSTrustPin(hostID: id),
+                  KeychainStore.deleteAllProviderKeys(hostID: id) else { continue }
+            pendingHostCredentialCleanup[id] = nil
+        }
+        _ = persist()
+        if !pendingHostCredentialCleanup.isEmpty { saveError = "服务器记录已删除，部分本机凭证尚未清除。解锁后重启应用会重试。" }
     }
 
     func usesSSHAccount(_ account: String, excluding id: UUID) -> Bool {
@@ -168,12 +176,12 @@ extension AppModel {
         }
     }
 
-    func applyHostDataRemoval(_ state: PersistedState, hostID id: UUID, wasCurrent: Bool) {
+    func applyHostDataRemoval(_ state: PersistedState, hostID id: UUID, wasCurrent: Bool, cleanProviderKeys: Bool = true) {
         // Provider 密钥按 host UUID + providerId 存储，而 UUID 在改绑/删除后可能
         // 指向另一台服务器。这里必须按前缀清掉全部历史 provider key（含 legacy
         // 与已从本机投影移除的 ID），否则新端点复用同名 providerId 时会取到旧
         // 服务器的密钥。失败时不能静默，留给用户可操作提示。
-        if !KeychainStore.deleteAllProviderKeys(hostID: id) {
+        if cleanProviderKeys && !KeychainStore.deleteAllProviderKeys(hostID: id) {
             showToast("部分旧服务的 API Key 未能从 Keychain 清除，请重启应用后重试")
         }
         hosts = state.hosts
@@ -184,7 +192,7 @@ extension AppModel {
         lastSessionByHost = state.lastSessionByHost
         collapsedProjectGroups = state.collapsedProjectGroups
         projectBrowserPaths = state.projectBrowserPaths
-        readingPositionsByHost = state.readingPositionsByHost
+        readingPositionsByHost[id.uuidString] = nil
         persistReadingPositionsIfNeeded()
         lastProjectId = state.lastProjectId
         lastSessionId = state.lastSessionId

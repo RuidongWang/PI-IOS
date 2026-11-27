@@ -23,6 +23,75 @@ final class StatePersistenceTests: XCTestCase {
     }
 
     @MainActor
+    func testRestartFinishesCredentialCleanupWithoutDeletingSharedSSHAccount() throws {
+        let deleted = UUID()
+        let remaining = HostRecord(id: UUID(), name: "Shared", host: "localhost", port: 22,
+                                   username: UUID().uuidString, authKind: .password, createdAt: Date(), isCurrent: true)
+        let account = KeychainStore.account(username: remaining.username, host: remaining.host, port: remaining.port)
+        defer {
+            KeychainStore.deleteCredential(account: account)
+            KeychainStore.deleteAllProviderKeys(hostID: deleted)
+        }
+        XCTAssertTrue(KeychainStore.saveCredential(.password("fixture"), kind: .password, account: account))
+        XCTAssertTrue(KeychainStore.saveProviderKey("fixture", hostID: deleted, providerId: "old", baseURL: "https://example.com"))
+        var state = PersistedState(hosts: [remaining])
+        state.pendingHostCredentialCleanup = [deleted: account]
+        try StateFile.save(state, to: stateURL)
+        let app = AppModel(stateFileURL: stateURL)
+        XCTAssertTrue(app.pendingHostCredentialCleanup.isEmpty)
+        XCTAssertNil(StateFile.load(from: stateURL).state.pendingHostCredentialCleanup)
+        XCTAssertEqual(KeychainStore.loadCredential(account: account), .password("fixture"))
+        XCTAssertEqual(KeychainStore.providerKeyStatus(hostID: deleted, providerId: "old"), errSecItemNotFound)
+    }
+
+    @MainActor
+    func testReadingPositionDeletionIsScopedAcrossRestart() async throws {
+        let first = HostRecord(id: UUID(), name: "A", host: "localhost", port: 22, username: UUID().uuidString, authKind: .password, createdAt: Date(), isCurrent: true)
+        var other = first
+        other.id = UUID()
+        other.isCurrent = false
+        let state = PersistedState(hosts: [first, other], sessionBindings: [.init(hostID: first.id, sessionID: "gone", projectID: "project")])
+        let model = AppModel(seed: state, stateFileURL: stateURL)
+        for (host, session) in [(first, "gone"), (first, "keep"), (other, "gone")] {
+            model.rememberReadingPosition(hostID: host.id, sessionID: session, lastVisibleItemID: "item", isNearBottom: false)
+        }
+        XCTAssertTrue(model.deleteProjectLocally(hostID: first.id, projectID: "project", name: "project"))
+        try await Task.sleep(for: .milliseconds(350))
+        let reloaded = AppModel(stateFileURL: stateURL)
+        XCTAssertNil(reloaded.readingPositionsByHost[first.id.uuidString]?["gone"])
+        XCTAssertNotNil(reloaded.readingPositionsByHost[first.id.uuidString]?["keep"])
+        XCTAssertNotNil(reloaded.readingPositionsByHost[other.id.uuidString]?["gone"])
+        let removed = await reloaded.deleteHost(id: first.id)
+        XCTAssertTrue(removed)
+        let final = AppModel(stateFileURL: stateURL)
+        XCTAssertNil(final.readingPositionsByHost[first.id.uuidString])
+        XCTAssertNotNil(final.readingPositionsByHost[other.id.uuidString]?["gone"])
+    }
+
+    @MainActor
+    func testReadingPositionWriteFailureReportsAndRetriesLatestPosition() async throws {
+        let model = AppModel(seed: .empty, stateFileURL: stateURL)
+        let positions = try XCTUnwrap(model.readingPositionsFileURL)
+        try FileManager.default.createDirectory(at: positions, withIntermediateDirectories: false)
+        let host = UUID()
+        model.rememberReadingPosition(hostID: host, sessionID: "session", lastVisibleItemID: "first", isNearBottom: false)
+        await model.deferredReadingPositionTask?.value
+        XCTAssertTrue(model.readingPositionsDirty)
+        model.rememberReadingPosition(hostID: host, sessionID: "session", lastVisibleItemID: "latest", isNearBottom: false)
+        let failed = await model.flushPersistentState()
+        XCTAssertFalse(failed)
+        XCTAssertTrue(model.readingPositionsDirty)
+        XCTAssertNotNil(model.saveError)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stateURL.path))
+        try FileManager.default.removeItem(at: positions)
+        let recovered = await model.flushPersistentState()
+        XCTAssertTrue(recovered)
+        XCTAssertFalse(model.readingPositionsDirty)
+        XCTAssertNil(model.saveError)
+        XCTAssertEqual(ReadingPositionStore.load(from: positions)?[host.uuidString]?["session"]?.lastVisibleItemID, "latest")
+    }
+
+    @MainActor
     func testFlushPersistsReadingPositionAndNewerSetting() async throws {
         let model = AppModel(seed: .empty, stateFileURL: stateURL)
         let hostID = UUID()

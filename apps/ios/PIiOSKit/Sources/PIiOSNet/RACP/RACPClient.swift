@@ -16,6 +16,8 @@ public actor RACPClient {
     let suppliedTransport: SSHTransport?
     let updates: AsyncStream<RACPClientUpdate>
     let continuation: AsyncStream<RACPClientUpdate>.Continuation
+    static let updateCapacity = 512
+    var updateStreamOverloaded = false
     let statusUpdates: AsyncStream<ConnectionStatus>
     let statusContinuation: AsyncStream<ConnectionStatus>.Continuation
     let sessionChangeClientID = UUID()
@@ -77,7 +79,7 @@ public actor RACPClient {
         self.connectionFactory = LiveRACPConnectionFactory()
         self.suppliedTransport = nil
         var sink: AsyncStream<RACPClientUpdate>.Continuation!
-        self.updates = AsyncStream<RACPClientUpdate>(bufferingPolicy: .bufferingOldest(256)) { sink = $0 }
+        self.updates = AsyncStream<RACPClientUpdate>(bufferingPolicy: .bufferingOldest(Self.updateCapacity)) { sink = $0 }
         self.continuation = sink
         var statusSink: AsyncStream<ConnectionStatus>.Continuation!
         self.statusUpdates = AsyncStream<ConnectionStatus>(bufferingPolicy: .bufferingOldest(64)) { statusSink = $0 }
@@ -98,7 +100,7 @@ public actor RACPClient {
         self.connectionFactory = connectionFactory
         self.suppliedTransport = nil
         var sink: AsyncStream<RACPClientUpdate>.Continuation!
-        self.updates = AsyncStream<RACPClientUpdate>(bufferingPolicy: .bufferingOldest(256)) { sink = $0 }
+        self.updates = AsyncStream<RACPClientUpdate>(bufferingPolicy: .bufferingOldest(Self.updateCapacity)) { sink = $0 }
         self.continuation = sink
         var statusSink: AsyncStream<ConnectionStatus>.Continuation!
         self.statusUpdates = AsyncStream<ConnectionStatus>(bufferingPolicy: .bufferingOldest(64)) { statusSink = $0 }
@@ -131,7 +133,7 @@ public actor RACPClient {
         self.connectionFactory = LiveRACPConnectionFactory()
         self.suppliedTransport = suppliedTransport
         var sink: AsyncStream<RACPClientUpdate>.Continuation!
-        self.updates = AsyncStream<RACPClientUpdate>(bufferingPolicy: .bufferingOldest(256)) { sink = $0 }
+        self.updates = AsyncStream<RACPClientUpdate>(bufferingPolicy: .bufferingOldest(Self.updateCapacity)) { sink = $0 }
         self.continuation = sink
         var statusSink: AsyncStream<ConnectionStatus>.Continuation!
         self.statusUpdates = AsyncStream<ConnectionStatus>(bufferingPolicy: .bufferingOldest(64)) { statusSink = $0 }
@@ -161,7 +163,7 @@ public actor RACPClient {
         self.connectionFactory = LiveRACPConnectionFactory()
         self.suppliedTransport = nil
         var sink: AsyncStream<RACPClientUpdate>.Continuation!
-        self.updates = AsyncStream<RACPClientUpdate>(bufferingPolicy: .bufferingOldest(256)) { sink = $0 }
+        self.updates = AsyncStream<RACPClientUpdate>(bufferingPolicy: .bufferingOldest(Self.updateCapacity)) { sink = $0 }
         self.continuation = sink
         var statusSink: AsyncStream<ConnectionStatus>.Continuation!
         self.statusUpdates = AsyncStream<ConnectionStatus>(bufferingPolicy: .bufferingOldest(64)) { statusSink = $0 }
@@ -254,12 +256,32 @@ public actor RACPClient {
     /// Opt in only when the single stream consumer uses begin/finish below.
     /// Legacy consumers keep lossless direct delivery by default. The catch-up
     /// signal also covers changes queued before the consumer enabled coalescing.
+    func yieldSessionChangeSignal() {
+        if yieldUpdate(.sessionChanged) { return }
+        sessionChangeDelivery.rollbackPending(sessionChangeKey)
+    }
+
+    @discardableResult
+    func yieldUpdate(_ update: RACPClientUpdate) -> Bool {
+        guard !updateStreamOverloaded else { return false }
+        guard case .enqueued(let remaining) = continuation.yield(update) else { return false }
+        if remaining == 1 {
+            updateStreamOverloaded = true
+            state = .updateBacklog
+            continuation.yield(.state(state))
+            continuation.finish()
+            runTask?.cancel()
+            Task { await stopBestEffort() }
+        }
+        return true
+    }
+
     public func enableSessionChangeCoalescing() {
         guard !sessionChangeCoalescingEnabled else { return }
         sessionChangeCoalescingEnabled = true
         guard initialHistoryPublicationSuspension == nil else { return }
         if sessionChangeDelivery.invalidate(sessionChangeKey) {
-            continuation.yield(.sessionChanged)
+            yieldSessionChangeSignal()
         }
     }
 
@@ -286,7 +308,7 @@ public actor RACPClient {
         guard sessionChangeCoalescingEnabled,
               initialHistoryPublicationSuspension == nil else { return }
         if sessionChangeDelivery.finish(receipt, key: sessionChangeKey) {
-            continuation.yield(.sessionChanged)
+            yieldSessionChangeSignal()
         }
     }
 

@@ -10,7 +10,7 @@ extension AppModel {
     // MARK: - 持久化
 
     var snapshot: PersistedState {
-        PersistedState(
+        var state = PersistedState(
             hosts: hosts,
             offlineCacheLimit: offlineCacheLimit,
             modelProviders: modelProviders,
@@ -25,6 +25,8 @@ extension AppModel {
             readingPositionsByHost: usesUITestFixture ? readingPositionsByHost : [:],
             logConfiguration: logConfiguration
         )
+        state.pendingHostCredentialCleanup = pendingHostCredentialCleanup.isEmpty ? nil : pendingHostCredentialCleanup
+        return state
     }
 
     @discardableResult

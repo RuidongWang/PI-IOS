@@ -84,7 +84,8 @@ enum KeychainStore {
 
     @discardableResult
     static func delete(service: String, account: String) -> Bool {
-        SecItemDelete(baseQuery(service: service, account: account) as CFDictionary) == errSecSuccess
+        let status = SecItemDelete(baseQuery(service: service, account: account) as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
     }
 
     // MARK: - 凭证
@@ -431,8 +432,8 @@ enum KeychainStore {
         let scoped = delete(service: Service.deviceToken, account: deviceTokenAccount(hostID: hostID))
         let legacy = deleteLegacy
             ? delete(service: Service.deviceToken, account: legacyAccount)
-            : false
-        return scoped || legacy
+            : true
+        return scoped && legacy
     }
 
     // MARK: - 主机指纹固定记录（TOFU，AC-02.1 / AC-02.2 / AC-02.3）

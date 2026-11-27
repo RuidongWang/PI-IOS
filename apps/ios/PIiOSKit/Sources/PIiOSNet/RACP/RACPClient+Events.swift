@@ -135,7 +135,9 @@ extension RACPClient {
             }
             switch viewModel.applyEvents([event]) {
             case .applied:
-                await emit(.event(event))
+                if !sessionChangeCoalescingEnabled || (event.kind != "item.delta" && event.kind != "tool.updated") {
+                    await emit(.event(event))
+                }
                 await emit(.sessionChanged)
                 if let sessionLease, let durableSequence = event.durableSequence {
                     let ack = PendingEventAck(
@@ -263,7 +265,13 @@ extension RACPClient {
         guard closesHost || closesSession else { return }
         if let subscriptionError = notice.error {
             let code = subscriptionError.normalizedCode
-            if code.isRetryable {
+            if code == .clientTooSlow, closesSession {
+                subscriptionId = nil
+                pendingSessionAck = nil
+                if await rebuildFromSnapshot(from: socket) == .failed { await socket.abort(.transportAborted) }
+                return
+            }
+            if code.isRetryable && code != .clientTooSlow {
                 await emit(.error(code: code, message: subscriptionError.message))
                 await socket.abort(.transportAborted)
                 return

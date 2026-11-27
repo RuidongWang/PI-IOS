@@ -31,6 +31,12 @@ struct StateFileRegression {
         let valid = StateFile.load(from: file)
         precondition(valid.canSave && valid.state.marker == "saved")
 
+        let future = Data(#"{"version":2,"marker":{"new":true}}"#.utf8)
+        try future.write(to: file)
+        precondition(!StateFile.load(from: file).canSave)
+        let preserved = try Data(contentsOf: file)
+        precondition(preserved == future)
+
         try Data("broken".utf8).write(to: file)
         let corrupt = StateFile.load(from: file)
         precondition(corrupt.canSave && corrupt.warning != nil)

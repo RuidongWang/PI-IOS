@@ -4,6 +4,7 @@ import SQLite3
 public enum OfflineSessionCacheSQLiteError: Error, LocalizedError {
     case decryptionFailed
     case migrationIncomplete
+    case unsupportedVersion(Int32)
 
     public var errorDescription: String? {
         switch self {
@@ -11,6 +12,8 @@ public enum OfflineSessionCacheSQLiteError: Error, LocalizedError {
             return "离线缓存敏感字段解密失败（Keychain 不可用或密钥失效），已阻止以空值覆盖原缓存"
         case .migrationIncomplete:
             return "旧版缓存迁移未完成"
+        case .unsupportedVersion(let version):
+            return "离线缓存版本 \(version) 不受支持，已保留原文件"
         }
     }
 }
@@ -48,6 +51,9 @@ public final class OfflineSessionCacheSQLite {
         database = handle
         sqlite3_busy_timeout(handle, 5_000)
         do {
+            if let version = try query("PRAGMA user_version", { sqlite3_column_int($0, 0) }).first, !(0...2).contains(version) {
+                throw OfflineSessionCacheSQLiteError.unsupportedVersion(version)
+            }
             try execute("PRAGMA journal_mode=WAL")
             try execute("PRAGMA synchronous=NORMAL")
             try execute("PRAGMA secure_delete=ON")
@@ -83,9 +89,10 @@ public final class OfflineSessionCacheSQLite {
         // If legacy JSON still exists alongside databaseURL, check if databaseURL was left
         // incomplete from a previous interrupted migration attempt.
         if dbExists && legacyExists {
-            if let existing = try? OfflineSessionCacheSQLite(url: databaseURL).loadSnapshot(),
-               (!existing.sessions.isEmpty || !existing.entries.isEmpty) {
-                try? FileManager.default.removeItem(at: legacyURL)
+            let database = try OfflineSessionCacheSQLite(url: databaseURL)
+            let existing = try database.loadSnapshot()
+            if !existing.sessions.isEmpty || !existing.entries.isEmpty || !existing.drafts.isEmpty || !existing.approvals.isEmpty || !existing.cursors.isEmpty {
+                try FileManager.default.removeItem(at: legacyURL)
                 return existing
             }
             try? FileManager.default.removeItem(at: databaseURL)

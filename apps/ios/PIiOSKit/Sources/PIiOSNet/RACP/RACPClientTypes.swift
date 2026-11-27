@@ -9,6 +9,7 @@ import PIiOSCore
 public enum RACPTunnelState: Equatable, Sendable {
     /// 未连接；`reason` 为上次失败原因。
     case offline(reason: String?)
+    case updateBacklog
     case connecting
     /// 正在等用户核对主机指纹（S-04「核对指纹」）。
     case verifyingHostKey(fingerprint: String, status: HostKeyTrustStatus)
@@ -20,7 +21,7 @@ public enum RACPTunnelState: Equatable, Sendable {
 
     public var displayText: String {
         switch self {
-        case .offline: return "未连接"
+        case .offline, .updateBacklog: return "未连接"
         case .connecting: return "连接中"
         case .verifyingHostKey: return "等待核对指纹"
         case .authenticating: return "认证中"
@@ -48,6 +49,8 @@ public struct RACPServerInfo: Equatable, Sendable {
     public var capabilities: JSONValue?
     /// `server.piVersion`：PI-adaptor 自带并返回的 Pi 版本。
     public var piVersion: String?
+    public var allowedPermissionModes: [RACPPermissionMode] = [.ask]
+    public var allowedSessionModes: [RACPSessionMode] = [.agent]
 
     public init(
         protocolVersion: String,
@@ -563,6 +566,8 @@ struct RACPInitializeResult: Decodable {
     }
 
     struct Policy: Decodable {
+        var allowedPermissionModes: [String]?
+        var allowedSessionModes: [String]?
         var remoteMaxPermissionMode: String?
         var applyCeilingToPairedDevices: Bool?
     }
@@ -577,7 +582,7 @@ struct RACPInitializeResult: Decodable {
 
     func serverInfo() -> RACPServerInfo {
         let trimmedPiVersion = server?.piVersion?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return RACPServerInfo(
+        var info = RACPServerInfo(
             protocolVersion: protocolVersion,
             serverName: server?.name ?? "",
             serverVersion: server?.version ?? "",
@@ -589,6 +594,9 @@ struct RACPInitializeResult: Decodable {
             capabilities: capabilities,
             piVersion: trimmedPiVersion?.isEmpty == false ? trimmedPiVersion : nil
         )
+        info.allowedPermissionModes = policy?.allowedPermissionModes?.compactMap(RACPPermissionMode.init(rawValue:)) ?? [.ask]
+        info.allowedSessionModes = policy?.allowedSessionModes?.compactMap(RACPSessionMode.init(rawValue:)) ?? [.agent]
+        return info
     }
 }
 

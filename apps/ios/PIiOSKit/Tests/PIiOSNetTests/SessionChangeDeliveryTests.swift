@@ -4,6 +4,18 @@ import XCTest
 @testable import PIiOSNet
 
 final class SessionChangeDeliveryTests: XCTestCase {
+    func testStalledReliableConsumerGetsBoundedPrefixAndExplicitDisconnect() async {
+        let client = makeClient()
+        let stream = await client.stream()
+        for index in 0..<1_000 {
+            await client.emitUpdateForTesting(.error(code: .invalidArgument, message: String(index)))
+        }
+        var count = 0
+        var final: RACPClientUpdate?
+        for await update in stream { count += 1; final = update }
+        XCTAssertEqual(count, RACPClient.updateCapacity)
+        guard case .state(.updateBacklog) = final else { return XCTFail("Missing overflow disconnect") }
+    }
     func testThousandInvalidationsCoalesceWhileReliableUpdatesKeepOrderAndCount() async throws {
         let client = makeClient()
         let stream = await client.stream()
@@ -147,6 +159,77 @@ final class SessionChangeDeliveryTests: XCTestCase {
             XCTAssertEqual(statistics.deliveries, enabled ? 1 : 0)
             await client.stop()
         }
+    }
+
+    func testRollbackPendingClearsUndeliveredSignalSoFutureInvalidationsStillEmit() throws {
+        let key = SessionChangeDelivery.Key(
+            client: UUID(),
+            generation: UUID(),
+            session: "session",
+            attachmentGeneration: 1
+        )
+        var delivery = SessionChangeDelivery()
+        XCTAssertTrue(delivery.invalidate(key))
+        XCTAssertEqual(delivery.statistics.deliveries, 1)
+        XCTAssertEqual(delivery.statistics.queued, 1)
+        // Simulate stream dropping/failing to enqueue before consumer begins.
+        delivery.rollbackPending(key)
+        XCTAssertEqual(delivery.statistics.deliveries, 0)
+        XCTAssertEqual(delivery.statistics.queued, 0)
+        XCTAssertNil(delivery.begin(key))
+        // Subsequent invalidation must not coalesce onto the rolled-back signal.
+        XCTAssertTrue(delivery.invalidate(key))
+        XCTAssertNotNil(delivery.begin(key))
+    }
+
+    func testBurstOver256EventsBeforeConsumptionDoesNotDropOrWedgeSessionChanged() async throws {
+        let client = makeClient()
+        let stream = await client.stream()
+        var iterator = stream.makeAsyncIterator()
+        await client.enableSessionChangeCoalescing()
+
+        let initial = await iterator.next()
+        XCTAssertEqual(initial.map(Self.label), "sessionChanged")
+        let firstReceiptValue = await client.beginSessionChangeConsumption()
+        let firstReceipt = try XCTUnwrap(firstReceiptValue)
+
+        let started = """
+        {"jsonrpc":"2.0","method":"events/event","params":{"event":{"scope":"session","kind":"turn.started","epoch":"epoch","sequence":1,"sessionId":"session","turnId":"turn_burst","payload":{"turn":{"id":"turn_burst","status":"running"}}}}}
+        """
+        await client.receiveForTesting(Data(started.utf8))
+
+        for sequence in 2...401 {
+            let delta = """
+            {"jsonrpc":"2.0","method":"events/event","params":{"event":{"scope":"session","kind":"item.delta","epoch":"epoch","sequence":\(sequence),"sessionId":"session","turnId":"turn_burst","payload":{"itemId":"itm_burst","delta":"x"}}}}
+            """
+            await client.receiveForTesting(Data(delta.utf8))
+        }
+
+        let completed = """
+        {"jsonrpc":"2.0","method":"events/event","params":{"event":{"scope":"session","kind":"turn.completed","epoch":"epoch","sequence":402,"sessionId":"session","turnId":"turn_burst","payload":{"turn":{"id":"turn_burst","status":"completed"}}}}}
+        """
+        await client.receiveForTesting(Data(completed.utf8))
+
+        await client.finishSessionChangeConsumption(firstReceipt)
+        await client.emitUpdateForTesting(.error(code: .invalidArgument, message: "END"))
+
+        var labels: [String] = []
+        while let update = await iterator.next() {
+            if case .error(_, let message) = update, message == "END" { break }
+            labels.append(Self.label(update))
+        }
+
+        XCTAssertEqual(labels.filter { $0.hasPrefix("event:") }, ["event:1", "event:402"])
+        XCTAssertTrue(labels.contains("sessionChanged"), "sessionChanged must not be dropped or wedged after >256 buffered events")
+        let nextReceipt = await client.beginSessionChangeConsumption()
+        XCTAssertNotNil(nextReceipt)
+        if let nextReceipt {
+            await client.finishSessionChangeConsumption(nextReceipt)
+        }
+        let view = await client.sessionView()
+        XCTAssertNil(view.runningTurnId)
+        XCTAssertTrue(view.activeItems.isEmpty)
+        await client.stop()
     }
 
     private func makeClient() -> RACPClient {

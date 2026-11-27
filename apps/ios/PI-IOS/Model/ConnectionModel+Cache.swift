@@ -115,17 +115,10 @@ extension ConnectionModel {
                 state = .offline(reason: "本机没有保存这台服务器的凭证")
                 return
             }
-            hostPort = await resolveHostPort(
-                record: record,
-                credential: credential,
-                account: account,
-                pinned: pinned
-            )
-            guard hostPort != nil else {
-                PILog.warn("Connection", "connect failed host=\(hostLabel) category=hostPortUnresolved")
-                state = .offline(reason: "无法确定 PI-adaptor 端口：SSH 探测失败且未记录端口")
-                return
+            hostPort = await portForConnection(hostID: record.id, intent: intent) {
+                await resolveHostPort(record: record, credential: credential, account: account, pinned: pinned)
             }
+            guard hostPort != nil else { return }
         }
         if intent == connectionIntentGeneration, cacheHostID == record.id,
            !activeAdaptorInstalls.contains(record.id),
@@ -171,6 +164,7 @@ extension ConnectionModel {
         let generation = connectionGeneration
         invalidateCatalogLoads()
         session.bind(client: newClient, online: false, preserveView: preserveSessionView)
+        await newClient.enableSessionChangeCoalescing()
         let stream = await newClient.start()
         guard self.client === newClient, connectionGeneration == generation else {
             connectLogStartedAt = nil
@@ -183,7 +177,6 @@ extension ConnectionModel {
             return
         }
         updateTask = Task { [weak self] in
-            await newClient.enableSessionChangeCoalescing()
             guard !Task.isCancelled else { return }
             for await update in stream {
                 await self?.apply(update, client: newClient, generation: generation)
@@ -270,6 +263,16 @@ extension ConnectionModel {
         }
     }
 
+    func portForConnection(hostID: UUID, intent: Int, probe: () async -> Int?) async -> Int? {
+        let port = await probe()
+        guard intent == connectionIntentGeneration, cacheHostID == hostID else { return nil }
+        if port == nil {
+            PILog.warn("Connection", "connect failed host=\(hostID.uuidString.prefix(8)) category=hostPortUnresolved")
+            state = .offline(reason: "无法确定 PI-adaptor 端口：SSH 探测失败且未记录端口")
+        }
+        return port
+    }
+
     func prepareHostConnection(_ requested: HostRecord) -> HostRecord? {
         if let onPrepareHostConnection { return onPrepareHostConnection(requested.id) }
         return requested
@@ -303,6 +306,7 @@ extension ConnectionModel {
                 if case .state(.offline(let reason)) = update {
                     throw RACPClientError.protocolMismatch(reason ?? "direct candidate 未能上线")
                 }
+                if case .state(.updateBacklog) = update { throw RACPClientError.notConnected }
             }
             guard reachedInitialOnline,
                   !Task.isCancelled,
@@ -910,8 +914,10 @@ extension ConnectionModel {
                 lastError = nil
                 await refreshRemote()
                 await session.refreshView(source: "connectionOnline")
-                await refreshExtensionInventory()
-                if let id = session.attachedSessionId { await refreshSessionExtensions(id) }
+                scheduleExtensionInventoryRefresh(client: client, generation: generation)
+                if let id = session.attachedSessionId {
+                    scheduleSessionExtensionRefresh(id, client: client, generation: generation)
+                }
                 scheduleCacheSessionState()
             } else {
                 cancelHostCatalogRefresh()
@@ -933,7 +939,9 @@ extension ConnectionModel {
             let snapshotGeneration = await client.sessionSnapshotGeneration()
             if extensionSnapshotGeneration != snapshotGeneration {
                 extensionSnapshotGeneration = snapshotGeneration
-                if let id = session.attachedSessionId { await refreshSessionExtensions(id) }
+                if let id = session.attachedSessionId {
+                    scheduleSessionExtensionRefresh(id, client: client, generation: generation)
+                }
             }
             await client.finishSessionChangeConsumption(receipt)
         case .event(let event):
@@ -942,7 +950,7 @@ extension ConnectionModel {
                 guard self.client === client, connectionGeneration == generation else { return }
                 if let snapshot, snapshot.sessionId == session.attachedSessionId,
                    extensions.observe(snapshot, epoch: event.epoch, sequence: event.durableSequence) {
-                    await refreshSessionExtensions(snapshot.sessionId)
+                    scheduleSessionExtensionRefresh(snapshot.sessionId, client: client, generation: generation)
                 }
             } else if event.kind == "turn.completed" || event.kind == "turn.failed"
                         || event.kind == "turn.interrupted" || event.kind == "turn.canceled" {
@@ -954,10 +962,37 @@ extension ConnectionModel {
                     uiTestTerminalTurn = outcome
                 }
 #endif
-                if let id = session.attachedSessionId { await refreshSessionExtensions(id) }
+                if let id = session.attachedSessionId {
+                    scheduleSessionExtensionRefresh(id, client: client, generation: generation)
+                }
             }
         case .error(let code, _):
             lastError = ConnectionFailureClassifier.userMessage(forRACPCode: code)
+        }
+    }
+
+    private func scheduleExtensionInventoryRefresh(
+        client: RACPClient,
+        generation: Int
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self, self.client === client, self.connectionGeneration == generation else { return }
+            await self.refreshExtensionInventory()
+        }
+    }
+
+    private func scheduleSessionExtensionRefresh(
+        _ sessionID: String,
+        client: RACPClient,
+        generation: Int
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self,
+                  self.client === client,
+                  self.connectionGeneration == generation,
+                  self.session.attachedSessionId == sessionID
+            else { return }
+            await self.refreshSessionExtensions(sessionID)
         }
     }
 
@@ -1106,6 +1141,7 @@ extension ConnectionModel {
     /// 连接中（connecting/authenticating/handshaking）同样属于链路侧状态。
     var isTransientDisconnect: Bool {
         switch state {
+        case .updateBacklog: return false
         case .offline(let reason):
             return reason == nil
         default:

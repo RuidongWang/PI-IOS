@@ -622,6 +622,10 @@ extension RACPClient {
         timeout: TimeInterval = 30
     ) async throws -> RACPTurnStartResult {
         let attachGeneration = sessionAttachGeneration
+        if attachedSession?.id == sessionId, attachedSession?.mode == .plan,
+           serverInfo?.allowedSessionModes.contains(.plan) != true {
+            throw RACPClientError.server(code: .capabilityUnavailable, message: "当前服务器不支持 Plan 执行，请先切回 Agent。")
+        }
         if self.sessionId == sessionId, let reason = attachedSession?.readOnlyReason {
             throw RACPClientError.server(code: .sessionReadOnly, message: reason)
         }
@@ -864,6 +868,12 @@ extension RACPClient {
         await emit(.sessionChanged)
     }
 
+    public func removeResolvedApproval(id: String, sessionID: String) async {
+        guard attachedSession?.id == sessionID else { return }
+        viewModel.removeResolvedApproval(id: id)
+        await emit(.sessionChanged)
+    }
+
     // MARK: - 配置 / 项目 / 设备
 
     /// 切换模型、档位、会话模式与权限模式（AC-07.1）。只下发调用方明确给出的字段。
@@ -883,7 +893,9 @@ extension RACPClient {
             thinkingLevel: thinkingLevel,
             permissionMode: permissionMode
         )
-        let result: RACPSessionConfigureResult = try await request(.sessionConfigure, params: params)
+        let value = try await requestJSON(.sessionConfigure, params: params, timeout: 20)
+        var result = try RACPSessionConfigureResult.decoded(from: value)
+        if value.value(at: ["session", "thinkingLevel"]) == nil { result.session.thinkingLevel = thinkingLevel?.rawValue }
         if attachedSession?.id == result.session.id { attachedSession = result.session }
         return result.session
     }

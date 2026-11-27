@@ -613,6 +613,7 @@ extension RACPClient {
 
 
     func emit(_ update: RACPClientUpdate) async {
+        guard !updateStreamOverloaded else { return }
         if case let .state(newState) = update {
             state = newState
         }
@@ -623,9 +624,11 @@ extension RACPClient {
         }
         if case .sessionChanged = update, sessionChangeCoalescingEnabled {
             guard sessionChangeDelivery.invalidate(sessionChangeKey) else { return }
+            yieldSessionChangeSignal()
+            return
         }
         // Reliable updates are always yielded directly, in their original order.
-        continuation.yield(update)
+        yieldUpdate(update)
     }
 
     func emitPhase(_ phase: ConnectionPhase) async {

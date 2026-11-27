@@ -7,6 +7,30 @@ import PIiOSNet
 
 @MainActor
 final class ConnectionLifecycleTests: XCTestCase {
+    func testLatePortFailureCannotDisconnectReplacementHost() async {
+        let model = ConnectionModel()
+        let first = UUID(), second = UUID()
+        model.cacheHostID = first
+        let stale = await model.portForConnection(hostID: first, intent: model.connectionIntentGeneration) {
+            model.connectionIntentGeneration += 1
+            model.cacheHostID = second
+            model.state = .online
+            return nil
+        }
+        XCTAssertNil(stale)
+        XCTAssertTrue(model.state.isOnline)
+        _ = await model.portForConnection(hostID: second, intent: model.connectionIntentGeneration) { nil }
+        XCTAssertFalse(model.state.isOnline)
+    }
+
+    func testLocalBacklogKeepsReconnectHintWithoutDisplayingRemoteText() {
+        let local = ConnectionModel.sanitizedForDisplay(.updateBacklog)
+        XCTAssertFalse(local.isOnline)
+        XCTAssertEqual(local.detail, "更新积压，请重新连接以同步会话。")
+        let remote = ConnectionModel.sanitizedForDisplay(.offline(reason: "private upstream detail"))
+        XCTAssertNotEqual(remote.detail, "private upstream detail")
+        XCTAssertNotEqual(remote.detail, local.detail)
+    }
     func testDisconnectInvalidatesActiveAndCandidateBeforeDelayedFlush() async throws {
         let model = ConnectionModel()
         let host = makeHost()

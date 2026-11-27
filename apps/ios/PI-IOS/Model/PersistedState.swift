@@ -124,6 +124,7 @@ struct PersistedState: Codable, Equatable {
     static let maxCachedConversations = 20
 
     var version: Int
+    var pendingHostCredentialCleanup: [UUID: String]?
     var hosts: [HostRecord]
     /// 每会话保留的完整轮次数；字段名仅为旧状态文件兼容，不表示 item 条数。
     var offlineCacheLimit: Int
@@ -182,7 +183,7 @@ struct PersistedState: Codable, Equatable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case version
+        case version, pendingHostCredentialCleanup
         case hosts
         case offlineCacheLimit
         case modelProviders
@@ -202,6 +203,7 @@ struct PersistedState: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        pendingHostCredentialCleanup = try container.decodeIfPresent([UUID: String].self, forKey: .pendingHostCredentialCleanup)
         hosts = try container.decodeIfPresent([HostRecord].self, forKey: .hosts) ?? []
         let limit = try container.decodeIfPresent(Int.self, forKey: .offlineCacheLimit)
             ?? PersistedState.defaultOfflineCacheLimit

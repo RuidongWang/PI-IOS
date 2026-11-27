@@ -71,6 +71,7 @@ extension RACPTunnelState {
         switch self {
         case .online: return .success
         case .offline: return .info
+        case .updateBacklog: return .warning
         case .reconnecting, .verifyingHostKey: return .warning
         case .connecting, .authenticating, .handshaking: return .info
         }
@@ -80,6 +81,7 @@ extension RACPTunnelState {
     var detail: String? {
         switch self {
         case .offline(let reason): return reason
+        case .updateBacklog: return "更新积压，请重新连接以同步会话。"
         case .reconnecting(let attempt, let delay, let reason):
             return "第 \(attempt) 次重连 · \(Int(delay)) 秒后重试 · \(reason)"
         case .verifyingHostKey(_, let status):

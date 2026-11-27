@@ -89,17 +89,18 @@ enum StateFile {
         do {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            let state = try decoder.decode(PersistedState.self, from: data)
-            guard state.version <= PersistedState.supportedVersion else {
+            struct Header: Decodable { let version: Int? }
+            let version = try decoder.decode(Header.self, from: data).version ?? 1
+            guard version <= PersistedState.supportedVersion else {
                 // 未来版本的 schema：当前代码只认识一部分字段，继续读写会丢数据。
                 // 禁止保存（canSave=false），并明确提示用户升级 App。
                 return LoadOutcome(
                     state: .empty,
-                    warning: "本机状态文件来自更高版本的 App（schema v\(state.version)），当前版本只支持 v\(PersistedState.supportedVersion)。为避免丢失数据，已停止写入；请升级 App 后重试。",
+                    warning: "本机状态文件来自更高版本的 App（schema v\(version)），当前版本只支持 v\(PersistedState.supportedVersion)。为避免丢失数据，已停止写入；请升级 App 后重试。",
                     canSave: false
                 )
             }
-            return LoadOutcome(state: state, warning: nil)
+            return LoadOutcome(state: try decoder.decode(PersistedState.self, from: data), warning: nil)
         } catch {
             // 解析失败不直接覆盖：先把原文件改名备份，再以空数据启动，并如实告知备份文件名。
             let backupName = renameToCorruptBackup(url: url)

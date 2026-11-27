@@ -758,6 +758,44 @@ final class SessionViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.item(id: "answer")?.text, "completed body")
     }
 
+    func testTerminalTurnEventClearsMatchingAndOrphanActiveItemsWhenActiveTurnIdIsNil() {
+        let viewModel = SessionViewModel()
+        viewModel.applyEvents([
+            RACPEvent(
+                sequence: 1,
+                epoch: "ep_orphan",
+                item: RACPItem(
+                    id: "itm_orphan",
+                    payload: .object([
+                        "id": .string("itm_orphan"),
+                        "turnId": .string("turn_orphan"),
+                        "kind": .string("message"),
+                        "status": .string("streaming"),
+                        "text": .string("partial"),
+                    ])
+                ),
+                payload: .object(["kind": .string("item.started")])
+            ),
+            RACPEvent(
+                sequence: 2,
+                epoch: "ep_orphan",
+                payload: .object([
+                    "kind": .string("turn.completed"),
+                    "turnId": .string("turn_orphan"),
+                ])
+            ),
+        ])
+
+        XCTAssertNil(viewModel.activeTurnId)
+        XCTAssertTrue(viewModel.activeItems.isEmpty)
+        XCTAssertFalse(
+            TurnQueuePolicy.isRunning(
+                activeItemCount: viewModel.activeItems.count,
+                runningTurnId: viewModel.activeTurnId
+            )
+        )
+    }
+
     // MARK: - 工具
 
     private func item(_ id: String, text: String) -> RACPItem {
@@ -780,6 +818,17 @@ final class SessionViewModelTests: XCTestCase {
         XCTAssertEqual(model.pendingApprovals.count, 1)
         model.applyEvents([approvalEvent(kind: "approval.resolved", sequence: 32, id: "ap_live", revision: 1)])
         XCTAssertTrue(model.pendingApprovals.isEmpty)
+    }
+
+    func testAlreadyResolvedReceiptRemovesOnlyMatchingApproval() {
+        let model = SessionViewModel()
+        model.applyEvents([approvalEvent(kind: "approval.requested", sequence: 31, id: "first", revision: 1),
+                           approvalEvent(kind: "approval.requested", sequence: 32, id: "second", revision: 2)])
+        model.markApprovalExpired(id: "first")
+        model.removeResolvedApproval(id: "first")
+        model.removeResolvedApproval(id: "first")
+        XCTAssertEqual(model.pendingApprovals.map(\.id), ["second"])
+        XCTAssertFalse(model.expiredApprovalIds.contains("first"))
     }
 
     private func approvalEvent(kind: String, sequence: Int, id: String, revision: Int) -> RACPEvent {

@@ -67,7 +67,7 @@ struct SessionConfigSheet: View {
                     // quiet-v2 §6.3：配置组不再用 footer 解释协议名。单选控件用勾选表达状态，
                     // 选择即提交，用户从行本身就能读懂。
                     PIGroup("权限模式") {
-                        let modes = RACPPermissionMode.allCases
+                        let modes = RACPPermissionMode.allCases.filter { model.connection.info?.allowedPermissionModes.contains($0) ?? ($0 == .ask) }
                         ForEach(Array(modes.enumerated()), id: \.element) { index, mode in
                             configOptionRow(
                                 title: mode.title,
@@ -80,7 +80,7 @@ struct SessionConfigSheet: View {
                         }
                     }
                     PIGroup("会话模式") {
-                        let modes = RACPSessionMode.allCases
+                        let modes = RACPSessionMode.allCases.filter { model.connection.info?.allowedSessionModes.contains($0) ?? ($0 == .agent) }
                         ForEach(Array(modes.enumerated()), id: \.element) { index, mode in
                             configOptionRow(
                                 title: mode.title,

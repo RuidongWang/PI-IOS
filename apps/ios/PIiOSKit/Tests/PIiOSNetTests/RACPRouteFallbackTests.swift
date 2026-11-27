@@ -68,6 +68,7 @@ final class RACPRouteFallbackTests: XCTestCase {
             "piVersion": " 1.6.0 "
           },
           "connectionId": "conn-1",
+          "policy": {"allowedPermissionModes":["ask","unknown","auto"],"allowedSessionModes":["agent"]},
           "roles": ["owner"]
         }
         """.utf8)
@@ -75,6 +76,8 @@ final class RACPRouteFallbackTests: XCTestCase {
         XCTAssertEqual(info.serverName, "pi-adaptor")
         XCTAssertEqual(info.serverVersion, "0.0.9")
         XCTAssertEqual(info.piVersion, "1.6.0")
+        XCTAssertEqual(info.allowedPermissionModes, [.ask, .auto])
+        XCTAssertEqual(info.allowedSessionModes, [.agent])
 
         let emptyPiPayload = Data("""
         {
@@ -89,6 +92,8 @@ final class RACPRouteFallbackTests: XCTestCase {
         """.utf8)
         let emptyInfo = try JSONDecoder().decode(RACPInitializeResult.self, from: emptyPiPayload).serverInfo()
         XCTAssertNil(emptyInfo.piVersion)
+        XCTAssertEqual(emptyInfo.allowedPermissionModes, [.ask])
+        XCTAssertEqual(emptyInfo.allowedSessionModes, [.agent])
     }
 
     func testPromotionFenceBlocksBusinessWriteButKeepsReadOnlyPing() async throws {

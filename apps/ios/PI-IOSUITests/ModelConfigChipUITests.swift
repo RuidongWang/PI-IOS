@@ -33,7 +33,7 @@ final class ModelConfigChipUITests: XCTestCase {
             "会话配置必须保留四个分组"
         )
         XCTAssertTrue(app.descendants(matching: .any)["conversation.config.mode.agent"].exists)
-        XCTAssertTrue(app.descendants(matching: .any)["conversation.config.mode.plan"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["conversation.config.mode.plan"].exists)
         XCTAssertFalse(
             app.descendants(matching: .any)["conversation.config.mode.goal"].exists,
             "Goal 是审批类型，不能作为 Host 不支持的会话模式展示"

@@ -71,6 +71,16 @@ struct SessionChangeDelivery {
 
     mutating func revoke() { current = nil }
 
+    /// Rolls back an unconsumed pending delivery when the underlying stream
+    /// fails to enqueue `.sessionChanged`, preventing subsequent invalidations
+    /// from coalescing onto a lost signal forever.
+    mutating func rollbackPending(_ key: Key) {
+        guard let delivery = current, delivery.key == key, !delivery.consuming else { return }
+        queuedReceipts.removeAll { $0 == delivery.id }
+        current = nil
+        counts.deliveries = max(0, counts.deliveries - 1)
+    }
+
     var statistics: Statistics {
         var result = counts
         result.queued = queuedReceipts.count

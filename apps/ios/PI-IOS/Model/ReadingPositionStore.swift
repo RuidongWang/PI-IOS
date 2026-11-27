@@ -31,23 +31,7 @@ enum ReadingPositionStore {
         ioQueue.sync { saveUnlocked(positions, to: url) }
     }
 
-    static func enqueueSave(
-        _ positions: [String: [String: ConversationReadingPosition]],
-        to url: URL? = defaultFileURL
-    ) {
-        ioQueue.async {
-            _ = saveUnlocked(positions, to: url)
-        }
-    }
-
-    static func waitForPendingWrites() async {
-        await withCheckedContinuation { continuation in
-            ioQueue.async {
-                continuation.resume()
-            }
-        }
-    }
-
+    @MainActor
     static func saveAsync(
         _ positions: [String: [String: ConversationReadingPosition]],
         to url: URL? = defaultFileURL

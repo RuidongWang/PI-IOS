@@ -193,6 +193,21 @@ final class OfflineSessionCacheSQLiteTests: XCTestCase {
         XCTAssertEqual(try OfflineSessionCacheSQLite(url: databaseURL).loadSnapshot().entries.first?.text, "preserved")
     }
 
+    func testFutureDatabaseIsPreservedEvenAlongsideLegacyFile() throws {
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(databaseURL.path, &handle), SQLITE_OK)
+        try execute("PRAGMA user_version=3", on: XCTUnwrap(handle))
+        sqlite3_close(handle)
+        let original = try Data(contentsOf: databaseURL)
+        let legacy = directory.appendingPathComponent("legacy.json")
+        try Data("{}".utf8).write(to: legacy)
+        XCTAssertThrowsError(try OfflineSessionCacheSQLite(url: databaseURL))
+        XCTAssertThrowsError(try OfflineSessionCacheSQLite.migrateLegacyJSON(from: legacy, to: databaseURL))
+        XCTAssertEqual(try Data(contentsOf: databaseURL), original)
+        XCTAssertEqual(try userVersion(), 3)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path))
+    }
+
     func testCorruptDatabaseIsRejectedAndNotOverwritten() throws {
         let original = Data("not a sqlite database".utf8)
         try original.write(to: databaseURL)
